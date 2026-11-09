@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager / Xcode build artifacts
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+userdata/
+
+# Built application bundle & packaging
+*.app/
+Paste Vault.app
+/Paste Vault.app
+AppIcon.iconset/
+/AppIcon.icns
+Backups/
+Releases/
+*.command
+*.zip
+*.dmg
+
+# User backups, databases & exports
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*Backup*.json
+*.pastevault
+*.log
+
+# Internal project context, logs & roadmap
+PROJECT_CONTEXT.md
+ROADMAP_IDEAS.md
+DEVELOPMENT_LOG.md
+CHANGELOG.md
+docs/
