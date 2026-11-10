@@ -12,11 +12,11 @@ public enum SmartClassifier {
     )
 
     public static func classify(text: String, isSensitive: Bool, isImage: Bool = false) -> ContentKind {
-        if isImage || text.hasPrefix("[Скриншот") { return .image }
-        if text.hasPrefix("[Файл") { return .file }
+        if isImage || text.hasPrefix("[Скриншот") || text.hasPrefix("[Screenshot") { return .image }
+        if text.hasPrefix("[Файл") || text.hasPrefix("[File") { return .file }
         if isSensitive { return .secret }
 
-        let sample = String(text.prefix(1024)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let sample = String(text.prefix(12_000)).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sample.isEmpty else { return .text }
 
         // 1. Проверка на цвет (#HEX, rgb(), rgba(), hsl(), hsla())
@@ -31,8 +31,18 @@ public enum SmartClassifier {
             return .url
         }
 
-        // 3. Проверка на JSON или исходный код
-        if isJSON(sample) || isCode(sample) {
+        // 3. Проверка на валидный JSON
+        if isJSON(sample) {
+            return .code
+        }
+
+        // 4. Проверка на чистый конфигурационный файл (.conf)
+        if isConfigFile(sample) {
+            return .code
+        }
+
+        // 5. Проверка на программный код с учётом естественной прозы (RU / EN)
+        if isCode(sample) {
             return .code
         }
 
@@ -242,7 +252,215 @@ public enum SmartClassifier {
         return trimmed.contains("\":")
     }
 
+    /// Определяет долю кириллических букв в тексте вне кавычек и обратных апострофов
+    public static func cyrillicLetterRatioOutsideQuotes(in text: String) -> Double {
+        var totalLetters = 0
+        var cyrillicLetters = 0
+        var insideDoubleQuote = false
+        var insideSingleQuote = false
+        var insideBacktick = false
+
+        for ch in text {
+            if ch == "\"" || ch == "«" || ch == "»" {
+                insideDoubleQuote.toggle()
+                continue
+            }
+            if ch == "'" {
+                insideSingleQuote.toggle()
+                continue
+            }
+            if ch == "`" {
+                insideBacktick.toggle()
+                continue
+            }
+            if !insideDoubleQuote && !insideSingleQuote && !insideBacktick && ch.isLetter {
+                totalLetters += 1
+                if let scalar = ch.unicodeScalars.first,
+                   (scalar.value >= 0x0400 && scalar.value <= 0x04FF) ||
+                   (scalar.value >= 0x0500 && scalar.value <= 0x052F) {
+                    cyrillicLetters += 1
+                }
+            }
+        }
+        guard totalLetters > 0 else { return 0 }
+        return Double(cyrillicLetters) / Double(totalLetters)
+    }
+
+    /// Проверяет, является ли отдельная строка естественной строкой текста (прозы) на русском или английском языке
+    public static func isNaturalProseLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+
+        // Исключаем комментарии кода и шебанг
+        if trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*") ||
+           trimmed.hasPrefix("#") || trimmed.hasPrefix(";") {
+            return false
+        }
+
+        // Запрещённые ключевые слова начала строки кода
+        let codeStartKeywords = [
+            "import ", "func ", "struct ", "class ", "enum ", "protocol ", "extension ",
+            "let ", "var ", "const ", "function ", "def ", "return ",
+            "if (", "for (", "while (", "#include", "#!/",
+            "public ", "private ", "internal "
+        ]
+        for kw in codeStartKeywords {
+            if trimmed.hasPrefix(kw) {
+                return false
+            }
+        }
+
+        // Запрещённые окончания строк кода
+        if trimmed.hasSuffix("{") || trimmed.hasSuffix("}") || trimmed.hasSuffix(";") {
+            return false
+        }
+
+        // Подсчёт обычных слов (из кириллических или латинских букв), разделённых пробелами
+        let rawTokens = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        var wordCount = 0
+        for token in rawTokens {
+            let stripped = token.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(CharacterSet.symbols))
+            let clean = stripped.filter { $0 != "-" && $0 != "—" && $0 != "_" }
+            if !clean.isEmpty && clean.allSatisfy({ $0.isLetter }) {
+                wordCount += 1
+            }
+        }
+
+        return wordCount >= 5
+    }
+
+    /// Проверяет, имеет ли отдельная строка явную структуру программного кода или конфигурационного файла
+    public static func isCodeOrConfigLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+
+        // Если строка содержит кириллические буквы и не является кодовым комментарием, это строка естественного языка
+        let hasCyrillic = trimmed.unicodeScalars.contains {
+            ($0.value >= 0x0400 && $0.value <= 0x04FF) || ($0.value >= 0x0500 && $0.value <= 0x052F)
+        }
+        let isComment = trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*") ||
+                        trimmed.hasPrefix("#") || trimmed.hasPrefix(";")
+        if hasCyrillic && !isComment {
+            return false
+        }
+
+        // 1. Комментарии кода и конфигов
+        if isComment {
+            return true
+        }
+
+        // 2. Секция конфигурационного файла [Section]
+        if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") && trimmed.count >= 3 && !trimmed.contains(" ") {
+            return true
+        }
+
+        // 3. Параметр конфигурационного файла key = value или key: value
+        if let eqIndex = trimmed.firstIndex(of: "=") {
+            let key = trimmed[..<eqIndex].trimmingCharacters(in: .whitespaces)
+            let val = trimmed[trimmed.index(after: eqIndex)...].trimmingCharacters(in: .whitespaces)
+            let keyWords = key.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            let valWords = val.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            if keyWords.count == 1 && valWords.count <= 6 && !key.contains(".") && !key.contains(",") {
+                return true
+            }
+        }
+
+        // 4. Ключевые слова начала строки кода
+        let codeStartKeywords = [
+            "import ", "func ", "struct ", "class ", "enum ", "protocol ", "extension ",
+            "let ", "var ", "const ", "function ", "def ", "return ",
+            "if ", "if (", "else ", "else if ", "for ", "for (", "while ", "while (",
+            "switch ", "case ", "default:", "guard ", "try ", "catch ", "throw ",
+            "typealias ", "public ", "private ", "internal ", "fileprivate ", "open ",
+            "static ", "final ", "override ", "mutating ",
+            "@State ", "@Published ", "@Binding ", "@ObservedObject ", "@StateObject ",
+            "@EnvironmentObject ", "@Environment", "@objc ",
+            "#include", "#define", "#!/", "package ", "namespace ", "using ",
+            "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "FROM ", "WHERE "
+        ]
+        for kw in codeStartKeywords {
+            if trimmed.hasPrefix(kw) {
+                return true
+            }
+        }
+
+        // 5. Окончания строк кода или закрывающие скобки
+        if trimmed.hasSuffix("{") || trimmed.hasSuffix("};") || trimmed.hasSuffix("},") ||
+           trimmed.hasSuffix(";") || trimmed.hasSuffix("->") || trimmed.hasSuffix("=>") {
+            return true
+        }
+        if trimmed == "}" || trimmed == "]" || trimmed == ")" || trimmed == "});" || trimmed == "];" {
+            return true
+        }
+
+        return false
+    }
+
+    public static func isConfigFile(_ sample: String) -> Bool {
+        let lines = sample.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return false }
+
+        // Если в тексте есть строки естественной прозы (>= 45%), это не файл конфигурации
+        let proseCount = lines.filter { isNaturalProseLine($0) }.count
+        if Double(proseCount) / Double(lines.count) >= 0.45 {
+            return false
+        }
+        // Если в тексте преобладает кириллица вне кавычек (> 30%), это не файл конфигурации
+        if cyrillicLetterRatioOutsideQuotes(in: sample) > 0.30 {
+            return false
+        }
+
+        var configLineCount = 0
+        var hasSection = false
+        var keyValueCount = 0
+
+        for line in lines {
+            if line.hasPrefix("#") || line.hasPrefix(";") {
+                configLineCount += 1
+                continue
+            }
+            if line.hasPrefix("[") && line.hasSuffix("]") && line.count >= 3 && !line.contains(" ") {
+                hasSection = true
+                configLineCount += 1
+                continue
+            }
+            if let eqIndex = line.firstIndex(of: "=") {
+                let key = line[..<eqIndex].trimmingCharacters(in: .whitespaces)
+                let val = line[line.index(after: eqIndex)...].trimmingCharacters(in: .whitespaces)
+                let keyWords = key.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                let valWords = val.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                if keyWords.count == 1 && valWords.count <= 6 && !key.contains(".") && !key.contains(",") {
+                    keyValueCount += 1
+                    configLineCount += 1
+                    continue
+                }
+            }
+        }
+
+        let configRatio = Double(configLineCount) / Double(lines.count)
+        if configRatio >= 0.50 {
+            if hasSection && (keyValueCount >= 1 || configLineCount >= 2) {
+                return true
+            }
+            if keyValueCount >= 2 {
+                return true
+            }
+        }
+        return false
+    }
+
     public static func isSwiftCode(_ sample: String) -> Bool {
+        let lines = sample.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if !lines.isEmpty {
+            let proseCount = lines.filter { isNaturalProseLine($0) }.count
+            if Double(proseCount) / Double(lines.count) >= 0.45 { return false }
+        }
+        if cyrillicLetterRatioOutsideQuotes(in: sample) > 0.30 { return false }
+
         let swiftSignals = [
             "import SwiftUI", "import AppKit", "import Foundation", "@State ", "@Published ",
             "func ", "struct ", "protocol ", "extension ", "guard let ", "if let ", "DispatchQueue."
@@ -252,12 +470,58 @@ public enum SmartClassifier {
     }
 
     public static func isCode(_ sample: String) -> Bool {
-        let codeSignals = [
-            "func ", "import ", "struct ", "class ", "let ", "var ", "const ", "return ",
-            "SELECT ", "FROM ", "WHERE ", "def ", "public ", "private ", "{", "}", "=>", "</"
-        ]
-        let matchCount = codeSignals.filter { sample.contains($0) }.count
-        return matchCount >= 2 || (sample.contains("\n") && (sample.contains("{") || sample.contains(";")))
+        if isConfigFile(sample) { return true }
+
+        let lines = sample.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return false }
+
+        let totalLines = Double(lines.count)
+        let proseCount = Double(lines.filter { isNaturalProseLine($0) }.count)
+        let proseRatio = proseCount / totalLines
+
+        let codeLinesCount = Double(lines.filter { isCodeOrConfigLine($0) }.count)
+        let codeLinesRatio = codeLinesCount / totalLines
+
+        let cyrillicRatio = cyrillicLetterRatioOutsideQuotes(in: sample)
+
+        // Правило 1: Если в тексте доля строк естественной прозы >= 45% -> ВСЕГДА текст
+        if proseRatio >= 0.45 {
+            return false
+        }
+
+        // Правило 2: Если в тексте больше 30% кириллических букв вне кавычек и доля чисто кодовых строк < 40% -> ВСЕГДА текст
+        if cyrillicRatio > 0.30 && codeLinesRatio < 0.40 {
+            return false
+        }
+
+        // Правило 3: Карточка классифицируется как .code только тогда, когда не менее 40% непустых строк имеют явную структуру кода/конфига
+        if codeLinesRatio >= 0.40 {
+            return true
+        }
+
+        // Для ультра-коротких фрагментов (1-2 строки), не являющихся строками прозы
+        if lines.count <= 2 && proseCount == 0 {
+            let singleLineCodeSignals = [
+                "func ", "import ", "struct ", "class ", "enum ", "protocol ",
+                "let ", "var ", "const ", "def ", "function ",
+                "#!/", "#include", "SELECT ", "public func ", "private func "
+            ]
+            let trimmed = sample.trimmingCharacters(in: .whitespacesAndNewlines)
+            if singleLineCodeSignals.contains(where: { trimmed.hasPrefix($0) || trimmed.contains(" \($0)") }) {
+                if cyrillicRatio <= 0.30 {
+                    return true
+                }
+            }
+            if sample.contains("{") && sample.contains("}") && (sample.contains(";") || sample.contains("=")) {
+                if cyrillicRatio <= 0.30 {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     public static func hasUTMTracking(_ sample: String) -> Bool {
@@ -281,13 +545,13 @@ public enum SmartClassifier {
         if isSwiftCode(sample) {
             result.append("#Swift")
         }
-        if contentType == .image || sample.hasPrefix("[Скриншот") || sample.contains("#OCR") {
+        if contentType == .image || sample.hasPrefix("[Скриншот") || sample.hasPrefix("[Screenshot") || sample.contains("#OCR") {
             result.append("#OCR")
         }
         if contentType == .color || isColor(sample) {
             result.append("Цвет")
         }
-        if contentType == .file || sample.hasPrefix("[Файл") {
+        if contentType == .file || sample.hasPrefix("[Файл") || sample.hasPrefix("[File") {
             result.append("#Файл")
         }
         return result

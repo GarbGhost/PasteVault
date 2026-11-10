@@ -134,6 +134,7 @@ public final class FloatingPanel<Content: View>: NSPanel {
             Task { @MainActor in
                 guard let self = self, self.isVisible else { return }
                 if ClipboardMonitor.shared.isModalOverlayActive { return }
+                if self.attachedSheet != nil { return }
                 let hasActiveSaveOrOpenPanel = NSApp.windows.contains { $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel")) }
                 if hasActiveSaveOrOpenPanel { return }
 
@@ -195,6 +196,13 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
     public func dismissPanel(restorePreviousApp: Bool = true) {
         if ShortcutManager.shared.isRecordingShortcut {
+            return
+        }
+        if self.attachedSheet != nil {
+            return
+        }
+        let hasActiveSaveOrOpenPanel = NSApp.windows.contains { $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel")) }
+        if hasActiveSaveOrOpenPanel {
             return
         }
         if let monitor = localKeyDownMonitor {
@@ -520,6 +528,13 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let config = ShortcutManager.shared.config
+
+            // Защита от попадания ⌘V в окно самого PasteVault во время автовставки
+            if ClipboardMonitor.shared.isPerformingAutoPaste {
+                if flags.contains(.command) && (event.keyCode == 9 || event.charactersIgnoringModifiers?.lowercased() == "v") {
+                    return nil
+                }
+            }
 
             // Если открыто модальное окно просмотра/редактора скриншотов — обрабатываем его горячие клавиши в приоритете
             if ClipboardMonitor.shared.isModalOverlayActive {

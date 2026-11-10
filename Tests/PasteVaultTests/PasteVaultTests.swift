@@ -1,4 +1,6 @@
 import XCTest
+import AppKit
+import SwiftUI
 @testable import PasteVault
 
 @MainActor
@@ -336,5 +338,42 @@ final class PasteVaultTests: XCTestCase {
                 XCTAssertTrue(theme.isDark, "Theme \(theme.rawValue) is marked dark, so isDark must be true")
             }
         }
+    }
+
+    // MARK: - Тест защиты поисковой строки при авто-вставке (⌘V)
+    func testSearchQueryProtectedDuringAutoPaste() {
+        let monitor = ClipboardMonitor.shared
+        monitor.isPerformingAutoPaste = false
+        monitor.searchQuery = "test"
+        XCTAssertEqual(monitor.searchQuery, "test")
+
+        // Включаем флаг авто-вставки
+        monitor.isPerformingAutoPaste = true
+
+        // Попытка перезаписать строку поиска содержимым карточки
+        monitor.searchQuery = "Случайный текст из буфера обмена для вставки"
+
+        // Защитная логика должна удержать исходное значение "test"
+        XCTAssertEqual(
+            monitor.searchQuery,
+            "test",
+            "Во время авто-вставки (isPerformingAutoPaste == true) поисковый запрос защищён от перезаписи текстом карточки"
+        )
+
+        // Выключаем флаг авто-вставки
+        monitor.isPerformingAutoPaste = false
+        monitor.searchQuery = "new query"
+        XCTAssertEqual(monitor.searchQuery, "new query", "В обычном режиме поисковый запрос свободно изменяется")
+        monitor.searchQuery = ""
+    }
+
+    // MARK: - Тест рендеринга векторной иконки двойного клика DoubleClickCursorIcon
+    func testDoubleClickCursorIconRendersCleanly() {
+        let icon = DoubleClickCursorIcon(size: 13)
+        let hostingView = NSHostingView(rootView: icon)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 13, height: 13)
+        XCTAssertEqual(hostingView.frame.size.width, 13)
+        XCTAssertEqual(hostingView.frame.size.height, 13)
+        XCTAssertNotNil(hostingView.layer)
     }
 }

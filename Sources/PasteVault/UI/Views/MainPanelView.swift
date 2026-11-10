@@ -859,9 +859,24 @@ public final class TapticSoundAndHaptics {
     private let queue = DispatchQueue(label: "com.pastevault.tapticsound", qos: .userInteractive)
     private let lock = NSLock()
 
-    /// Минимальный интервал между микро-щелчками (строгий debounce >= 85 мс для защиты от двойного щелчка)
-    public static let minTickInterval: TimeInterval = 0.085
-    /// Время последнего щелчка — защищено lock по monotonic clock
+    /// Окно подавления дублей для одиночного клика кнопки (250 мс)
+    public static let clickDebounceInterval: TimeInterval = 0.25
+    /// Быстрый интервал для прокрутки делений таймера (35 мс)
+    public static let wheelTickInterval: TimeInterval = 0.035
+    /// Минимальный интервал между микро-щелчками (строгий debounce 250 мс для защиты от двойного щелчка)
+    public static let minTickInterval: TimeInterval = 0.25
+
+    /// Аппаратно-событийный гейт клика мыши (One-Click-Per-MouseDown Gate)
+    private var isMouseButtonDown: Bool = false
+    private var hasPlayedInCurrentMouseCycle: Bool = false
+    private var lastMouseUpTime: TimeInterval = 0
+    private var mouseMonitor: Any?
+
+    /// Время последнего одиночного клика — защищено lock по monotonic clock
+    private var lastClickTime: TimeInterval = 0
+    /// Время последнего вращения делений таймера
+    private var lastWheelTickTime: TimeInterval = 0
+    /// Время последнего щелчка (для обратной совместимости)
     private var lastTickTime: TimeInterval = 0
     /// Время последнего тактильного отклика — изменяется ТОЛЬКО на главном потоке
     private var lastHapticTime: TimeInterval = 0
@@ -877,6 +892,50 @@ public final class TapticSoundAndHaptics {
                 self?.player.play()
             }
         }
+        // One-Click-Per-MouseDown Gate: локальный монитор событий левой кнопки мыши
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
+                guard let self = self else { return event }
+                self.handleMouseEvent(type: event.type)
+                return event
+            }
+        }
+    }
+
+    /// Обработка физических событий мыши для аппаратно-событийного гейта
+    public func handleMouseEvent(type: NSEvent.EventType) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        if type == .leftMouseDown {
+            if !isMouseButtonDown {
+                isMouseButtonDown = true
+                hasPlayedInCurrentMouseCycle = false
+            }
+        } else if type == .leftMouseUp {
+            isMouseButtonDown = false
+            lastMouseUpTime = now
+        }
+        lock.unlock()
+    }
+
+    /// Вспомогательные методы для симуляции в тестах
+    public func simulateMouseDown() {
+        handleMouseEvent(type: .leftMouseDown)
+    }
+
+    public func simulateMouseUp() {
+        handleMouseEvent(type: .leftMouseUp)
+    }
+
+    public func resetMouseCycle() {
+        lock.lock()
+        isMouseButtonDown = false
+        hasPlayedInCurrentMouseCycle = false
+        lastMouseUpTime = 0
+        lastClickTime = 0
+        lastTickTime = 0
+        lock.unlock()
     }
 
     /// Прогрев синглтона при запуске приложения (setup выполняется в фоне)
@@ -961,20 +1020,31 @@ public final class TapticSoundAndHaptics {
     }
 
     public func playTick() {
-        performDialTick()
+        playClick()
     }
 
-    public func playClick() {
-        performDialTick()
-    }
-
-    public func performDialTick() {
+    @discardableResult
+    public func playClick() -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
-        guard now - lastTickTime >= Self.minTickInterval else {
+
+        let isPhysicalDown = isMouseButtonDown || (NSEvent.pressedMouseButtons & 1 != 0)
+
+        // One-Click-Per-MouseDown Gate: если в текущем цикле клика мыши звук уже играл
+        // И (кнопка зажата ИЛИ с момента отпускания прошло менее 0.25 с) — блокируем дублирующий щелчок!
+        if hasPlayedInCurrentMouseCycle && (isPhysicalDown || (now - lastMouseUpTime < Self.clickDebounceInterval)) {
             lock.unlock()
-            return
+            return false
         }
+
+        // Базовый debounce интервал 250 мс
+        guard now - lastClickTime >= Self.clickDebounceInterval else {
+            lock.unlock()
+            return false
+        }
+
+        hasPlayedInCurrentMouseCycle = true
+        lastClickTime = now
         lastTickTime = now
         lock.unlock()
 
@@ -984,7 +1054,7 @@ public final class TapticSoundAndHaptics {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         }
 
-        guard Self.isAudioFeedbackEnabled else { return }
+        guard Self.isAudioFeedbackEnabled else { return true }
         queue.async { [weak self] in
             guard let self = self, let buf = self.tickBuffer else { return }
             self.ensureEngineRunning()
@@ -992,6 +1062,40 @@ public final class TapticSoundAndHaptics {
             self.player.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
             self.player.play()
         }
+        return true
+    }
+
+    @discardableResult
+    public func playWheelTick() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        guard now - lastWheelTickTime >= Self.wheelTickInterval else {
+            lock.unlock()
+            return false
+        }
+        lastWheelTickTime = now
+        lastTickTime = now
+        lock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.lastHapticTime = now
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }
+
+        guard Self.isAudioFeedbackEnabled else { return true }
+        queue.async { [weak self] in
+            guard let self = self, let buf = self.tickBuffer else { return }
+            self.ensureEngineRunning()
+            self.player.stop()
+            self.player.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
+            self.player.play()
+        }
+        return true
+    }
+
+    public func performDialTick() {
+        playWheelTick()
     }
 
     public func playConfirmClick() {
@@ -1886,7 +1990,7 @@ private struct PVButtonBody: View {
             }
             .onChange(of: configuration.isPressed) { _, isPressed in
                 if isPressed {
-                    TapticSoundAndHaptics.shared.performDialTick()
+                    TapticSoundAndHaptics.shared.playClick()
                 }
             }
     }
@@ -2083,6 +2187,92 @@ public enum CardClickDetector {
     }
 }
 
+// MARK: - Векторная иконка двойного клика (Точная геометрия 1В: наклон -45°, носик (12.0, 9.8), дуги 196°)
+public struct DoubleClickCursorIcon: View {
+    public var size: CGFloat
+    public var color: Color?
+
+    public init(size: CGFloat = 13, color: Color? = nil) {
+        self.size = size
+        self.color = color
+    }
+
+    public var body: some View {
+        Canvas { context, canvasSize in
+            let scale = canvasSize.width / 24.0
+
+            let tip = CGPoint(x: 12.0 * scale, y: 9.8 * scale)
+            let r1: CGFloat = 4.2 * scale
+            let r2: CGFloat = 7.4 * scale
+            let arcStrokeWidth: CGFloat = 2.2 * scale
+            let cursorStrokeWidth: CGFloat = 1.3 * scale
+
+            let resolvedColor = color.map { context.resolve(GraphicsContext.Shading.color($0)) }
+
+            // 1. Внутренняя дуга 196° (r1 = 4.2) со строгим центром в tip (12.0, 9.8)
+            var arc1 = Path()
+            arc1.addArc(
+                center: tip,
+                radius: r1,
+                startAngle: .degrees(-188),
+                endAngle: .degrees(8),
+                clockwise: false
+            )
+            let arcStyle = StrokeStyle(lineWidth: arcStrokeWidth, lineCap: .round, lineJoin: .round)
+            if let resolved = resolvedColor {
+                context.stroke(arc1, with: resolved, style: arcStyle)
+            } else {
+                context.stroke(arc1, with: .foreground, style: arcStyle)
+            }
+
+            // 2. Внешняя дуга 196° (r2 = 7.4) со строгим центром в tip (12.0, 9.8)
+            var arc2 = Path()
+            arc2.addArc(
+                center: tip,
+                radius: r2,
+                startAngle: .degrees(-188),
+                endAngle: .degrees(8),
+                clockwise: false
+            )
+            if let resolved = resolvedColor {
+                context.stroke(arc2, with: resolved, style: arcStyle)
+            } else {
+                context.stroke(arc2, with: .foreground, style: arcStyle)
+            }
+
+            // 3. Симметричный залитый курсор со скруглённым хвостиком
+            var cursor = Path()
+            cursor.move(to: tip)
+            cursor.addLine(to: CGPoint(x: 17.2 * scale, y: 19.2 * scale))
+            cursor.addLine(to: CGPoint(x: 13.7 * scale, y: 18.2 * scale))
+            cursor.addLine(to: CGPoint(x: 13.7 * scale, y: 22.0 * scale))
+            cursor.addQuadCurve(
+                to: CGPoint(x: 12.6 * scale, y: 23.0 * scale),
+                control: CGPoint(x: 13.7 * scale, y: 23.0 * scale)
+            )
+            cursor.addLine(to: CGPoint(x: 11.4 * scale, y: 23.0 * scale))
+            cursor.addQuadCurve(
+                to: CGPoint(x: 10.3 * scale, y: 22.0 * scale),
+                control: CGPoint(x: 10.3 * scale, y: 23.0 * scale)
+            )
+            cursor.addLine(to: CGPoint(x: 10.3 * scale, y: 18.2 * scale))
+            cursor.addLine(to: CGPoint(x: 6.8 * scale, y: 19.2 * scale))
+            cursor.closeSubpath()
+
+            let cursorOutlineStyle = StrokeStyle(lineWidth: cursorStrokeWidth, lineCap: .round, lineJoin: .round)
+            if let resolved = resolvedColor {
+                context.fill(cursor, with: resolved)
+                context.stroke(cursor, with: resolved, style: cursorOutlineStyle)
+            } else {
+                context.fill(cursor, with: .foreground)
+                context.stroke(cursor, with: .foreground, style: cursorOutlineStyle)
+            }
+        }
+        .frame(width: size, height: size)
+        .rotationEffect(.degrees(-45))
+    }
+}
+
 // MARK: - Isolated Clipboard Row Card View (Zero Parent Redraws on Hover)
 @MainActor
 public struct ClipboardRowCardView: View {
@@ -2149,10 +2339,11 @@ public struct ClipboardRowCardView: View {
             return false
         }
 
-        // Отсекаем ссылки, пути и хештеги
+        // Отсекаем ссылки, пути, хештеги, имена файлов с расширениями и русские фразы через _
         let lower = trimmed.lowercased()
         if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("file://") ||
-           lower.hasPrefix("/") || lower.hasPrefix("~/") || lower.hasPrefix("#") {
+           lower.hasPrefix("/") || lower.hasPrefix("~/") || lower.hasPrefix("#") ||
+           SecretDetector.isLikelyFileName(trimmed) || SecretDetector.isCyrillicSnakeOrKebabWithoutDigits(trimmed) {
             return false
         }
 
@@ -2293,6 +2484,12 @@ public struct ClipboardRowCardView: View {
                     }
 
                     Button {
+                        for window in NSApp.windows {
+                            window.makeFirstResponder(nil)
+                            if window is NSPanel {
+                                window.resignKey()
+                            }
+                        }
                         TapticSoundAndHaptics.shared.performDialTick()
                         onPaste()
                     } label: {
@@ -2306,9 +2503,7 @@ public struct ClipboardRowCardView: View {
                                     .lineLimit(1)
                                     .fixedSize(horizontal: true, vertical: false)
                             } else {
-                                Image(systemName: "arrow.turn.down.left")
-                                    .symbolRenderingMode(.monochrome)
-                                    .font(.system(size: 8, weight: .bold))
+                                DoubleClickCursorIcon(size: 13)
                                 Text(index < 9 ? tr("Вставить \(ShortcutManager.shared.config.quickPastePrefix)\(index + 1)", "Paste \(ShortcutManager.shared.config.quickPastePrefix)\(index + 1)", lang: language) : tr("Вставить", "Paste", lang: language))
                                     .font(currentFont.font(size: 9, weight: .semibold))
                                     .lineLimit(1)
@@ -2537,6 +2732,12 @@ public struct ClipboardRowCardView: View {
             let isDouble = CardClickDetector.registerTap(itemId: item.id, eventClickCount: clickCount)
             TapticSoundAndHaptics.shared.performDialTick()
             if isDouble {
+                for window in NSApp.windows {
+                    window.makeFirstResponder(nil)
+                    if window is NSPanel {
+                        window.resignKey()
+                    }
+                }
                 onPaste()
             } else {
                 onSelect()
@@ -2844,6 +3045,7 @@ public struct MainPanelView: View {
 
     // Clipboard State
     @State private var searchQuery: String = ""
+    @State private var lastSafeSearchQuery: String = ""
     @State private var selectedFilter: ClipboardFilterSelection = .category(.all)
     @State private var selectedItemId: String?
     @State private var keyboardScrollTargetId: String? = nil
@@ -2887,6 +3089,8 @@ public struct MainPanelView: View {
     @StateObject private var screenshotEditorEngine = ScreenshotEditorEngine()
     @State private var editingItemId: String? = nil
     @State private var editingItemText: String = ""
+    @State private var showFullTextInInspectorItemId: String? = nil
+    private let inspectorPreviewCharLimit: Int = 35_000
 
     // Clear History Confirmation Modal State
     @State private var showClearHistoryConfirmation: Bool = false
@@ -2919,6 +3123,7 @@ public struct MainPanelView: View {
     @State private var isFontDropdownExpanded: Bool = false
     @State private var isFontButtonHovered: Bool = false
     @State private var isInspectorTimerPopoverPresented: Bool = false
+    @State private var isExportFormatPopoverPresented: Bool = false
     @State private var isShortcutsExpanded: Bool = true
     @State private var hoveredFont: AppFont? = nil
     @State private var isRunningAppsMenuHovered: Bool = false
@@ -3213,8 +3418,11 @@ public struct MainPanelView: View {
             }
             generatePass()
         }
-        .onChange(of: selectedTab) { _, _ in
+        .onChange(of: selectedTab) { _, newTab in
             revealedSecretItemId = nil
+            if newTab == .settings {
+                updateService.onSettingsTabOpened()
+            }
         }
         .onChange(of: selectedThemeId) { _, _ in
             syncWindowAppearance()
@@ -3423,6 +3631,14 @@ public struct MainPanelView: View {
             lightboxScaleToFit = true
             lightboxZoomScale = 1.0
             editorPanOffset = .zero
+        }
+        .onChange(of: monitor.isPerformingAutoPaste) { _, isPasting in
+            if isPasting {
+                dismissFocusAndPrepareForPaste()
+                if searchQuery != lastSafeSearchQuery {
+                    searchQuery = lastSafeSearchQuery
+                }
+            }
         }
     }
 
@@ -3862,7 +4078,13 @@ public struct MainPanelView: View {
                             .font(currentFont.font(size: 13, weight: .medium))
                             .foregroundStyle(currentTheme.primaryText)
                             .focused($isSearchFocused)
-                            .onChange(of: searchQuery) { _, _ in
+                            .onChange(of: searchQuery) { oldValue, newValue in
+                                if monitor.isPerformingAutoPaste {
+                                    searchQuery = oldValue
+                                    return
+                                }
+                                lastSafeSearchQuery = newValue
+                                monitor.searchQuery = newValue
                                 selectedItemId = filteredItems.first?.id
                             }
                     }
@@ -3870,6 +4092,8 @@ public struct MainPanelView: View {
                     if !searchQuery.isEmpty {
                         Button {
                             searchQuery = ""
+                            lastSafeSearchQuery = ""
+                            monitor.searchQuery = ""
                             selectedItemId = filteredItems.first?.id
                         } label: {
                             Image(systemName: "xmark.circle.fill")
@@ -4494,13 +4718,13 @@ public struct MainPanelView: View {
                                                     ? tr("Возобновить отсчёт таймера", "Resume timer countdown")
                                                     : tr("Запустить таймер", "Start timer")
                                             ) {
+                                                TapticSoundAndHaptics.shared.playClick()
                                                 if isPaused {
                                                     monitor.resumeTimerForItem(id: currentItem.id)
                                                 } else {
                                                     let defaultSec = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
                                                     monitor.startTimerForItem(id: currentItem.id, seconds: defaultSec)
                                                 }
-                                                TapticSoundAndHaptics.shared.performDialClickConfirm()
                                             }
 
                                             // Кнопка 2: «Пауза» ⏸
@@ -4512,8 +4736,8 @@ public struct MainPanelView: View {
                                                 theme: currentTheme,
                                                 tooltip: tr("Приостановить таймер", "Pause timer")
                                             ) {
+                                                TapticSoundAndHaptics.shared.playClick()
                                                 monitor.pauseTimerForItem(id: currentItem.id, remainingSeconds: remaining)
-                                                TapticSoundAndHaptics.shared.performDialTick()
                                             }
 
                                             // Кнопка 3: «Стоп» ■
@@ -4525,11 +4749,11 @@ public struct MainPanelView: View {
                                                 theme: currentTheme,
                                                 tooltip: tr("Сбросить и выключить таймер", "Reset and stop timer")
                                             ) {
+                                                TapticSoundAndHaptics.shared.playClick()
                                                 monitor.cancelTimerForItem(id: currentItem.id)
                                                 withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
                                                     isInspectorTimerPopoverPresented = false
                                                 }
-                                                TapticSoundAndHaptics.shared.performDialClickConfirm()
                                             }
 
                                             // Тонкий вертикальный разделитель
@@ -4565,6 +4789,7 @@ public struct MainPanelView: View {
                                                 theme: currentTheme,
                                                 tooltip: tr("Открыть / закрыть круговой таймер", "Toggle circular timer dial")
                                             ) {
+                                                TapticSoundAndHaptics.shared.playClick()
                                                 withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
                                                     isInspectorTimerPopoverPresented.toggle()
                                                 }
@@ -5004,6 +5229,45 @@ public struct MainPanelView: View {
                                             Spacer()
 
                                             HStack(spacing: 8) {
+                                                if !isSecret && (currentItem.effectiveContentType == .text || currentItem.effectiveContentType == .code || currentItem.contentType == .text || currentItem.contentType == .code) {
+                                                    Button {
+                                                        isExportFormatPopoverPresented = true
+                                                    } label: {
+                                                        HStack(spacing: 4) {
+                                                            Image(systemName: "arrow.down.doc")
+                                                                .symbolRenderingMode(.monochrome)
+                                                                .font(.system(size: 12, weight: .semibold))
+                                                            Text(tr("Сохранить", "Save"))
+                                                                .font(currentFont.font(size: 12, weight: .semibold))
+                                                                .lineLimit(1)
+                                                        }
+                                                        .padding(.horizontal, 4)
+                                                        .frame(height: 28)
+                                                    }
+                                                    .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
+                                                    .fixedSize(horizontal: true, vertical: false)
+                                                    .popover(isPresented: $isExportFormatPopoverPresented, arrowEdge: .bottom) {
+                                                        let recFormat = CardFileExporter.recommendedFormat(for: currentItem.textPreview)
+                                                        CardExportFormatPicker(
+                                                            theme: currentTheme,
+                                                            currentFont: currentFont,
+                                                            language: currentLanguage,
+                                                            recommendedFormat: recFormat,
+                                                            onSelect: { format in
+                                                                isExportFormatPopoverPresented = false
+                                                                TapticSoundAndHaptics.shared.playClick()
+                                                                let isCode = (currentItem.effectiveContentType == .code || currentItem.contentType == .code)
+                                                                CardFileExporter.promptSaveCard(
+                                                                    content: currentItem.textPreview,
+                                                                    format: format,
+                                                                    isCode: isCode,
+                                                                    language: currentLanguage
+                                                                )
+                                                            }
+                                                        )
+                                                    }
+                                                }
+
                                                 Button {
                                                     editingItemId = currentItem.id
                                                     editingItemText = currentItem.textPreview
@@ -5055,24 +5319,44 @@ public struct MainPanelView: View {
                                                 .foregroundStyle(currentTheme.badgeText)
                                                 .textSelection(.enabled)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                        } else if !searchQuery.isEmpty {
-                                            Text(SearchHighlightHelper.highlight(
-                                                text: String(currentItem.textPreview.prefix(4096)),
-                                                query: searchQuery,
-                                                baseFont: currentFont.font(size: 13, weight: .regular),
-                                                baseColor: currentTheme.primaryText,
-                                                accentColor: currentTheme.accentColor,
-                                                isLight: currentTheme.isLight,
-                                                bold: true
-                                            ))
-                                            .textSelection(.enabled)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
                                         } else {
-                                            Text(String(currentItem.textPreview.prefix(4096)))
-                                                .font(currentFont.font(size: 13, weight: .regular))
-                                                .foregroundStyle(currentTheme.primaryText)
+                                            let isShowingFull = (currentItem.content.count <= inspectorPreviewCharLimit) || (showFullTextInInspectorItemId == currentItem.id)
+                                            let textToDisplay = isShowingFull ? currentItem.content : String(currentItem.content.prefix(inspectorPreviewCharLimit))
+
+                                            if !searchQuery.isEmpty {
+                                                Text(SearchHighlightHelper.highlight(
+                                                    text: textToDisplay,
+                                                    query: searchQuery,
+                                                    baseFont: currentFont.font(size: 13, weight: .regular),
+                                                    baseColor: currentTheme.primaryText,
+                                                    accentColor: currentTheme.accentColor,
+                                                    isLight: currentTheme.isLight,
+                                                    bold: true
+                                                ))
                                                 .textSelection(.enabled)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                            } else {
+                                                Text(textToDisplay)
+                                                    .font(currentFont.font(size: 13, weight: .regular))
+                                                    .foregroundStyle(currentTheme.primaryText)
+                                                    .textSelection(.enabled)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+
+                                            if !isShowingFull {
+                                                Button {
+                                                    showFullTextInInspectorItemId = currentItem.id
+                                                } label: {
+                                                    HStack(spacing: 5) {
+                                                        Image(systemName: "chevron.down.circle")
+                                                            .symbolRenderingMode(.monochrome)
+                                                        Text(tr("Показать весь текст (\(currentItem.content.count) симв.)", "Show full text (\(currentItem.content.count) chars)"))
+                                                    }
+                                                    .font(currentFont.font(size: 11, weight: .semibold))
+                                                }
+                                                .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+                                                .padding(.top, 4)
+                                            }
                                         }
                                     }
                                     .padding(12)
@@ -5921,63 +6205,104 @@ public struct MainPanelView: View {
 
     // MARK: - Auto Update Section Card (Самый низ раздела «Система»)
     private var autoUpdateSectionCard: some View {
-        settingsSection(
-            title: tr("Автоматическое обновление", "Automatic Updates"),
-            icon: "arrow.triangle.2.circlepath"
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                settingRowPlate {
-                    HStack(spacing: 12) {
-                        Text(tr("Автоматически проверять обновления при запуске", "Automatically check for updates on launch"))
-                            .font(currentFont.font(size: 12, weight: .regular))
-                            .foregroundStyle(currentTheme.primaryText)
+        VStack(alignment: .leading, spacing: 10) {
+            // Строка тумблера с акцентной иконкой слева
+            settingRowPlate {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(currentTheme.accentColor)
 
-                        Spacer()
-
-                        Toggle("", isOn: $autoCheckUpdates)
-                            .toggleStyle(.switch)
-                            .tint(currentTheme.accentColor)
-                            .labelsHidden()
-                            .onChange(of: autoCheckUpdates) { _, newValue in
-                                updateService.autoCheckUpdates = newValue
-                                TapticSoundAndHaptics.shared.performDialTick()
-                            }
-                    }
-                }
-
-                // Перенесенная из сайдбара строка с версией и ссылкой на репозиторий GitHub
-                HStack(alignment: .center, spacing: 6) {
-                    Button {
-                        updateService.openProjectPage()
-                    } label: {
-                        HStack(alignment: .center, spacing: 6) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .symbolRenderingMode(.monochrome)
-                                .font(.system(size: 11))
-                                .foregroundStyle(currentTheme.accentColor.opacity(0.85))
-                                .frame(height: 16)
-
-                            Text("PasteVault v\(updateService.currentVersion)")
-                                .font(currentFont.font(size: 11.5, weight: .semibold))
-                                .foregroundStyle(currentTheme.primaryText)
-
-                            Image(systemName: "arrow.up.forward.square")
-                                .symbolRenderingMode(.monochrome)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(currentTheme.secondaryText.opacity(0.75))
-                                .frame(height: 16)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help(tr("Открыть страницу проекта PasteVault на GitHub", "Open PasteVault project page on GitHub"))
-                    .onHover { hovering in
-                        if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                    }
+                    Text(tr("Автопроверка обновлений", "Auto-check for updates"))
+                        .font(currentFont.font(size: 12, weight: .medium))
+                        .foregroundStyle(currentTheme.primaryText)
 
                     Spacer()
+
+                    Toggle("", isOn: $autoCheckUpdates)
+                        .toggleStyle(.switch)
+                        .tint(currentTheme.accentColor)
+                        .labelsHidden()
+                        .onChange(of: autoCheckUpdates) { _, newValue in
+                            updateService.autoCheckUpdates = newValue
+                            TapticSoundAndHaptics.shared.playClick()
+                        }
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
+            }
+
+            // Центральная кнопка-пилюля со ссылкой на GitHub (Вариант 3)
+            HStack {
+                Spacer()
+                AutoUpdateGitHubPillButton(
+                    theme: currentTheme,
+                    currentFont: currentFont,
+                    updateService: updateService
+                )
+                Spacer()
+            }
+            .padding(.top, 2)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 14)
+    }
+
+    // MARK: - AutoUpdate GitHub Pill Button (Вариант 3)
+    private struct AutoUpdateGitHubPillButton: View {
+        let theme: AppTheme
+        let currentFont: AppFont
+        @ObservedObject var updateService: UpdateService
+        @State private var isHovering: Bool = false
+
+        var body: some View {
+            Button {
+                TapticSoundAndHaptics.shared.playClick()
+                updateService.openProjectPage()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.accentColor)
+
+                    Text("PasteVault v\(updateService.currentVersion)")
+                        .font(currentFont.font(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.primaryText)
+                        .underline(true, color: theme.accentColor.opacity(0.6))
+
+                    HStack(spacing: 3) {
+                        Text("GitHub")
+                            .font(currentFont.font(size: 11.5, weight: .semibold))
+                            .foregroundStyle(theme.accentColor)
+
+                        Image(systemName: "arrow.up.right")
+                            .symbolRenderingMode(.monochrome)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(theme.accentColor)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .fill(isHovering ? theme.accentColor.opacity(0.14) : Color.white.opacity(0.05))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(isHovering ? theme.accentColor.opacity(0.45) : Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .contentShape(Capsule())
+                .animation(.easeOut(duration: 0.15), value: isHovering)
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                isHovering = hovering
+                if hovering {
+                    NSCursor.pointingHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
             }
         }
     }
@@ -6988,7 +7313,38 @@ public struct MainPanelView: View {
         HStack(spacing: 10) {
             hotkeyHint(key: shortcutManager.config.togglePanel.displayString, label: tr("Открыть", "Toggle"))
             hotkeyHint(key: "↑↓", label: tr("Навигация", "Navigate"))
-            hotkeyHint(key: shortcutManager.config.pasteSelected.displayString, label: tr("Вставить в \(shortTargetAppName)", "Paste into \(shortTargetAppName)"))
+
+            // Вариант Б: [ ↩ Enter | <DoubleClickCursorIcon> ] Вставить в <targetApp>
+            HStack(spacing: 4) {
+                HStack(spacing: 5) {
+                    Text("↩ Enter")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    Text("|")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .opacity(0.45)
+                    DoubleClickCursorIcon(size: 12)
+                }
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .foregroundStyle(currentTheme.primaryText)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(currentTheme.isLight ? Color.black.opacity(0.10) : Color.white.opacity(0.14))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(currentTheme.primaryText.opacity(currentTheme.isLight ? 0.18 : 0.16), lineWidth: 0.8)
+                )
+
+                Text(tr("Вставить в \(shortTargetAppName)", "Paste to \(shortTargetAppName)"))
+                    .font(currentFont.font(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundStyle(currentTheme.secondaryText)
+            }
+
             hotkeyHint(key: shortcutManager.config.quickPasteModifier.displayString, label: tr("Быстрый выбор", "Quick Paste"))
             hotkeyHint(key: "Esc", label: tr("Закрыть", "Close"))
 
@@ -7331,7 +7687,18 @@ public struct MainPanelView: View {
         return expandSnippetMacros(localized)
     }
 
+    private func dismissFocusAndPrepareForPaste() {
+        isSearchFocused = false
+        for window in NSApp.windows {
+            window.makeFirstResponder(nil)
+            if window is NSPanel {
+                window.resignKey()
+            }
+        }
+    }
+
     private func instantCopyAndPaste(text: String, ttl: TimeInterval? = nil) {
+        dismissFocusAndPrepareForPaste()
         if monitor.checkAccessibilityPermission() {
             isPasteBlockedToastVisible = false
         }
@@ -7339,6 +7706,7 @@ public struct MainPanelView: View {
     }
 
     private func pasteItem(_ item: ClipboardItemRow) {
+        dismissFocusAndPrepareForPaste()
         if monitor.checkAccessibilityPermission() {
             isPasteBlockedToastVisible = false
         }
@@ -8387,12 +8755,13 @@ public struct MainPanelView: View {
 
                     // Release Notes plate
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(tr("Что нового:", "What's New:"))
+                        Text(tr("Что нового в v\(latestVer):", "What's new in v\(latestVer):"))
                             .font(currentFont.font(size: 11, weight: .semibold))
                             .foregroundStyle(currentTheme.secondaryText)
 
                         ScrollView(.vertical) {
-                            Text(notes.isEmpty ? tr("Описание релиза доступно на странице GitHub Releases.", "Release notes are available on GitHub Releases.") : notes)
+                            let cleanNotes = UpdateService.formattedPopupReleaseNotes(from: notes)
+                            Text(cleanNotes.isEmpty ? tr("Описание релиза доступно на странице GitHub Releases.", "Release notes are available on GitHub Releases.") : cleanNotes)
                                 .font(currentFont.font(size: 12, weight: .regular))
                                 .foregroundStyle(currentTheme.primaryText)
                                 .lineSpacing(3)
@@ -8432,7 +8801,6 @@ public struct MainPanelView: View {
                         // Две кнопки: «Да» и «Нет»
                         HStack(spacing: 10) {
                             Button {
-                                TapticSoundAndHaptics.shared.performDialTick()
                                 updateService.dismissModal()
                             } label: {
                                 Text(tr("Нет", "No"))
@@ -8442,7 +8810,6 @@ public struct MainPanelView: View {
                             .keyboardShortcut(.cancelAction)
 
                             Button {
-                                TapticSoundAndHaptics.shared.performDialClickConfirm()
                                 if let url = downloadURL {
                                     Task {
                                         await updateService.downloadAndInstallUpdate(from: url, silent: false)
@@ -8458,7 +8825,7 @@ public struct MainPanelView: View {
 
                         // Аккуратная кликабельная ссылка под кнопками
                         Button {
-                            TapticSoundAndHaptics.shared.performDialTick()
+                            TapticSoundAndHaptics.shared.playClick()
                             updateService.openReleasePage()
                         } label: {
                             HStack(spacing: 4) {
@@ -8495,7 +8862,7 @@ public struct MainPanelView: View {
     }
 
     private func saveAnnotatedScreenshotAndClose(originalItem: ClipboardItemRow, sourceImage: NSImage) {
-        TapticSoundAndHaptics.shared.performDialClickConfirm()
+        TapticSoundAndHaptics.shared.playClick()
         if let rendered = screenshotEditorEngine.renderAnnotatedImage(
             baseImage: sourceImage,
             canvasSize: editorCanvasSize,
@@ -8623,6 +8990,7 @@ public struct MainPanelView: View {
                             LightboxTopButton(
                                 theme: currentTheme,
                                 action: {
+                                    TapticSoundAndHaptics.shared.playClick()
                                     screenshotEditorEngine.clearAll()
                                 }
                             ) {
@@ -8634,6 +9002,7 @@ public struct MainPanelView: View {
                             LightboxTopButton(
                                 theme: currentTheme,
                                 action: {
+                                    TapticSoundAndHaptics.shared.playClick()
                                     let imgToSave = screenshotEditorEngine.renderAnnotatedImage(
                                         baseImage: image,
                                         canvasSize: editorCanvasSize,
@@ -8653,6 +9022,7 @@ public struct MainPanelView: View {
                             LightboxTopButton(
                                 theme: currentTheme,
                                 action: {
+                                    TapticSoundAndHaptics.shared.playClick()
                                     closeImageLightbox()
                                 }
                             ) {

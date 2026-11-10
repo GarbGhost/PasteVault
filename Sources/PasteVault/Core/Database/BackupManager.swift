@@ -146,7 +146,7 @@ public struct BackupSettingsPayload: Codable, Equatable, Sendable {
 public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
     public var version: Int = 1
     public var createdAt: Date = Date()
-    public var appVersion: String = "1.0.0"
+    public var appVersion: String = "1.0.1"
     public var clipboardItems: [BackupClipboardItem]?
     public var snippets: [QuickSnippetItem]?
     public var settings: BackupSettingsPayload?
@@ -154,7 +154,7 @@ public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
     public init(
         version: Int = 1,
         createdAt: Date = Date(),
-        appVersion: String = "1.0.0",
+        appVersion: String = "1.0.1",
         clipboardItems: [BackupClipboardItem]? = nil,
         snippets: [QuickSnippetItem]? = nil,
         settings: BackupSettingsPayload? = nil
@@ -237,7 +237,7 @@ public enum BackupManager {
         return PasteVaultBackupArchive(
             version: 1,
             createdAt: Date(),
-            appVersion: "1.0.0",
+            appVersion: "1.0.1",
             clipboardItems: archiveItems,
             snippets: archiveSnippets,
             settings: settingsPayload

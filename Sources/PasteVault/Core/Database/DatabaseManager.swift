@@ -116,7 +116,7 @@ public struct ClipboardItemRow: Identifiable, Equatable, Sendable {
         if effectiveIsSensitive || computedKind == .secret {
             self.displayPreviewText = SmartClassifier.maskedSecret(textPreview)
         } else {
-            self.displayPreviewText = String(textPreview.prefix(300)).replacingOccurrences(of: "\n", with: " ")
+            self.displayPreviewText = String(textPreview.prefix(250)).replacingOccurrences(of: "\n", with: " ")
         }
     }
 
@@ -296,7 +296,7 @@ public actor DatabaseManager {
 
         sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, contentType.rawValue)
-        sqlite3_bind_text(stmt, 3, String(textPreview.prefix(16384)), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 3, String(textPreview.prefix(500_000)), -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 4, contentHash, -1, SQLITE_TRANSIENT)
         bindOpt(stmt, 5, sourceBundleId)
         bindOpt(stmt, 6, sourceAppName)
@@ -348,7 +348,7 @@ public actor DatabaseManager {
 
         sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, contentType.rawValue)
-        sqlite3_bind_text(stmt, 3, String(textPreview.prefix(16384)), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 3, String(textPreview.prefix(500_000)), -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 4, contentHash, -1, SQLITE_TRANSIENT)
         bindOpt(stmt, 5, sourceBundleId)
         bindOpt(stmt, 6, sourceAppName)
@@ -485,6 +485,15 @@ public actor DatabaseManager {
             sqlite3_bind_text(stmt, 3, id, -1, SQLITE_TRANSIENT)
             _ = sqlite3_step(stmt)
         }
+    }
+
+    public func updateContentType(id: String, contentType: ContentKind) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE clipboard_items SET content_type = ?1 WHERE id = ?2;", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, contentType.rawValue)
+        sqlite3_bind_text(stmt, 2, (id as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        _ = sqlite3_step(stmt)
     }
 
     public func deleteItem(id: String) throws {

@@ -37,6 +37,29 @@ public final class ClipboardMonitor: ObservableObject {
         ShortcutManager.shared.isRecordingShortcut
     }
 
+    // MARK: - Защита строки поиска при авто-вставке (⌘V)
+    private var lastSafeSearchQuery: String = ""
+
+    @Published public var searchQuery: String = "" {
+        didSet {
+            if isPerformingAutoPaste {
+                if searchQuery != lastSafeSearchQuery {
+                    searchQuery = lastSafeSearchQuery
+                }
+            } else {
+                lastSafeSearchQuery = searchQuery
+            }
+        }
+    }
+
+    @Published public var isPerformingAutoPaste: Bool = false {
+        didSet {
+            if isPerformingAutoPaste {
+                lastSafeSearchQuery = searchQuery
+            }
+        }
+    }
+
     @AppStorage("autoPurgeSecretsEnabled") public var autoPurgeSecretsEnabled: Bool = false {
         didSet { objectWillChange.send() }
     }
@@ -593,6 +616,72 @@ public final class ClipboardMonitor: ObservableObject {
                 try? await DatabaseManager.shared.updateExpiresAt(id: itemId, expiresAt: nil)
             }
         }
+
+        // Быстрая проверка существующих записей с типом .code:
+        // если по обновленному SmartClassifier запись теперь определяется как .text, обновляем в памяти и в базе
+        for idx in loaded.indices where loaded[idx].contentType == .code {
+            let cur = loaded[idx]
+            let reclassified = SmartClassifier.classify(text: cur.content, isSensitive: cur.isSensitive, isImage: false)
+            if reclassified == .text {
+                let updated = ClipboardItemRow(
+                    id: cur.id,
+                    rowid: cur.rowid,
+                    contentType: .text,
+                    textPreview: cur.textPreview,
+                    contentHash: cur.contentHash,
+                    sourceBundleId: cur.sourceBundleId,
+                    sourceAppName: cur.sourceAppName,
+                    isSensitive: cur.isSensitive,
+                    secretKind: cur.secretKind,
+                    isPinned: cur.isPinned,
+                    createdAt: cur.createdAt,
+                    expiresAt: cur.expiresAt,
+                    ocrText: cur.ocrText,
+                    rawImageData: cur.rawImageData,
+                    fileURLPath: cur.fileURLPath,
+                    useCount: cur.useCount
+                )
+                loaded[idx] = updated
+                try? await DatabaseManager.shared.updateContentType(id: cur.id, contentType: .text)
+            }
+        }
+
+        // Проверка записей с типом .secret или isSensitive == true:
+        // если текст является именем файла (isLikelyFileName) или кириллической строкой без цифр, автоматически переводим в .text
+        for idx in loaded.indices {
+            let cur = loaded[idx]
+            if cur.isSensitive || cur.contentType == .secret {
+                if SecretDetector.isLikelyFileName(cur.content) || SecretDetector.isCyrillicSnakeOrKebabWithoutDigits(cur.content) {
+                    let updated = ClipboardItemRow(
+                        id: cur.id,
+                        rowid: cur.rowid,
+                        contentType: .text,
+                        textPreview: cur.textPreview,
+                        contentHash: cur.contentHash,
+                        sourceBundleId: cur.sourceBundleId,
+                        sourceAppName: cur.sourceAppName,
+                        isSensitive: false,
+                        secretKind: nil,
+                        isPinned: cur.isPinned,
+                        createdAt: cur.createdAt,
+                        expiresAt: nil,
+                        ocrText: cur.ocrText,
+                        rawImageData: cur.rawImageData,
+                        fileURLPath: cur.fileURLPath,
+                        useCount: cur.useCount
+                    )
+                    loaded[idx] = updated
+                    try? await DatabaseManager.shared.updateSecretStatus(
+                        id: cur.id,
+                        isSensitive: false,
+                        contentType: .text,
+                        secretKind: nil,
+                        expiresAt: nil
+                    )
+                }
+            }
+        }
+
         self.items = loaded
         // Обеспечиваем наличие превью для всех файлов и скриншотов в истории
         for item in loaded {
@@ -1138,7 +1227,7 @@ public final class ClipboardMonitor: ObservableObject {
     public func captureTextItem(_ rawText: String, isMarkedConcealed: Bool = false, bundleId: String? = nil, appName: String? = nil) {
         guard saveTextEnabled else { return }
 
-        let text = String(rawText.prefix(16384))
+        let text = String(rawText.prefix(500_000))
         let secretAnalysis = SecretDetector.inspect(text)
         let isSensitive = isMarkedConcealed || secretAnalysis.isSensitive
         let contentKind = SmartClassifier.classify(text: text, isSensitive: isSensitive, isImage: false)
@@ -1202,7 +1291,6 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Копирует запись в системный буфер обмена. Для файлов помещает NSURL, для картинок — данные изображения
     public func copyToClipboard(item: ClipboardItemRow, selfDestructAfterSeconds: TimeInterval? = nil) {
-        TapticSoundAndHaptics.shared.performDialTick()
         pasteboard.clearContents()
 
         // 1. Для файлов — записываем реальные NSURL в буфер обмена
@@ -1247,7 +1335,6 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Синхронно кладет текст в системный буфер обмена за 0 мс (без повторного дублирования)
     public func copyToPasteboardImmediately(text: String, selfDestructAfterSeconds: TimeInterval? = nil) {
-        TapticSoundAndHaptics.shared.performDialTick()
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         lastChangeCount = pasteboard.changeCount
@@ -1406,6 +1493,7 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Собственный движок контекстной вставки Paste Vault для Warp, Safari, ChatGPT, Antigravity (независимо от раскладки клавиатуры)
     public func pasteIntoTargetApp(_ item: ClipboardItemRow) {
+        isPerformingAutoPaste = true
         let ttl: TimeInterval? = item.expiresAt.map { max(1, $0.timeIntervalSinceNow) }
         copyToClipboard(item: item, selfDestructAfterSeconds: ttl)
         recordItemUsage(id: item.id)
@@ -1414,6 +1502,7 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Вставляет выбранный элемент как чистый неформатированный текст
     public func pasteIntoTargetAppPlainText(_ item: ClipboardItemRow) {
+        isPerformingAutoPaste = true
         let ttl: TimeInterval? = item.expiresAt.map { max(1, $0.timeIntervalSinceNow) }
         let text = item.ocrText ?? item.textPreview
         copyToPasteboardImmediately(text: text, selfDestructAfterSeconds: ttl)
@@ -1426,14 +1515,26 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Копирует выбранный текст, возвращает фокус в целевое приложение и выполняет двухконтурную вставку (AXMenuItem Paste / CGEvent ⌘V)
     public func pasteIntoTargetApp(text: String, selfDestructAfterSeconds: TimeInterval? = nil) {
+        isPerformingAutoPaste = true
         copyToPasteboardImmediately(text: text, selfDestructAfterSeconds: selfDestructAfterSeconds)
         performPasteOperation()
     }
 
     private func performPasteOperation() {
-        // 1. Проверяем Универсальный доступ через AccessibilityService.
+        isPerformingAutoPaste = true
+
+        // 1. Принудительно снимаем фокус с любого текстового поля внутри всех окон самого PasteVault
+        for window in NSApp.windows {
+            window.makeFirstResponder(nil)
+            if window is NSPanel {
+                window.resignKey()
+            }
+        }
+
+        // 2. Проверяем Универсальный доступ через AccessibilityService.
         //    Если доступа нет — НЕ вызываем системный prompt! Показываем аккуратный баннер в окне приложения.
         guard checkAccessibilityPermission() else {
+            isPerformingAutoPaste = false
             NotificationCenter.default.post(name: Self.pasteBlockedNotification, object: nil)
             return
         }
@@ -1441,16 +1542,19 @@ public final class ClipboardMonitor: ObservableObject {
         if (lastActiveApp == nil || lastActiveApp?.isTerminated == true) && (targetApp == nil || targetApp?.isTerminated == true) {
             detectFrontmostExternalApp()
         }
-        let destinationApp = lastActiveApp ?? targetApp
+        var destinationApp = lastActiveApp ?? targetApp
+        if destinationApp?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            destinationApp = nil
+        }
 
-        // 2. Активируем целевое приложение (окно Paste Vault остаётся открытым поверх для повторных вставок)
+        // 3. Активируем целевое приложение (окно Paste Vault остаётся открытым поверх для повторных вставок)
         if let destinationApp, !destinationApp.isTerminated {
-            destinationApp.activate()
+            destinationApp.activate(options: [.activateIgnoringOtherApps])
         } else {
             NSApp.deactivate()
         }
 
-        // 3. Ждём подтверждения фокуса целевого приложения (проверка каждые 20 мс до 250 мс) и вставляем
+        // 4. Ждём подтверждения фокуса целевого приложения и вставляем
         waitForTargetAppAndPaste(targetApp: destinationApp, elapsedMs: 0)
     }
 
@@ -1491,6 +1595,19 @@ public final class ClipboardMonitor: ObservableObject {
     private func waitForTargetAppAndPaste(targetApp: NSRunningApplication?, elapsedMs: Int) {
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let targetPID = targetApp?.processIdentifier
+        let frontBundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let isOurApp = (frontBundleId == Bundle.main.bundleIdentifier)
+
+        // Если активен процесс самого PasteVault, ждём переключения фокуса на внешнее приложение
+        if isOurApp && elapsedMs < 300 {
+            if let targetApp, !targetApp.isTerminated {
+                targetApp.activate(options: [.activateIgnoringOtherApps])
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(40)) { [weak self] in
+                self?.waitForTargetAppAndPaste(targetApp: targetApp, elapsedMs: elapsedMs + 40)
+            }
+            return
+        }
 
         let isFrontmostConfirmed = (targetPID == nil) || (frontPID == targetPID) || (elapsedMs >= 250)
         if isFrontmostConfirmed {
@@ -1503,6 +1620,7 @@ public final class ClipboardMonitor: ObservableObject {
                     if self.checkAccessibilityPermission() {
                         self.postPasteEvent()
                     }
+                    self.scheduleResetAutoPasteFlag()
                 }
                 return
             }
@@ -1510,21 +1628,32 @@ public final class ClipboardMonitor: ObservableObject {
             // Стандартные приложения: 70 мс на восстановление курсора, затем AX-меню «Вставить», иначе ⌘V
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(70)) { [weak self] in
                 guard let self else { return }
-                guard self.checkAccessibilityPermission() else { return }
+                guard self.checkAccessibilityPermission() else {
+                    self.scheduleResetAutoPasteFlag()
+                    return
+                }
                 if let pid = activeApp?.processIdentifier, self.triggerNativeMenuPaste(for: pid) {
+                    self.scheduleResetAutoPasteFlag()
                     return
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
                     self?.postPasteEvent()
+                    self?.scheduleResetAutoPasteFlag()
                 }
             }
         } else {
             if let targetApp, !targetApp.isTerminated {
-                targetApp.activate()
+                targetApp.activate(options: [.activateIgnoringOtherApps])
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in
                 self?.waitForTargetAppAndPaste(targetApp: targetApp, elapsedMs: elapsedMs + 20)
             }
+        }
+    }
+
+    private func scheduleResetAutoPasteFlag() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.isPerformingAutoPaste = false
         }
     }
 
@@ -1533,7 +1662,14 @@ public final class ClipboardMonitor: ObservableObject {
     /// используется только если не удалось создать событие для HID-канала — одновременная отправка в оба канала
     /// приводит к двойной вставке, т.к. события из HID-tap и так проходят через session-tap.
     public func postPasteEvent() {
-        synthesizeCommandV()
+        // Убеждаемся, что фокус не находится на PasteVault в момент посылки ⌘V
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(70)) { [weak self] in
+                self?.synthesizeCommandV()
+            }
+        } else {
+            synthesizeCommandV()
+        }
     }
 
     /// Контур 1: Нативный вызов пункта меню «Вставить / Paste» целевого приложения через Apple Accessibility (AXUIElement)

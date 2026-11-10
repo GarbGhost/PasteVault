@@ -26,8 +26,20 @@ public final class UpdateService: ObservableObject {
     @Published public var autoCheckUpdates: Bool {
         didSet {
             UserDefaults.standard.set(autoCheckUpdates, forKey: "autoCheckUpdates")
+            if autoCheckUpdates {
+                startAutoCheckTimer()
+                Task {
+                    await self.checkForUpdates(manual: false)
+                }
+            } else {
+                stopAutoCheckTimer()
+            }
         }
     }
+
+    private var autoCheckTimer: Timer?
+    public private(set) var lastCheckDate: Date? = nil
+    private var wakeObserver: Any?
 
     private struct GitHubReleaseResponse: Decodable {
         let tagName: String
@@ -54,9 +66,12 @@ public final class UpdateService: ObservableObject {
     }
 
     public var currentVersion: String {
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
-        if Bundle.main.bundlePath.hasSuffix(".xctest") || raw.isEmpty {
-            return "1.0.0"
+        if let bundleID = Bundle.main.bundleIdentifier, bundleID != "com.pastevault.app" {
+            return "1.0.1"
+        }
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+        if Bundle.main.bundlePath.contains("xctest") || raw.isEmpty {
+            return "1.0.1"
         }
         return raw
     }
@@ -67,6 +82,59 @@ public final class UpdateService: ObservableObject {
             self.autoCheckUpdates = false
         } else {
             self.autoCheckUpdates = UserDefaults.standard.bool(forKey: "autoCheckUpdates")
+        }
+
+        setupLifecycleObservers()
+
+        if self.autoCheckUpdates {
+            startAutoCheckTimer()
+            Task { [weak self] in
+                await self?.checkForUpdates(manual: false)
+            }
+        }
+    }
+
+    private func startAutoCheckTimer() {
+        stopAutoCheckTimer()
+        guard autoCheckUpdates else { return }
+        autoCheckTimer = Timer.scheduledTimer(withTimeInterval: 4 * 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.autoCheckUpdates else { return }
+                await self.checkForUpdates(manual: false)
+            }
+        }
+    }
+
+    private func stopAutoCheckTimer() {
+        autoCheckTimer?.invalidate()
+        autoCheckTimer = nil
+    }
+
+    private func setupLifecycleObservers() {
+        if wakeObserver == nil {
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self = self, self.autoCheckUpdates else { return }
+                    let elapsed = Date().timeIntervalSince(self.lastCheckDate ?? .distantPast)
+                    if elapsed > 30 * 60 {
+                        await self.checkForUpdates(manual: false)
+                    }
+                }
+            }
+        }
+    }
+
+    public func onSettingsTabOpened() {
+        guard autoCheckUpdates else { return }
+        let elapsed = Date().timeIntervalSince(lastCheckDate ?? .distantPast)
+        if elapsed > 15 * 60 {
+            Task { [weak self] in
+                await self?.checkForUpdates(manual: false)
+            }
         }
     }
 
@@ -109,6 +177,9 @@ public final class UpdateService: ObservableObject {
     public func checkForUpdates(manual: Bool = true) async {
         state = .checking
         let localVersion = currentVersion
+        defer {
+            lastCheckDate = Date()
+        }
 
         // Эфемерная конфигурация URLSession без cookies и кэша (100% Zero-Telemetry)
         let config = URLSessionConfiguration.ephemeral
@@ -163,9 +234,7 @@ public final class UpdateService: ObservableObject {
                     releasePageURL: pageURL,
                     releaseNotes: release.body ?? ""
                 )
-                if manual {
-                    isUpdateModalPresented = true
-                }
+                isUpdateModalPresented = true
             } else {
                 state = .upToDate(currentVersion: localVersion)
                 if manual {
@@ -175,6 +244,100 @@ public final class UpdateService: ObservableObject {
         } catch {
             state = .privateOrOffline(currentVersion: localVersion, releasesURL: Self.releasesPageURL)
         }
+    }
+
+    /// Очистка текста описания релиза для аккуратного компактного показа в попапе обновления
+    nonisolated public static func formattedPopupReleaseNotes(from rawBody: String) -> String {
+        let stopMarkers = [
+            "### 📦 Установка", "### 📦 Installing",
+            "## 📦 Установка", "## 📦 Installing",
+            "📦 Установка", "📦 Installing",
+            "### Установка", "### Installing",
+            "## Установка", "## Installing",
+            "<details", "Checksums", "SHA-256",
+            "## [v", "### [v"
+        ]
+
+        var cutoffIndex = rawBody.endIndex
+        let lowerBody = rawBody.lowercased()
+        for marker in stopMarkers {
+            if let range = lowerBody.range(of: marker.lowercased()) {
+                if range.lowerBound < cutoffIndex {
+                    cutoffIndex = range.lowerBound
+                }
+            }
+        }
+        let content = String(rawBody[..<cutoffIndex])
+
+        let lines = content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        var resultItems: [String] = []
+        var currentItem: String = ""
+
+        for line in lines {
+            if line.isEmpty {
+                if !currentItem.isEmpty {
+                    resultItems.append(currentItem)
+                    currentItem = ""
+                }
+                continue
+            }
+
+            // Пропускаем markdown-заголовки
+            if line.hasPrefix("#") {
+                if !currentItem.isEmpty {
+                    resultItems.append(currentItem)
+                    currentItem = ""
+                }
+                continue
+            }
+
+            // Пропускаем приветственные вводные строки
+            let lowerLine = line.lowercased()
+            if lowerLine.hasPrefix("вышел pastevault") || lowerLine.contains("is out") {
+                continue
+            }
+
+            // Очищаем сырой markdown: **, `
+            var clean = line.replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "`", with: "")
+
+            var isBullet = false
+            let bulletPrefixes = ["•", "-", "*", "💾", "✨", "⚡️", "🔒", "🎨", "🚀"]
+            for prefix in bulletPrefixes {
+                if clean.hasPrefix(prefix) {
+                    isBullet = true
+                    clean = clean.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+
+            if isBullet {
+                if !currentItem.isEmpty {
+                    resultItems.append(currentItem)
+                }
+                currentItem = clean
+            } else {
+                if !currentItem.isEmpty {
+                    currentItem += " " + clean
+                } else {
+                    currentItem = clean
+                }
+            }
+        }
+
+        if !currentItem.isEmpty {
+            resultItems.append(currentItem)
+        }
+
+        let bullets = resultItems.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { "• \($0)" }
+        if bullets.isEmpty {
+            let fallback = content.replacingOccurrences(of: "#", with: "")
+                .replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "`", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return fallback.isEmpty ? "" : fallback
+        }
+        return bullets.joined(separator: "\n\n")
     }
 
     public func dismissModal() {

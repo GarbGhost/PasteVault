@@ -23,10 +23,80 @@ public enum SecretDetector {
         }
     }()
 
+    /// Проверяет, является ли строка вероятным именем файла с расширением
+    public static func isLikelyFileName(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.contains(" ") && !trimmed.contains("\t") && !trimmed.contains("\n") && !trimmed.contains("\r") else {
+            return false
+        }
+        guard trimmed.contains(".") else { return false }
+
+        let lower = trimmed.lowercased()
+        let knownExtensions: [String] = [
+            ".conf", ".txt", ".docx", ".doc", ".json", ".swift", ".py", ".md", ".sh", ".js", ".ts",
+            ".tsx", ".jsx", ".html", ".css", ".scss", ".xml", ".yaml", ".yml", ".toml", ".ini",
+            ".cfg", ".env", ".plist", ".sql", ".db", ".sqlite", ".csv", ".log", ".pdf", ".png",
+            ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".icns", ".mp4", ".mov", ".mp3", ".wav",
+            ".zip", ".tar", ".gz", ".dmg", ".pkg", ".app", ".command", ".pastevaultbackup"
+        ]
+        return knownExtensions.contains { lower.hasSuffix($0) }
+    }
+
+    /// Проверяет, содержит ли одиночная строка кириллические буквы и не содержит цифр (русский snake_case/kebab-case)
+    public static func isCyrillicSnakeOrKebabWithoutDigits(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let hasCyrillic = trimmed.unicodeScalars.contains {
+            ($0.value >= 0x0400 && $0.value <= 0x04FF) || ($0.value >= 0x0500 && $0.value <= 0x052F)
+        }
+        let hasDigits = trimmed.contains { $0 >= "0" && $0 <= "9" }
+        return hasCyrillic && !hasDigits
+    }
+
     public static func inspect(_ rawText: String) -> SecretAnalysis {
-        // Ограничиваем анализ первыми 1024 символами для мгновенной скорости (< 0.1 мс даже на огромных текстах)
-        let sample = String(rawText.prefix(1024)).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Ограничение O(1): строки длиннее 512 символов отсекаются мгновенно
+        guard rawText.count <= 512 else {
+            return SecretAnalysis(
+                isSensitive: false,
+                secretKind: nil,
+                recommendedTTLSeconds: nil,
+                shannonEntropy: 0
+            )
+        }
+
+        let sample = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sample.isEmpty else {
+            return SecretAnalysis(
+                isSensitive: false,
+                secretKind: nil,
+                recommendedTTLSeconds: nil,
+                shannonEntropy: 0
+            )
+        }
+
         let entropy = calculateShannonEntropy(sample)
+
+        // Имена файлов с расширениями никогда не являются паролями
+        if isLikelyFileName(sample) {
+            return SecretAnalysis(
+                isSensitive: false,
+                secretKind: nil,
+                recommendedTTLSeconds: nil,
+                shannonEntropy: entropy
+            )
+        }
+
+        // Кириллическая строка без цифр (например, слова через _) никогда не является паролем
+        if isCyrillicSnakeOrKebabWithoutDigits(sample) {
+            return SecretAnalysis(
+                isSensitive: false,
+                secretKind: nil,
+                recommendedTTLSeconds: nil,
+                shannonEntropy: entropy
+            )
+        }
+
         let range = NSRange(sample.startIndex..<sample.endIndex, in: sample)
 
         for rule in patterns {
@@ -48,10 +118,9 @@ public enum SecretDetector {
                           sample.hasPrefix("~/") || sample.hasPrefix("/")
         let isHexColor = sample.hasPrefix("#")
         let isStructuredData = sample.hasPrefix("{") || sample.hasPrefix("[")
-        let commonExtensions = [".swift", ".json", ".png", ".jpg", ".jpeg", ".pdf", ".txt", ".md", ".zip", ".dmg", ".tar", ".gz", ".html", ".css", ".js", ".ts", ".py", ".go", ".rs", ".cpp", ".c", ".h", ".m"]
-        let isFilename = commonExtensions.contains(where: { lower.hasSuffix($0) })
+        let isFilename = isLikelyFileName(sample)
 
-        if hasNoWhitespace && !isURLOrPath && !isHexColor && !isStructuredData && !isFilename && (8...128).contains(sample.count) {
+        if hasNoWhitespace && !isURLOrPath && !isHexColor && !isStructuredData && !isFilename && !isCyrillicSnakeOrKebabWithoutDigits(sample) && (8...128).contains(sample.count) {
             let specialChars = Set("!@#$%^&*()_+-=[]{}|;:'\",.<>?/`~")
             let hasLower = sample.contains { $0.isLowercase }
             let hasUpper = sample.contains { $0.isUppercase }

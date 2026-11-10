@@ -1,17 +1,17 @@
 <div align="center">
   <img src="Resources/Branding/AppIcon_1024.png" width="80" height="80" alt="PasteVault Icon">
   <h1>PasteVault</h1>
-  <p><b>Smart clipboard manager, screenshot editor, offline OCR, password vault with timer, and snippet manager for macOS.</b></p>
+  <p><b>Smart clipboard manager, screenshot editor, quick file export, offline OCR, password vault with timer, and snippet manager for macOS.</b></p>
 
   <p>
-    <a href="../../releases/latest"><img src="https://img.shields.io/badge/release-v1.0.0-10B981?style=flat-square" alt="Release v1.0.0"></a>
-    <img src="https://img.shields.io/badge/macOS-13.0%2B-0284C7?style=flat-square&logo=apple" alt="macOS 13.0+">
+    <a href="../../releases/latest"><img src="https://img.shields.io/badge/release-v1.0.1-10B981?style=flat-square" alt="Release v1.0.1"></a>
+    <img src="https://img.shields.io/badge/macOS-14.0%2B-0284C7?style=flat-square&logo=apple" alt="macOS 14.0+">
     <img src="https://img.shields.io/badge/Universal-Apple_Silicon_%26_Intel-8B5CF6?style=flat-square" alt="Universal Binary">
     <img src="https://img.shields.io/badge/SwiftUI-100%25_Offline-F59E0B?style=flat-square" alt="100% Offline">
   </p>
 
   <p>
-    <a href="README.md">🇷🇺 Русский</a> &nbsp;|&nbsp; <b>🇬🇧 English</b> &nbsp;|&nbsp; <a href="../../releases/latest">⬇️ Download v1.0.0 (.dmg)</a>
+    <a href="README.md">🇷🇺 Русский</a> &nbsp;|&nbsp; <b>🇬🇧 English</b> &nbsp;|&nbsp; <a href="../../releases/latest">⬇️ Download v1.0.1 (.dmg)</a>
   </p>
 </div>
 
@@ -20,7 +20,8 @@
 ### ✨ Features
 
 * **Smart Clipboard with Search Highlighting** — Instant full-text search powered by SQLite FTS5 with real-time colored match highlighting in card text; filter by content types (Text, Code, Links, Images, Colors `#HEX`, Passwords, Pinned); pinning (`Pin`), text editing, smart transformations (JSON, Base64, case convert, whitespace trim), and instant auto-paste into active windows.
-* **Built-in Screenshot & Image Editor** — Full-featured markup for copied images and screenshots in one click: arrows, rectangles, ellipses, text annotations, highlighter, blur/pixelation for secrets, step counters (`1, 2, 3`), magnifier loupe, cropping, zoom, and hotkey support.
+* **Quick Text & Code Export to File** — One-click card export directly from the right inspector into 9 popular formats: `.docx` (Microsoft Word document), `.txt`, `.conf`, `.json`, `.swift`, `.py`, `.md`, `.sh`, and `.js` with smart automatic file naming, recommended format badge, and native `NSSavePanel` sheet presentation.
+* **Built-in Screenshot & Image Editor** — Full-featured markup for copied images and screenshots in one click: arrows, rectangles, ellipses, text annotations, highlighter, blur/pixelation for secrets, step counters (`1, 2, 3`), magnifier loupe, cropping, zoom, `.png` saving, and hotkey support.
 * **Offline Photo OCR** — Instant offline text extraction in English and Russian from screenshots and images via native Apple Vision framework without sending anything to the cloud.
 * **Password Vault, Secret Detector & Self-Destruct Timer** — Automatic detection of passwords, API keys, and tokens with bullet masking (`••••`), auto-delete timer (10 sec to 6 min) with pause and stop controls, plus a built-in cryptographically secure password & passphrase generator (CSPRNG) with entropy calculation.
 * **Quick Snippets** — Categorized storage for text templates, signatures, and commands with `Pin` protection against accidental bulk clearing, search highlighting, and dynamic tags (`{{date}}`, `{{time}}`, and `{{clipboard}}`).
@@ -32,7 +33,7 @@
 
 ### 📦 Installation
 
-1. Download **`PasteVault_v1.0.0_Universal.dmg`** from [**Releases**](../../releases/latest) (runs natively on Apple Silicon M1–M4 & Intel), open the disk image, and drag **`Paste Vault.app`** into **`Applications`**.
+1. Download **`PasteVault_v1.0.1_Universal.dmg`** from [**Releases**](../../releases/latest) (runs on macOS 14 and up, on Apple Silicon and Intel), open the disk image, and drag **`Paste Vault.app`** into **`Applications`**.
 2. On first launch, bypass the macOS Gatekeeper prompt using either method:
    * **Method 1 (macOS UI):** Try opening `Paste Vault.app` → click "Done" on the Gatekeeper dialog → open **System Settings → Privacy & Security**, scroll down, and click **"Open Anyway"**.
    * **Method 2 (1-second Terminal command):**
@@ -62,11 +63,11 @@ When annotating images, the following keyboard shortcuts are supported:
 
 ### 💻 System Requirements
 
-* **macOS:** 13.0 (Ventura) or later
-* **Architecture:** Universal Binary (`arm64` Apple Silicon M1–M4 + `x86_64` Intel)
+* **macOS:** 14.0 or later
+* **Architecture:** Universal Binary (Apple Silicon & Intel)
 * **UI Language:** English / Russian (switchable in Settings)
 * **Local Storage:** `~/Library/Application Support/PasteVault/` (100% offline, SQLite)
 
 <div align="center">
-  <sub>Made with ❤️ for macOS • <b>PasteVault v1.0.0</b></sub>
+  <sub>Made with ❤️ for macOS • <b>PasteVault v1.0.1</b></sub>
 </div>
