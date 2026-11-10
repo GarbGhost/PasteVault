@@ -9,6 +9,72 @@ public enum SnippetSearchScope: String, CaseIterable, Identifiable {
 }
 
 public enum SearchHighlightHelper {
+    public static let supportedSnippetMacros = ["{{date}}", "{{time}}", "{{datetime}}", "{{clipboard}}"]
+
+    /// Проверяет наличие хотя бы одного динамического макроса в тексте
+    public static func containsSnippetMacro(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("{{date}}") || lower.contains("{{time}}") || lower.contains("{{datetime}}") || lower.contains("{{clipboard}}")
+    }
+
+    /// Формирует AttributedString с акцентной подсветкой динамических макросов ({{date}}, {{time}}, {{datetime}}, {{clipboard}})
+    /// и опциональной подсветкой поискового запроса.
+    public static func highlightedSnippetText(
+        _ text: String,
+        query: String = "",
+        accentColor: Color = .accentColor,
+        primaryColor: Color = .primary,
+        baseFontSize: CGFloat = 12,
+        baseFont: Font? = nil,
+        isLight: Bool = false
+    ) -> AttributedString {
+        var attributed = AttributedString(text)
+        if let baseFont {
+            attributed.font = baseFont
+        } else {
+            attributed.font = .system(size: baseFontSize)
+        }
+        attributed.foregroundColor = primaryColor
+
+        guard !text.isEmpty else { return attributed }
+
+        // 1. Подсветка макросов {{date}}, {{time}}, {{datetime}}, {{clipboard}}
+        let macroBg = accentColor.opacity(0.16)
+        let macroFont = Font.system(size: baseFontSize, weight: .bold, design: .monospaced)
+
+        for macro in supportedSnippetMacros {
+            var searchRange = attributed.startIndex..<attributed.endIndex
+            while let matchRange = attributed[searchRange].range(of: macro, options: .caseInsensitive) {
+                attributed[matchRange].font = macroFont
+                attributed[matchRange].foregroundColor = accentColor
+                attributed[matchRange].backgroundColor = macroBg
+                if matchRange.upperBound < attributed.endIndex {
+                    searchRange = matchRange.upperBound..<attributed.endIndex
+                } else {
+                    break
+                }
+            }
+        }
+
+        // 2. Если одновременно задан непустой поисковый запрос, накладываем подсветку поиска поверх
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty {
+            let searchBg = accentColor.opacity(isLight ? 0.28 : 0.40)
+            var searchRange = attributed.startIndex..<attributed.endIndex
+            while let matchRange = attributed[searchRange].range(of: trimmedQuery, options: .caseInsensitive) {
+                attributed[matchRange].backgroundColor = searchBg
+                attributed[matchRange].inlinePresentationIntent = .stronglyEmphasized
+                if matchRange.upperBound < attributed.endIndex {
+                    searchRange = matchRange.upperBound..<attributed.endIndex
+                } else {
+                    break
+                }
+            }
+        }
+
+        return attributed
+    }
+
     /// Формирует AttributedString с подсветкой всех нечувствительных к регистру вхождений `query` в `text`.
     public static func highlight(
         text: String,

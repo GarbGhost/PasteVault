@@ -2842,22 +2842,27 @@ public struct QuickSnippetCardRowView: View {
                 }
 
                 let contentText = MainPanelView.localizedSnippetContent(snippet.content, lang: language)
-                if !searchQuery.isEmpty {
-                    Text(SearchHighlightHelper.highlight(
-                        text: contentText,
-                        query: searchQuery,
-                        baseFont: currentFont.font(size: 11, weight: .regular),
-                        baseColor: currentTheme.primaryText.opacity(0.9),
-                        accentColor: currentTheme.accentColor,
-                        isLight: currentTheme.isLight,
-                        bold: true
-                    ))
-                    .lineLimit(2)
-                } else {
-                    Text(contentText)
-                        .font(currentFont.font(size: 11, weight: .regular))
-                        .foregroundStyle(currentTheme.primaryText.opacity(0.9))
-                        .lineLimit(2)
+                Text(SearchHighlightHelper.highlightedSnippetText(
+                    contentText,
+                    query: searchQuery,
+                    accentColor: currentTheme.accentColor,
+                    primaryColor: currentTheme.primaryText.opacity(0.9),
+                    baseFontSize: 11,
+                    baseFont: currentFont.font(size: 11, weight: .regular),
+                    isLight: currentTheme.isLight
+                ))
+                .lineLimit(2)
+
+                if SearchHighlightHelper.containsSnippetMacro(snippet.content) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .foregroundStyle(currentTheme.accentColor)
+                            .font(.system(size: 9))
+                        Text(tr("Макросы заменятся при вставке", "Macros expand on paste", lang: language))
+                            .font(currentFont.font(size: 9.5, weight: .medium))
+                            .foregroundStyle(currentTheme.secondaryText)
+                    }
+                    .padding(.top, 1)
                 }
             }
 
@@ -4654,6 +4659,49 @@ public struct MainPanelView: View {
         }
     }
 
+    // MARK: - Macro Live Preview Helper
+    private var macroLiveSampleText: String {
+        let formatter = DateFormatter()
+        formatter.locale = (currentLanguage == .ru) ? Locale(identifier: "ru_RU") : Locale(identifier: "en_US")
+        formatter.dateFormat = "dd.MM.yyyy • HH:mm"
+        return formatter.string(from: Date())
+    }
+
+    private var macroLivePreviewBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "bolt.fill")
+                .foregroundStyle(currentTheme.accentColor)
+                .font(.system(size: 11))
+
+            Text(tr("При вставке макросы заменятся на текущие дату, время и буфер", "Macros expand to current date, time, and clipboard on paste"))
+                .font(currentFont.font(size: 11, weight: .medium))
+                .foregroundStyle(currentTheme.secondaryText)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            Text(macroLiveSampleText)
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(currentTheme.accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(currentTheme.accentColor.opacity(0.14))
+                )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(currentTheme.accentColor.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(currentTheme.accentColor.opacity(0.20), lineWidth: 1)
+        )
+    }
+
     // MARK: - Right Inspector Column
     private var rightInspectorColumn: some View {
         VStack(spacing: 0) {
@@ -5323,15 +5371,16 @@ public struct MainPanelView: View {
                                             let isShowingFull = (currentItem.content.count <= inspectorPreviewCharLimit) || (showFullTextInInspectorItemId == currentItem.id)
                                             let textToDisplay = isShowingFull ? currentItem.content : String(currentItem.content.prefix(inspectorPreviewCharLimit))
 
-                                            if !searchQuery.isEmpty {
-                                                Text(SearchHighlightHelper.highlight(
-                                                    text: textToDisplay,
+                                            let hasMacros = SearchHighlightHelper.containsSnippetMacro(textToDisplay)
+                                            if !searchQuery.isEmpty || hasMacros {
+                                                Text(SearchHighlightHelper.highlightedSnippetText(
+                                                    textToDisplay,
                                                     query: searchQuery,
-                                                    baseFont: currentFont.font(size: 13, weight: .regular),
-                                                    baseColor: currentTheme.primaryText,
                                                     accentColor: currentTheme.accentColor,
-                                                    isLight: currentTheme.isLight,
-                                                    bold: true
+                                                    primaryColor: currentTheme.primaryText,
+                                                    baseFontSize: 13,
+                                                    baseFont: currentFont.font(size: 13, weight: .regular),
+                                                    isLight: currentTheme.isLight
                                                 ))
                                                 .textSelection(.enabled)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -5341,6 +5390,11 @@ public struct MainPanelView: View {
                                                     .foregroundStyle(currentTheme.primaryText)
                                                     .textSelection(.enabled)
                                                     .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+
+                                            if hasMacros {
+                                                macroLivePreviewBanner
+                                                    .padding(.top, 4)
                                             }
 
                                             if !isShowingFull {
@@ -5745,8 +5799,8 @@ public struct MainPanelView: View {
                     )
                     .frame(height: 110)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(tr("Доступные макросы: {{date}}, {{time}}, {{datetime}}, {{clipboard}}", "Available macros: {{date}}, {{time}}, {{datetime}}, {{clipboard}}"))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(tr("Доступные макросы:", "Available macros:"))
                         .font(currentFont.font(size: 10, weight: .medium))
                         .foregroundStyle(currentTheme.secondaryText)
 
@@ -5756,20 +5810,27 @@ public struct MainPanelView: View {
                                 newSnippetContent.append(macro)
                             } label: {
                                 Text(macro)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(currentTheme.primaryText.opacity(0.08))
-                                    .foregroundStyle(currentTheme.primaryText)
-                                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3.5)
+                                    .foregroundStyle(currentTheme.accentColor)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .fill(currentTheme.accentColor.opacity(0.14))
+                                    )
                                     .overlay(
-                                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                            .strokeBorder(currentTheme.borderColor, lineWidth: 1)
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .strokeBorder(currentTheme.accentColor.opacity(0.35), lineWidth: 1)
                                     )
                             }
                             .buttonStyle(.plain)
                             .help(tr("Вставить макрос \(macro)", "Insert macro \(macro)"))
                         }
+                    }
+
+                    if SearchHighlightHelper.containsSnippetMacro(newSnippetContent) {
+                        macroLivePreviewBanner
+                            .padding(.top, 4)
                     }
                 }
                 .padding(.top, 2)

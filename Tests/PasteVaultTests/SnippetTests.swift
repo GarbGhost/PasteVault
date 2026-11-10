@@ -139,4 +139,68 @@ final class SnippetTests: XCTestCase {
         XCTAssertEqual(snippets.count, 1)
         XCTAssertEqual(snippets.first?.id, "pin-2", "При массовой очистке закрепленный фрагмент pin-2 должен остаться нетронутым")
     }
+
+    // MARK: - 6. Подсветка всех 4 динамических макросов ({{date}}, {{time}}, {{datetime}}, {{clipboard}})
+    func testSnippetMacroHighlightingDetectsAllFourMacros() {
+        let text = "Отчёт от {{date}} в {{time}} ({{datetime}}): {{clipboard}}"
+
+        // 1. Проверяем обнаружение макросов хелпером
+        XCTAssertTrue(SearchHighlightHelper.containsSnippetMacro(text), "Строка должна определяться как содержащая макросы")
+        XCTAssertFalse(SearchHighlightHelper.containsSnippetMacro("Обычный текст без макросов"), "Обычный текст не должен содержать макросов")
+
+        // 2. Формируем подсветку
+        let attributed = SearchHighlightHelper.highlightedSnippetText(
+            text,
+            query: "",
+            accentColor: .blue,
+            primaryColor: .primary,
+            baseFontSize: 12
+        )
+
+        // Текст должен сохраниться неизменным посимвольно без потери символов
+        XCTAssertEqual(String(attributed.characters), text, "Текст AttributedString должен полностью совпадать с исходным")
+
+        // 3. Проверяем, что для всех 4 макросов применён акцентный фон и цвет
+        for macro in ["{{date}}", "{{time}}", "{{datetime}}", "{{clipboard}}"] {
+            let macroRange = attributed.range(of: macro, options: .caseInsensitive)
+            XCTAssertNotNil(macroRange, "Макрос \(macro) обязан присутствовать в AttributedString")
+            if let range = macroRange {
+                let bg = attributed[range].backgroundColor
+                let fg = attributed[range].foregroundColor
+                XCTAssertNotNil(bg, "Макрос \(macro) должен иметь цвет фона")
+                XCTAssertNotNil(fg, "Макрос \(macro) должен иметь цвет текста")
+            }
+        }
+    }
+
+    // MARK: - 7. Подсветка макросов при одновременном поисковом запросе
+    func testSnippetMacroHighlightingWithSearchQuery() {
+        let text = "Отчёт от {{date}} в {{time}} ({{datetime}}): {{clipboard}}"
+        let query = "Отчёт"
+
+        let attributed = SearchHighlightHelper.highlightedSnippetText(
+            text,
+            query: query,
+            accentColor: .blue,
+            primaryColor: .primary,
+            baseFontSize: 12
+        )
+
+        // Текст должен сохраниться неизменным посимвольно полной длины
+        XCTAssertEqual(String(attributed.characters), text, "Длина и символы должны сохраняться при одновременном поиске и макросах")
+
+        // Проверяем наличие подсветки поискового слова
+        let queryRange = attributed.range(of: query, options: .caseInsensitive)
+        XCTAssertNotNil(queryRange, "Слово поискового запроса обязано присутствовать")
+        if let range = queryRange {
+            XCTAssertNotNil(attributed[range].backgroundColor, "Поисковый запрос должен иметь цвет фона")
+        }
+
+        // И макрос {{date}} также сохраняет свои атрибуты
+        let dateRange = attributed.range(of: "{{date}}", options: .caseInsensitive)
+        XCTAssertNotNil(dateRange, "Макрос {{date}} обязан присутствовать параллельно с поиском")
+        if let range = dateRange {
+            XCTAssertNotNil(attributed[range].backgroundColor, "Макрос должен иметь подсветку параллельно с поиском")
+        }
+    }
 }
