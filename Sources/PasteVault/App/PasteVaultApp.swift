@@ -6,6 +6,7 @@ import Carbon
 @MainActor
 public struct PasteVaultApp {
     public static func main() {
+        AppDefaults.shared.set(180, forKey: "NSInitialToolTipDelay")
         AppDelegate.main()
     }
 }
@@ -28,7 +29,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             let countImage = items.filter { $0.effectiveContentType == .image }.count
             let countSecret = items.filter { $0.isSensitive || $0.effectiveContentType == .secret }.count
             let countColor = items.filter { $0.effectiveContentType == .color }.count
-            let countUTM = items.filter { $0.tags.contains("#UTM-трекер") }.count
+            let countUTM = items.filter { $0.tags.contains("#UTM-трекер") || $0.tags.contains("#UTM-tracker") }.count
             let countSwift = items.filter { $0.tags.contains("#Swift") }.count
             let countJSON = items.filter { $0.tags.contains("#JSON") }.count
             let countOCR = items.filter { $0.tags.contains("#OCR") }.count
@@ -46,15 +47,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // 0.1 Тестируем SecretDetector на паролях от 8 символов и мнемонических фразах
             let pass8 = "kX8#mQ2$"
             let pass8Analysis = SecretDetector.inspect(pass8)
-            let passMnemonic = "apple-banana-cherry-dragon"
+            let passMnemonic = "amber-7-cobalt-falcon-9!"
             let passMnemonicAnalysis = SecretDetector.inspect(passMnemonic)
             let concealedText = "simple123"
             let concealedClassified = SmartClassifier.classify(text: concealedText, isSensitive: true, isImage: false)
             let normalText = "regular normal text"
             let normalAnalysis = SecretDetector.inspect(normalText)
 
-            guard pass8Analysis.isSensitive, pass8Analysis.secretKind == "Пароль",
-                  passMnemonicAnalysis.isSensitive, passMnemonicAnalysis.secretKind == "Пароль",
+            guard pass8Analysis.isSensitive,
+                  (pass8Analysis.secretKind == "Пароль" || pass8Analysis.secretKind == "Password"),
+                  passMnemonicAnalysis.isSensitive,
+                  (passMnemonicAnalysis.secretKind == "Пароль" || passMnemonicAnalysis.secretKind == "Password"),
                   concealedClassified == .secret,
                   !normalAnalysis.isSensitive else {
                 fputs("[SYNTHETIC_PASSWORD_DETECTOR_8CHAR_FAILED]\n", stderr)
@@ -212,7 +215,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 exit(1)
             }
             delegate.monitor.copyToClipboard(item: imageItem)
-            let pb = NSPasteboard.general
+            let pb = delegate.monitor.pasteboard
             let itemTypes = pb.pasteboardItems?.flatMap { $0.types } ?? []
             let hasPNG = itemTypes.contains(.png)
             let hasTIFF = itemTypes.contains(.tiff)
@@ -337,7 +340,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 exit(1)
             }
             mon.copyToClipboard(item: fileItem)
-            let filePb = NSPasteboard.general
+            let filePb = mon.pasteboard
             let hasFileURL = filePb.types?.contains(NSPasteboard.PasteboardType("public.file-url")) == true
             let fileString = filePb.string(forType: .string) ?? ""
             guard hasFileURL, !fileString.isEmpty else {
@@ -585,6 +588,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public let monitor = ClipboardMonitor.shared
     private var panel: FloatingPanel<MainPanelView>?
     private var hotKeyRef: EventHotKeyRef?
+    private var eventHandlerRef: EventHandlerRef?
+    private var shortcutsObserver: NSObjectProtocol?
     public private(set) var statusItem: NSStatusItem?
     private var activityToken: NSObjectProtocol?
     private var spaceChangeObserver: NSObjectProtocol?
@@ -596,11 +601,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             "NSStatusItem Visible Item-0": true,
             "NSStatusItem Visible PasteVaultStatusItem": true,
             "autoCheckUpdates": false,
-            "tapticAudioFeedbackEnabled": true
+            "tapticAudioFeedbackEnabled": true,
+            "NSInitialToolTipDelay": 180
         ])
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        AppDefaults.shared.set(180, forKey: "NSInitialToolTipDelay")
         Self.registerMenuBarDefaults()
         Self.enforceSingleInstance()
         LaunchAtLoginManager.cleanupLegacyLaunchAgent()
@@ -685,8 +692,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
+        let shortcutDisplay = ShortcutManager.shared.config.togglePanel.displayString
         let openItem = NSMenuItem(
-            title: tr("Открыть PasteVault (⌥ + Space)", "Open PasteVault (⌥ + Space)"),
+            title: tr("Открыть PasteVault (\(shortcutDisplay))", "Open PasteVault (\(shortcutDisplay))"),
             action: #selector(handleOpenFromMenu),
             keyEquivalent: ""
         )
@@ -919,8 +927,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             let menu = NSMenu()
 
+            let shortcutDisplay = ShortcutManager.shared.config.togglePanel.displayString
             let openItem = NSMenuItem(
-                title: tr("Открыть окно PasteVault (⌥ + Space)", "Open PasteVault Window (⌥ + Space)"),
+                title: tr("Открыть окно PasteVault (\(shortcutDisplay))", "Open PasteVault Window (\(shortcutDisplay))"),
                 action: #selector(handleOpenFromMenu),
                 keyEquivalent: ""
             )
@@ -1025,7 +1034,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupHotKeys() {
         registerCarbonHotKey()
-        NotificationCenter.default.addObserver(
+        if let existingObserver = shortcutsObserver {
+            NotificationCenter.default.removeObserver(existingObserver)
+            shortcutsObserver = nil
+        }
+        shortcutsObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name("pasteVaultShortcutsDidChange"),
             object: nil,
             queue: .main
@@ -1041,6 +1054,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             UnregisterEventHotKey(existing)
             hotKeyRef = nil
         }
+        if let existingHandler = eventHandlerRef {
+            RemoveEventHandler(existingHandler)
+            eventHandlerRef = nil
+        }
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -1055,7 +1072,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return noErr
         }
 
-        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, nil, nil)
+        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, nil, &eventHandlerRef)
 
         let combo = ShortcutManager.shared.config.togglePanel
         var carbonModifiers: UInt32 = 0

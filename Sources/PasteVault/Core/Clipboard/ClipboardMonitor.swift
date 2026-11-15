@@ -26,13 +26,16 @@ public final class ClipboardMonitor: ObservableObject {
     @Published public private(set) var cachedStorageSize: String = "0 КБ"
     @Published public var annotatedCopyToastMessage: String? = nil
     @Published public var isModalOverlayActive: Bool = false
+    /// true, пока открыт системный NSOpenPanel/NSSavePanel: окно PasteVault не скрывается от потери фокуса
+    public var isShowingFilePanel: Bool = false
     @Published public var isEditingScreenshotText: Bool = false
     @Published public var isIncognitoPaused: Bool = false
     @Published public var targetApp: NSRunningApplication?
     @Published public var lastActiveApp: NSRunningApplication?
-    @Published public var targetAppName: String = "активное окно"
+    @Published public var targetAppName: String = (AppLanguage.current == .en ? "active window" : "активное окно")
     @Published public var targetAppIcon: NSImage?
     @Published public var isAccessibilityGranted: Bool = AccessibilityService.isAccessibilityTrusted()
+    @Published public var accessibilityAlertPulseTrigger: Int = 0
     public var isRecordingShortcut: Bool {
         ShortcutManager.shared.isRecordingShortcut
     }
@@ -60,30 +63,30 @@ public final class ClipboardMonitor: ObservableObject {
         }
     }
 
-    @AppStorage("autoPurgeSecretsEnabled") public var autoPurgeSecretsEnabled: Bool = false {
+    @AppStorage("autoPurgeSecretsEnabled", store: AppDefaults.shared) public var autoPurgeSecretsEnabled: Bool = false {
         didSet { objectWillChange.send() }
     }
-    @AppStorage("autoPurgeSecretsSeconds") public var autoPurgeSecretsSeconds: Int = 60 {
+    @AppStorage("autoPurgeSecretsSeconds", store: AppDefaults.shared) public var autoPurgeSecretsSeconds: Int = 60 {
         didSet { objectWillChange.send() }
     }
 
     // MARK: - Настройки хранения и типов данных (Storage & Types)
-    @AppStorage("saveFilesEnabled") public var saveFilesEnabled: Bool = true {
+    @AppStorage("saveFilesEnabled", store: AppDefaults.shared) public var saveFilesEnabled: Bool = true {
         didSet { objectWillChange.send() }
     }
-    @AppStorage("saveImagesEnabled") public var saveImagesEnabled: Bool = true {
+    @AppStorage("saveImagesEnabled", store: AppDefaults.shared) public var saveImagesEnabled: Bool = true {
         didSet { objectWillChange.send() }
     }
-    @AppStorage("saveTextEnabled") public var saveTextEnabled: Bool = true {
+    @AppStorage("saveTextEnabled", store: AppDefaults.shared) public var saveTextEnabled: Bool = true {
         didSet { objectWillChange.send() }
     }
-    @AppStorage("maxHistoryLimit") public var maxHistoryLimit: Int = 500 {
+    @AppStorage("maxHistoryLimit", store: AppDefaults.shared) public var maxHistoryLimit: Int = 500 {
         didSet {
             enforceHistoryLimit()
             objectWillChange.send()
         }
     }
-    @AppStorage("historySortOrder") public var historySortOrder: String = "lastCopied" {
+    @AppStorage("historySortOrder", store: AppDefaults.shared) public var historySortOrder: String = "lastCopied" {
         didSet {
             applySortOrder()
             objectWillChange.send()
@@ -93,21 +96,21 @@ public final class ClipboardMonitor: ObservableObject {
     // MARK: - Ручные переопределения статуса секретности
     public nonisolated static var manuallyDemotedTextIds: Set<String> {
         get {
-            let array = UserDefaults.standard.stringArray(forKey: "manuallyDemotedTextIds") ?? []
+            let array = AppDefaults.shared.stringArray(forKey: "manuallyDemotedTextIds") ?? []
             return Set(array)
         }
         set {
-            UserDefaults.standard.set(Array(newValue), forKey: "manuallyDemotedTextIds")
+            AppDefaults.shared.set(Array(newValue), forKey: "manuallyDemotedTextIds")
         }
     }
 
     public nonisolated static var manuallyPromotedSecretIds: Set<String> {
         get {
-            let array = UserDefaults.standard.stringArray(forKey: "manuallyPromotedSecretIds") ?? []
+            let array = AppDefaults.shared.stringArray(forKey: "manuallyPromotedSecretIds") ?? []
             return Set(array)
         }
         set {
-            UserDefaults.standard.set(Array(newValue), forKey: "manuallyPromotedSecretIds")
+            AppDefaults.shared.set(Array(newValue), forKey: "manuallyPromotedSecretIds")
         }
     }
 
@@ -135,7 +138,7 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Пересчитывает размер хранилища строго при изменениях массива items
     public func refreshCachedStorageSize() {
-        let isEn = (UserDefaults.standard.string(forKey: "appLanguage") == "en")
+        let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
         guard !items.isEmpty else {
             cachedStorageSize = isEn ? "0 KB" : "0 КБ"
             return
@@ -195,14 +198,26 @@ public final class ClipboardMonitor: ObservableObject {
         imageCache.removeObject(forKey: id as NSString)
     }
 
-    /// Полная очистка всей истории буфера (память, превью, база с VACUUM)
-    public func clearAllHistory() {
+    private var historyClearEpoch: UInt64 = 0
+
+    /// Очищает историю и кэши только в оперативной памяти без запуска фонового Task в БД
+    public func clearAllHistoryInMemory() {
+        historyClearEpoch &+= 1
         items.removeAll()
         imagePreviews.removeAll()
         imageCache.removeAllObjects()
         canonicalColorsByItemId.removeAll()
         pausedTimerSeconds.removeAll()
+        for workItem in pendingDestructWorkItems.values {
+            workItem.cancel()
+        }
+        pendingDestructWorkItems.removeAll()
         refreshCachedStorageSize()
+    }
+
+    /// Полная очистка всей истории буфера (память, превью, база с VACUUM)
+    public func clearAllHistory() {
+        clearAllHistoryInMemory()
         Task {
             try? await DatabaseManager.shared.clearAllHistory()
         }
@@ -403,7 +418,7 @@ public final class ClipboardMonitor: ObservableObject {
             promoted.insert(itemId)
             demoted.remove(itemId)
             newContentType = .secret
-            newSecretKind = "Пароль"
+            newSecretKind = (AppLanguage.current == .en) ? "Password" : "Пароль"
         } else {
             // Пользователь сделал обычным текстом
             demoted.insert(itemId)
@@ -415,8 +430,9 @@ public final class ClipboardMonitor: ObservableObject {
         manuallyDemotedTextIds = demoted
         manuallyPromotedSecretIds = promoted
 
-        // Сбрасываем таймер для записи
+        // Сбрасываем таймер для записи и отменяем запланированный сброс буфера
         pausedTimerSeconds.removeValue(forKey: itemId)
+        pendingDestructWorkItems.removeValue(forKey: itemId)?.cancel()
 
         let updated = ClipboardItemRow(
             id: current.id,
@@ -469,6 +485,10 @@ public final class ClipboardMonitor: ObservableObject {
         }
         for id in idsToDelete {
             imagePreviews.removeValue(forKey: id)
+            imageCache.removeObject(forKey: id as NSString)
+            canonicalColorsByItemId.removeValue(forKey: id)
+            pausedTimerSeconds.removeValue(forKey: id)
+            pendingDestructWorkItems.removeValue(forKey: id)?.cancel()
         }
         Task {
             for id in idsToDelete {
@@ -541,7 +561,7 @@ public final class ClipboardMonitor: ObservableObject {
 
     @Published public var blacklistedBundleIDs: [String] = [] {
         didSet {
-            UserDefaults.standard.set(blacklistedBundleIDs, forKey: Self.blacklistedDefaultsKey)
+            AppDefaults.shared.set(blacklistedBundleIDs, forKey: Self.blacklistedDefaultsKey)
             objectWillChange.send()
         }
     }
@@ -574,7 +594,7 @@ public final class ClipboardMonitor: ObservableObject {
         blacklistedBundleIDs = Self.defaultBlacklistedBundleIDs
     }
 
-    private let pasteboard = NSPasteboard.general
+    public let pasteboard: NSPasteboard = DatabaseManager.isRunningTests ? NSPasteboard.withUniqueName() : NSPasteboard.general
     private var lastChangeCount: Int
     private var dispatchTimer: DispatchSourceTimer?
     private var purgeTimer: Timer?
@@ -588,16 +608,16 @@ public final class ClipboardMonitor: ObservableObject {
 
     public init() {
         self.lastChangeCount = pasteboard.changeCount
-        if let saved = UserDefaults.standard.stringArray(forKey: Self.blacklistedDefaultsKey), !saved.isEmpty {
+        if let saved = AppDefaults.shared.stringArray(forKey: Self.blacklistedDefaultsKey), !saved.isEmpty {
             self.blacklistedBundleIDs = saved
         } else {
             self.blacklistedBundleIDs = Self.defaultBlacklistedBundleIDs
-            UserDefaults.standard.set(Self.defaultBlacklistedBundleIDs, forKey: Self.blacklistedDefaultsKey)
+            AppDefaults.shared.set(Self.defaultBlacklistedBundleIDs, forKey: Self.blacklistedDefaultsKey)
         }
         // Однократная миграция: отключаем принудительное автоудаление по умолчанию, чтобы пароли жили пока пользователь сам не включит таймер
-        if !UserDefaults.standard.bool(forKey: "didMigrateManualSecretTimerV2") {
-            UserDefaults.standard.set(false, forKey: "autoPurgeSecretsEnabled")
-            UserDefaults.standard.set(true, forKey: "didMigrateManualSecretTimerV2")
+        if !AppDefaults.shared.bool(forKey: "didMigrateManualSecretTimerV2") {
+            AppDefaults.shared.set(false, forKey: "autoPurgeSecretsEnabled")
+            AppDefaults.shared.set(true, forKey: "didMigrateManualSecretTimerV2")
             self.autoPurgeSecretsEnabled = false
         }
         detectFrontmostExternalApp()
@@ -607,9 +627,11 @@ public final class ClipboardMonitor: ObservableObject {
     }
 
     public func loadInitialHistory() async {
+        let startClearEpoch = historyClearEpoch
+        let existingIdsAtStart = Set(items.map(\.id))
         var loaded = (try? await DatabaseManager.shared.queryItems(searchQuery: "", limit: Int32(maxHistoryLimit))) ?? []
-        if !UserDefaults.standard.bool(forKey: "didMigrateClearExistingTimersV2") {
-            UserDefaults.standard.set(true, forKey: "didMigrateClearExistingTimersV2")
+        if !AppDefaults.shared.bool(forKey: "didMigrateClearExistingTimersV2") {
+            AppDefaults.shared.set(true, forKey: "didMigrateClearExistingTimersV2")
             for idx in loaded.indices where loaded[idx].expiresAt != nil {
                 loaded[idx].expiresAt = nil
                 let itemId = loaded[idx].id
@@ -682,9 +704,18 @@ public final class ClipboardMonitor: ObservableObject {
             }
         }
 
-        self.items = loaded
+        guard historyClearEpoch == startClearEpoch else { return }
+
+        // Сохраняем карточки, которые успели скопироваться за время await загрузки из SQLite
+        let loadedIds = Set(loaded.map(\.id))
+        let capturedDuringLoad = self.items.filter { item in
+            !existingIdsAtStart.contains(item.id) && !loadedIds.contains(item.id)
+        }
+        let mergedLoaded = capturedDuringLoad + loaded
+
+        self.items = mergedLoaded
         // Обеспечиваем наличие превью для всех файлов и скриншотов в истории
-        for item in loaded {
+        for item in mergedLoaded {
             if item.contentType == .file {
                 if imagePreviews[item.id] == nil, let firstURL = item.fileURLs.first {
                     let icon = NSWorkspace.shared.icon(forFile: firstURL.path)
@@ -701,15 +732,21 @@ public final class ClipboardMonitor: ObservableObject {
     }
 
     public func startMonitoring() {
+        if purgeTimer == nil {
+            startPurgeTimer()
+        }
+        if accessibilityTimer == nil {
+            startAccessibilityMonitoring()
+        }
         guard dispatchTimer == nil else { return }
 
         // Сразу проверяем текущий буфер и целевое приложение при запуске
         detectFrontmostExternalApp()
         captureCurrentPasteboard(force: true)
 
-        // Высокочастотный таймер (60 мс = 0.06 сек) со флагом .strict — мгновенная реакция на ⌘+C
-        let source = DispatchSource.makeTimerSource(flags: .strict, queue: .main)
-        source.schedule(deadline: .now() + .milliseconds(60), repeating: .milliseconds(60), leeway: .milliseconds(5))
+        // Энергоэффективный 60 мс поллинг (без .strict, чтобы macOS App Nap мог экономить энергию в фоне)
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.schedule(deadline: .now() + .milliseconds(60), repeating: .milliseconds(60), leeway: .milliseconds(15))
         source.setEventHandler { [weak self] in
             self?.captureCurrentPasteboard(force: false)
         }
@@ -717,24 +754,26 @@ public final class ClipboardMonitor: ObservableObject {
         self.dispatchTimer = source
 
         // Отслеживаем переключение окон в macOS (Warp, Safari, ChatGPT, Antigravity и т.д.)
-        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            let activatedApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            Task { @MainActor in
-                guard let self else { return }
-                if let app = activatedApp,
-                   app.activationPolicy == .regular,
-                   app.bundleIdentifier != Bundle.main.bundleIdentifier,
-                   app.localizedName != "Paste Vault",
-                   app.localizedName != "PasteVault",
-                   !Self.isIgnoredTarget(app) {
-                    self.lastActiveApp = app
-                    self.updateTargetApplication(app)
+        if workspaceObserver == nil {
+            workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                let activatedApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let app = activatedApp,
+                       app.activationPolicy == .regular,
+                       app.bundleIdentifier != Bundle.main.bundleIdentifier,
+                       app.localizedName != "Paste Vault",
+                       app.localizedName != "PasteVault",
+                       !Self.isIgnoredTarget(app) {
+                        self.lastActiveApp = app
+                        self.updateTargetApplication(app)
+                    }
+                    self.captureCurrentPasteboard(force: false)
                 }
-                self.captureCurrentPasteboard(force: false)
             }
         }
     }
@@ -782,6 +821,10 @@ public final class ClipboardMonitor: ObservableObject {
         for expired in expiredItems {
             items.removeAll { $0.id == expired.id }
             imagePreviews.removeValue(forKey: expired.id)
+            imageCache.removeObject(forKey: expired.id as NSString)
+            canonicalColorsByItemId.removeValue(forKey: expired.id)
+            pausedTimerSeconds.removeValue(forKey: expired.id)
+            pendingDestructWorkItems.removeValue(forKey: expired.id)?.cancel()
 
             // Если удаляемый пароль сейчас находится в системном NSPasteboard.general — очищаем буфер обмена!
             if let currentPasteboardText,
@@ -799,6 +842,15 @@ public final class ClipboardMonitor: ObservableObject {
 
     /// Словарь оставшихся секунд для записей на паузе [itemId: remainingSeconds]
     @Published public var pausedTimerSeconds: [String: Int] = [:]
+    private var pendingDestructWorkItems: [String: DispatchWorkItem] = [:]
+
+    internal func hasPendingDestructWorkItem(for id: String) -> Bool {
+        pendingDestructWorkItems[id] != nil
+    }
+
+    internal var pendingDestructWorkItemCount: Int {
+        pendingDestructWorkItems.count
+    }
 
     /// Приостанавливает таймер автоудаления для конкретной записи id
     public func pauseTimerForItem(id: String, remainingSeconds: Int) {
@@ -823,6 +875,7 @@ public final class ClipboardMonitor: ObservableObject {
     /// Мгновенно отменяет таймер автоудаления ТОЛЬКО для одной конкретной записи id (пароль остаётся в истории бессрочно)
     public func cancelTimerForItem(id: String) {
         pausedTimerSeconds.removeValue(forKey: id)
+        pendingDestructWorkItems.removeValue(forKey: id)?.cancel()
         setItemExpiration(id: id, expiresAt: nil)
     }
 
@@ -873,7 +926,7 @@ public final class ClipboardMonitor: ObservableObject {
         }
         self.lastActiveApp = app
         self.targetApp = app
-        self.targetAppName = app.localizedName ?? "активное окно"
+        self.targetAppName = app.localizedName ?? (AppLanguage.current == .en ? "active window" : "активное окно")
         self.targetAppIcon = app.icon
     }
 
@@ -927,6 +980,11 @@ public final class ClipboardMonitor: ObservableObject {
     }
 
     /// Мгновенная синхронная проверка буфера (вызывается перед открытием окна и по таймеру)
+    /// Игнорирует следующее изменение буфера обмена (при программной авто-вставке)
+    public func ignoreNextChange() {
+        lastChangeCount = pasteboard.changeCount
+    }
+
     public func pollPasteboardImmediately() {
         captureCurrentPasteboard(force: false)
     }
@@ -1078,7 +1136,10 @@ public final class ClipboardMonitor: ObservableObject {
 
         let width = Int(image.size.width)
         let height = Int(image.size.height)
-        let previewText = "[Скриншот \(width)×\(height) пкс] #OCR"
+        let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
+        let previewText = isEn
+            ? "[Screenshot \(width)×\(height) px] #OCR"
+            : "[Скриншот \(width)×\(height) пкс] #OCR"
         let digest = SHA256.hash(data: tiffData)
         let contentHash = digest.map { String(format: "%02x", $0) }.joined()
         let now = Int64(Date().timeIntervalSince1970)
@@ -1086,7 +1147,7 @@ public final class ClipboardMonitor: ObservableObject {
         let existingItem = items.first(where: { $0.contentHash == contentHash })
         let itemId = existingItem?.id ?? UUID().uuidString
         let isPinned = existingItem?.isPinned ?? false
-        let ocr = existingItem?.ocrText ?? Self.recognizeOCRText(from: tiffData)
+        let cachedOCR = existingItem?.ocrText
 
         let newRow = ClipboardItemRow(
             id: itemId,
@@ -1095,13 +1156,13 @@ public final class ClipboardMonitor: ObservableObject {
             textPreview: previewText,
             contentHash: contentHash,
             sourceBundleId: bundleId,
-            sourceAppName: appName ?? "Снимок экрана",
+            sourceAppName: appName ?? (isEn ? "Screenshot" : "Снимок экрана"),
             isSensitive: false,
             secretKind: nil,
             isPinned: isPinned,
             createdAt: now,
             expiresAt: nil,
-            ocrText: ocr,
+            ocrText: cachedOCR,
             rawImageData: tiffData,
             fileURLPath: nil,
             useCount: existingItem?.useCount ?? 0
@@ -1124,8 +1185,22 @@ public final class ClipboardMonitor: ObservableObject {
                 sourceAppName: appName,
                 isSensitive: false,
                 secretKind: nil,
-                ttlSeconds: nil
+                ttlSeconds: nil,
+                ocrText: cachedOCR
             )
+            if cachedOCR == nil {
+                let recognized = await Task.detached(priority: .utility) {
+                    Self.recognizeOCRText(from: tiffData)
+                }.value
+                if let recognized, !recognized.isEmpty {
+                    await MainActor.run {
+                        if let idx = self.items.firstIndex(where: { $0.id == itemId }) {
+                            self.items[idx].ocrText = recognized
+                        }
+                    }
+                    try? await DatabaseManager.shared.updateItemOCRText(id: itemId, ocrText: recognized)
+                }
+            }
         }
     }
 
@@ -1134,9 +1209,9 @@ public final class ClipboardMonitor: ObservableObject {
     public func saveAnnotatedCopy(from originalItem: ClipboardItem, annotatedImage: NSImage) -> ClipboardItem {
         let width = max(1, Int(annotatedImage.size.width))
         let height = max(1, Int(annotatedImage.size.height))
-        let isEn = (UserDefaults.standard.string(forKey: "appLanguage") == "en")
+        let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
         let previewText = isEn
-            ? "[Скриншот \(width)×\(height) px • Annotated] #OCR"
+            ? "[Screenshot \(width)×\(height) px • Annotated] #OCR"
             : "[Скриншот \(width)×\(height) пкс • Разметка] #OCR"
 
         let itemId = UUID().uuidString
@@ -1242,10 +1317,11 @@ public final class ClipboardMonitor: ObservableObject {
         let itemId = existingItem?.id ?? UUID().uuidString
         let isPinned = existingItem?.isPinned ?? false
 
+        let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
         // Автотаймер для новых паролей полностью отключен (таймер выставляется только вручную пользователем)
         let expiresAtDate: Date? = existingItem?.expiresAt
         let ttlSeconds: Int64? = expiresAtDate.map { max(1, Int64($0.timeIntervalSinceNow)) }
-        let secretKind = secretAnalysis.secretKind ?? (isMarkedConcealed ? "Пароль" : nil)
+        let secretKind = secretAnalysis.secretKind ?? (isMarkedConcealed ? (isEn ? "Password" : "Пароль") : nil)
 
         let newRow = ClipboardItemRow(
             id: itemId,
@@ -1254,7 +1330,7 @@ public final class ClipboardMonitor: ObservableObject {
             textPreview: text,
             contentHash: contentHash,
             sourceBundleId: bundleId,
-            sourceAppName: appName ?? "Системный буфер",
+            sourceAppName: appName ?? (isEn ? "System Clipboard" : "Системный буфер"),
             isSensitive: isSecretKind,
             secretKind: secretKind,
             isPinned: isPinned,
@@ -1283,10 +1359,6 @@ public final class ClipboardMonitor: ObservableObject {
                 ttlSeconds: ttlSeconds
             )
         }
-    }
-
-    private func classifyContent(text: String, isSensitive: Bool) -> ContentKind {
-        SmartClassifier.classify(text: text, isSensitive: isSensitive)
     }
 
     /// Копирует запись в системный буфер обмена. Для файлов помещает NSURL, для картинок — данные изображения
@@ -1324,28 +1396,48 @@ public final class ClipboardMonitor: ObservableObject {
         lastChangeCount = pasteboard.changeCount
 
         if let ttl = selfDestructAfterSeconds {
+            pendingDestructWorkItems.removeValue(forKey: item.id)?.cancel()
             let expectedChangeCount = lastChangeCount
-            DispatchQueue.main.asyncAfter(deadline: .now() + ttl) { [weak self] in
-                guard let self, self.pasteboard.changeCount == expectedChangeCount else { return }
+            let itemId = item.id
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingDestructWorkItems.removeValue(forKey: itemId)
+                guard self.pasteboard.changeCount == expectedChangeCount else { return }
                 self.pasteboard.clearContents()
                 self.lastChangeCount = self.pasteboard.changeCount
             }
+            pendingDestructWorkItems[itemId] = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + ttl, execute: workItem)
         }
     }
 
     /// Синхронно кладет текст в системный буфер обмена за 0 мс (без повторного дублирования)
-    public func copyToPasteboardImmediately(text: String, selfDestructAfterSeconds: TimeInterval? = nil) {
+    public func copyToPasteboardImmediately(text: String, selfDestructAfterSeconds: TimeInterval? = nil, destructKey: String? = nil) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         lastChangeCount = pasteboard.changeCount
 
         if let ttl = selfDestructAfterSeconds {
+            let itemKey: String
+            if let destructKey, !destructKey.isEmpty {
+                itemKey = destructKey
+            } else {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let digest = SHA256.hash(data: Data(trimmed.utf8))
+                let contentHash = digest.map { String(format: "%02x", $0) }.joined()
+                itemKey = items.first(where: { $0.contentHash == contentHash })?.id ?? "immediate_\(UUID().uuidString)"
+            }
+            pendingDestructWorkItems.removeValue(forKey: itemKey)?.cancel()
             let expectedChangeCount = lastChangeCount
-            DispatchQueue.main.asyncAfter(deadline: .now() + ttl) { [weak self] in
-                guard let self, self.pasteboard.changeCount == expectedChangeCount else { return }
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingDestructWorkItems.removeValue(forKey: itemKey)
+                guard self.pasteboard.changeCount == expectedChangeCount else { return }
                 self.pasteboard.clearContents()
                 self.lastChangeCount = self.pasteboard.changeCount
             }
+            pendingDestructWorkItems[itemKey] = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + ttl, execute: workItem)
         }
     }
 
@@ -1355,24 +1447,8 @@ public final class ClipboardMonitor: ObservableObject {
         let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
-        // Автотаймер для сгенерированных паролей отключен — таймер выставляется только вручную
         let effectiveTTL: TimeInterval? = ttlSeconds
 
-        // 1. Очищаем системный буфер и записываем пароль обычной строкой
-        pasteboard.clearContents()
-        pasteboard.setString(trimmed, forType: .string)
-        lastChangeCount = pasteboard.changeCount
-
-        if let effectiveTTL {
-            let expectedChangeCount = lastChangeCount
-            DispatchQueue.main.asyncAfter(deadline: .now() + effectiveTTL) { [weak self] in
-                guard let self, self.pasteboard.changeCount == expectedChangeCount else { return }
-                self.pasteboard.clearContents()
-                self.lastChangeCount = self.pasteboard.changeCount
-            }
-        }
-
-        // 2. Явно добавляем запись в историю с типом .secret, sourceAppName = "Paste Vault (PassGen)", isSensitive = true
         let payloadData = Data(trimmed.utf8)
         let digest = SHA256.hash(data: payloadData)
         let contentHash = digest.map { String(format: "%02x", $0) }.joined()
@@ -1384,6 +1460,29 @@ public final class ClipboardMonitor: ObservableObject {
         let itemId = existingItem?.id ?? UUID().uuidString
         let isPinned = existingItem?.isPinned ?? false
 
+        // 1. Очищаем системный буфер и записываем пароль обычной строкой
+        pasteboard.clearContents()
+        pasteboard.setString(trimmed, forType: .string)
+        lastChangeCount = pasteboard.changeCount
+
+        if let effectiveTTL {
+            pendingDestructWorkItems.removeValue(forKey: itemId)?.cancel()
+            let expectedChangeCount = lastChangeCount
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingDestructWorkItems.removeValue(forKey: itemId)
+                guard self.pasteboard.changeCount == expectedChangeCount else { return }
+                self.pasteboard.clearContents()
+                self.lastChangeCount = self.pasteboard.changeCount
+            }
+            pendingDestructWorkItems[itemId] = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + effectiveTTL, execute: workItem)
+        }
+
+        // 2. Явно добавляем запись в историю с типом .secret, sourceAppName = "PasteVault (PassGen)", isSensitive = true
+        let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
+        let generatedKind = isEn ? "Generated Password" : "Сгенерированный пароль"
+
         let newRow = ClipboardItemRow(
             id: itemId,
             rowid: existingItem?.rowid ?? nowTs,
@@ -1393,7 +1492,7 @@ public final class ClipboardMonitor: ObservableObject {
             sourceBundleId: Bundle.main.bundleIdentifier,
             sourceAppName: "PasteVault (PassGen)",
             isSensitive: true,
-            secretKind: "Сгенерированный пароль",
+            secretKind: generatedKind,
             isPinned: isPinned,
             createdAt: nowTs,
             expiresAt: expiresAtDate
@@ -1412,7 +1511,7 @@ public final class ClipboardMonitor: ObservableObject {
                 sourceBundleId: Bundle.main.bundleIdentifier,
                 sourceAppName: "PasteVault (PassGen)",
                 isSensitive: true,
-                secretKind: "Сгенерированный пароль",
+                secretKind: generatedKind,
                 ttlSeconds: ttlInt
             )
         }
@@ -1481,6 +1580,11 @@ public final class ClipboardMonitor: ObservableObject {
         return isAccessibilityGranted
     }
 
+    public func triggerAccessibilityAlertPulse() {
+        isAccessibilityGranted = false
+        accessibilityAlertPulseTrigger &+= 1
+    }
+
     /// Открывает Системные настройки macOS ровно на странице «Конфиденциальность → Универсальный доступ».
     /// triggerSystemPrompt: true вызывается ТОЛЬКО если пользователь явно запросил системное окно через нативный prompt Apple.
     public func openAccessibilitySettings(triggerSystemPrompt: Bool = false) {
@@ -1500,12 +1604,17 @@ public final class ClipboardMonitor: ObservableObject {
         performPasteOperation()
     }
 
+    private var autoPasteGeneration: UInt64 = 0
+    private var autoPasteResetWorkItem: DispatchWorkItem?
+    private var pendingSavedInputSource: TISInputSource?
+    private var inputSourceRestoreWorkItem: DispatchWorkItem?
+
     /// Вставляет выбранный элемент как чистый неформатированный текст
     public func pasteIntoTargetAppPlainText(_ item: ClipboardItemRow) {
         isPerformingAutoPaste = true
         let ttl: TimeInterval? = item.expiresAt.map { max(1, $0.timeIntervalSinceNow) }
         let text = item.ocrText ?? item.textPreview
-        copyToPasteboardImmediately(text: text, selfDestructAfterSeconds: ttl)
+        copyToPasteboardImmediately(text: text, selfDestructAfterSeconds: ttl, destructKey: item.id)
         recordItemUsage(id: item.id)
         performPasteOperation()
     }
@@ -1514,13 +1623,17 @@ public final class ClipboardMonitor: ObservableObject {
     public static let pasteBlockedNotification = Notification.Name("pasteVaultPasteBlockedNoAccessibility")
 
     /// Копирует выбранный текст, возвращает фокус в целевое приложение и выполняет двухконтурную вставку (AXMenuItem Paste / CGEvent ⌘V)
-    public func pasteIntoTargetApp(text: String, selfDestructAfterSeconds: TimeInterval? = nil) {
+    public func pasteIntoTargetApp(text: String, selfDestructAfterSeconds: TimeInterval? = nil, destructKey: String? = nil) {
         isPerformingAutoPaste = true
-        copyToPasteboardImmediately(text: text, selfDestructAfterSeconds: selfDestructAfterSeconds)
+        copyToPasteboardImmediately(text: text, selfDestructAfterSeconds: selfDestructAfterSeconds, destructKey: destructKey)
         performPasteOperation()
     }
 
     private func performPasteOperation() {
+        autoPasteGeneration &+= 1
+        let currentGeneration = autoPasteGeneration
+        autoPasteResetWorkItem?.cancel()
+        autoPasteResetWorkItem = nil
         isPerformingAutoPaste = true
 
         // 1. Принудительно снимаем фокус с любого текстового поля внутри всех окон самого PasteVault
@@ -1535,6 +1648,7 @@ public final class ClipboardMonitor: ObservableObject {
         //    Если доступа нет — НЕ вызываем системный prompt! Показываем аккуратный баннер в окне приложения.
         guard checkAccessibilityPermission() else {
             isPerformingAutoPaste = false
+            triggerAccessibilityAlertPulse()
             NotificationCenter.default.post(name: Self.pasteBlockedNotification, object: nil)
             return
         }
@@ -1549,13 +1663,13 @@ public final class ClipboardMonitor: ObservableObject {
 
         // 3. Активируем целевое приложение (окно Paste Vault остаётся открытым поверх для повторных вставок)
         if let destinationApp, !destinationApp.isTerminated {
-            destinationApp.activate(options: [.activateIgnoringOtherApps])
+            destinationApp.activate()
         } else {
             NSApp.deactivate()
         }
 
         // 4. Ждём подтверждения фокуса целевого приложения и вставляем
-        waitForTargetAppAndPaste(targetApp: destinationApp, elapsedMs: 0)
+        waitForTargetAppAndPaste(targetApp: destinationApp, elapsedMs: 0, generation: currentGeneration)
     }
 
     /// Автоматическое распознавание текста со скриншота через Apple Vision OCR
@@ -1592,7 +1706,9 @@ public final class ClipboardMonitor: ObservableObject {
             || bundleId.contains("org.alacritty")
     }
 
-    private func waitForTargetAppAndPaste(targetApp: NSRunningApplication?, elapsedMs: Int) {
+    private func waitForTargetAppAndPaste(targetApp: NSRunningApplication?, elapsedMs: Int, generation: UInt64) {
+        guard generation == autoPasteGeneration else { return }
+
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let targetPID = targetApp?.processIdentifier
         let frontBundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -1601,10 +1717,10 @@ public final class ClipboardMonitor: ObservableObject {
         // Если активен процесс самого PasteVault, ждём переключения фокуса на внешнее приложение
         if isOurApp && elapsedMs < 300 {
             if let targetApp, !targetApp.isTerminated {
-                targetApp.activate(options: [.activateIgnoringOtherApps])
+                targetApp.activate()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(40)) { [weak self] in
-                self?.waitForTargetAppAndPaste(targetApp: targetApp, elapsedMs: elapsedMs + 40)
+                self?.waitForTargetAppAndPaste(targetApp: targetApp, elapsedMs: elapsedMs + 40, generation: generation)
             }
             return
         }
@@ -1616,45 +1732,51 @@ public final class ClipboardMonitor: ObservableObject {
             // Терминалы и GPU-окна (Warp и др.): 80 мс на передачу GPU-фокуса, проверка прав и аппаратный ⌘V
             if requiresHardwareCommandV(for: activeApp) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in
-                    guard let self else { return }
+                    guard let self, generation == self.autoPasteGeneration else { return }
                     if self.checkAccessibilityPermission() {
                         self.postPasteEvent()
                     }
-                    self.scheduleResetAutoPasteFlag()
+                    self.scheduleResetAutoPasteFlag(generation: generation)
                 }
                 return
             }
 
             // Стандартные приложения: 70 мс на восстановление курсора, затем AX-меню «Вставить», иначе ⌘V
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(70)) { [weak self] in
-                guard let self else { return }
+                guard let self, generation == self.autoPasteGeneration else { return }
                 guard self.checkAccessibilityPermission() else {
-                    self.scheduleResetAutoPasteFlag()
+                    self.scheduleResetAutoPasteFlag(generation: generation)
                     return
                 }
                 if let pid = activeApp?.processIdentifier, self.triggerNativeMenuPaste(for: pid) {
-                    self.scheduleResetAutoPasteFlag()
+                    self.scheduleResetAutoPasteFlag(generation: generation)
                     return
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
-                    self?.postPasteEvent()
-                    self?.scheduleResetAutoPasteFlag()
+                    guard let self, generation == self.autoPasteGeneration else { return }
+                    self.postPasteEvent()
+                    self.scheduleResetAutoPasteFlag(generation: generation)
                 }
             }
         } else {
             if let targetApp, !targetApp.isTerminated {
-                targetApp.activate(options: [.activateIgnoringOtherApps])
+                targetApp.activate()
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in
-                self?.waitForTargetAppAndPaste(targetApp: targetApp, elapsedMs: elapsedMs + 20)
+                self?.waitForTargetAppAndPaste(targetApp: targetApp, elapsedMs: elapsedMs + 20, generation: generation)
             }
         }
     }
 
-    private func scheduleResetAutoPasteFlag() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.isPerformingAutoPaste = false
+    private func scheduleResetAutoPasteFlag(generation: UInt64) {
+        autoPasteResetWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.autoPasteGeneration else { return }
+            self.autoPasteResetWorkItem = nil
+            self.isPerformingAutoPaste = false
         }
+        autoPasteResetWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
 
     /// Отправляет ⌘V (kVK_Command 0x37 + kVK_ANSI_V 0x09) через CGEvent.
@@ -1662,10 +1784,12 @@ public final class ClipboardMonitor: ObservableObject {
     /// используется только если не удалось создать событие для HID-канала — одновременная отправка в оба канала
     /// приводит к двойной вставке, т.к. события из HID-tap и так проходят через session-tap.
     public func postPasteEvent() {
+        let generation = autoPasteGeneration
         // Убеждаемся, что фокус не находится на PasteVault в момент посылки ⌘V
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(70)) { [weak self] in
-                self?.synthesizeCommandV()
+                guard let self, generation == self.autoPasteGeneration else { return }
+                self.synthesizeCommandV()
             }
         } else {
             synthesizeCommandV()
@@ -1680,12 +1804,14 @@ public final class ClipboardMonitor: ObservableObject {
         let appElement = AXUIElementCreateApplication(pid)
         var menuBarRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
-              let menuBar = menuBarRef else {
+              let menuBar = menuBarRef,
+              CFGetTypeID(menuBar) == AXUIElementGetTypeID() else {
             return false
         }
+        let menuBarElement = unsafeBitCast(menuBar, to: AXUIElement.self)
 
         var topChildrenRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(menuBar as! AXUIElement, kAXChildrenAttribute as CFString, &topChildrenRef) == .success,
+        guard AXUIElementCopyAttributeValue(menuBarElement, kAXChildrenAttribute as CFString, &topChildrenRef) == .success,
               let topMenuBarItems = topChildrenRef as? [AXUIElement],
               !topMenuBarItems.isEmpty else {
             return false
@@ -1780,7 +1906,9 @@ public final class ClipboardMonitor: ObservableObject {
     /// Контур 2: Аппаратный сигнал клавиши ⌘V через CGEvent в основной системный канал .cghidEventTap
     /// Если активна не-ASCII раскладка (например, русская), на 45 мс включает системную ASCII-раскладку для гарантированного приёма ⌘V в Warp/Electron и сразу возвращает исходную
     public func synthesizeCommandV() {
-        var previousInputSource: TISInputSource? = nil
+        inputSourceRestoreWorkItem?.cancel()
+        inputSourceRestoreWorkItem = nil
+
         if let currentSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() {
             var isASCII = false
             if let asciiPtr = TISGetInputSourceProperty(currentSource, kTISPropertyInputSourceIsASCIICapable) {
@@ -1788,13 +1916,16 @@ public final class ClipboardMonitor: ObservableObject {
                 isASCII = CFBooleanGetValue(asciiBool)
             }
             if !isASCII, let asciiSource = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue() {
-                previousInputSource = currentSource
+                if pendingSavedInputSource == nil {
+                    pendingSavedInputSource = currentSource
+                }
                 TISSelectInputSource(asciiSource)
             }
         }
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            if let prev = previousInputSource {
+            if let prev = pendingSavedInputSource {
+                pendingSavedInputSource = nil
                 TISSelectInputSource(prev)
             }
             return
@@ -1839,10 +1970,15 @@ public final class ClipboardMonitor: ObservableObject {
             fUp?.post(tap: .cgSessionEventTap)
         }
 
-        if let prev = previousInputSource {
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(45)) {
+        if pendingSavedInputSource != nil {
+            let restoreItem = DispatchWorkItem { [weak self] in
+                guard let self, let prev = self.pendingSavedInputSource else { return }
+                self.pendingSavedInputSource = nil
+                self.inputSourceRestoreWorkItem = nil
                 TISSelectInputSource(prev)
             }
+            inputSourceRestoreWorkItem = restoreItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(45), execute: restoreItem)
         }
     }
 
@@ -1881,7 +2017,7 @@ public final class ClipboardMonitor: ObservableObject {
     @discardableResult
     public func seedSyntheticSamples() -> String {
         let now = Int64(Date().timeIntervalSince1970)
-        let isEn = (UserDefaults.standard.string(forKey: "appLanguage") == "en")
+        let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
 
         struct SampleSpec {
             let text: String
@@ -1912,7 +2048,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .url,
-                expectedTag: "#UTM-трекер"
+                expectedTag: isEn ? "#UTM-tracker" : "#UTM-трекер"
             ),
             SampleSpec(
                 text: "func authenticateUser(token: String) -> Bool {\n    return !token.isEmpty\n}",
@@ -1959,7 +2095,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .color,
-                expectedTag: "Цвет"
+                expectedTag: isEn ? "Color" : "Цвет"
             ),
             SampleSpec(
                 text: "rgb(16, 185, 129)",
@@ -1968,7 +2104,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .color,
-                expectedTag: "Цвет"
+                expectedTag: isEn ? "Color" : "Цвет"
             ),
             SampleSpec(
                 text: isEn ? "[File: Security_Architecture.pdf]" : "[Файл: Архитектура_Безопасности.pdf]",
@@ -1977,7 +2113,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .file,
-                expectedTag: "#Файл"
+                expectedTag: isEn ? "#File" : "#Файл"
             )
         ]
 

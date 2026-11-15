@@ -99,12 +99,9 @@ public enum SmartClassifier {
                   let close = trimmed.lastIndex(of: ")") else { return nil }
             let inside = trimmed[trimmed.index(after: open)..<close]
             let normalized = inside.replacingOccurrences(of: "/", with: ",")
-            let parts: [String]
-            if normalized.contains(",") {
-                parts = normalized.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            } else {
-                parts = normalized.split(whereSeparator: { $0.isWhitespace }).map { String($0) }
-            }
+            let parts = normalized
+                .split(whereSeparator: { $0 == "," || $0.isWhitespace })
+                .map { String($0) }
             guard parts.count >= 3 else { return nil }
 
             let parseComponent = { (str: String) -> Double? in
@@ -140,12 +137,9 @@ public enum SmartClassifier {
                   let close = trimmed.lastIndex(of: ")") else { return nil }
             let inside = trimmed[trimmed.index(after: open)..<close]
             let normalized = inside.replacingOccurrences(of: "/", with: ",")
-            let rawParts: [String]
-            if normalized.contains(",") {
-                rawParts = normalized.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            } else {
-                rawParts = normalized.split(whereSeparator: { $0.isWhitespace }).map { String($0) }
-            }
+            let rawParts = normalized
+                .split(whereSeparator: { $0 == "," || $0.isWhitespace })
+                .map { String($0) }
             guard rawParts.count >= 3 else { return nil }
 
             var hStr = rawParts[0].lowercased()
@@ -244,29 +238,37 @@ public enum SmartClassifier {
               (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) else {
             return false
         }
-        guard trimmed.contains(":") || trimmed.contains("\"") else { return false }
-        if let data = trimmed.data(using: .utf8),
-           (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil {
-            return true
+        guard let data = trimmed.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return false
         }
-        return trimmed.contains("\":")
+        return parsed is [String: Any] || parsed is [Any]
     }
 
     /// Определяет долю кириллических букв в тексте вне кавычек и обратных апострофов
     public static func cyrillicLetterRatioOutsideQuotes(in text: String) -> Double {
+        let chars = Array(text)
         var totalLetters = 0
         var cyrillicLetters = 0
         var insideDoubleQuote = false
         var insideSingleQuote = false
         var insideBacktick = false
 
-        for ch in text {
+        for i in chars.indices {
+            let ch = chars[i]
             if ch == "\"" || ch == "«" || ch == "»" {
                 insideDoubleQuote.toggle()
                 continue
             }
             if ch == "'" {
-                insideSingleQuote.toggle()
+                let isApostropheInWord = !insideSingleQuote
+                    && i > 0
+                    && i + 1 < chars.count
+                    && chars[i - 1].isLetter
+                    && chars[i + 1].isLetter
+                if !isApostropheInWord {
+                    insideSingleQuote.toggle()
+                }
                 continue
             }
             if ch == "`" {
@@ -532,12 +534,13 @@ public enum SmartClassifier {
     }
 
     /// Возвращает список динамических тегов для элемента буфера обмена
-    public static func tags(for text: String, contentType: ContentKind, isSensitive: Bool) -> [String] {
+    public static func tags(for text: String, contentType: ContentKind, isSensitive: Bool, language: AppLanguage? = nil) -> [String] {
         var result: [String] = []
         let sample = String(text.prefix(2048)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let isEn = (language ?? AppLanguage.current) == .en
 
         if hasUTMTracking(sample) {
-            result.append("#UTM-трекер")
+            result.append(isEn ? "#UTM-tracker" : "#UTM-трекер")
         }
         if isJSON(sample) {
             result.append("#JSON")
@@ -549,10 +552,10 @@ public enum SmartClassifier {
             result.append("#OCR")
         }
         if contentType == .color || isColor(sample) {
-            result.append("Цвет")
+            result.append(isEn ? "Color" : "Цвет")
         }
         if contentType == .file || sample.hasPrefix("[Файл") || sample.hasPrefix("[File") {
-            result.append("#Файл")
+            result.append(isEn ? "#File" : "#Файл")
         }
         return result
     }

@@ -23,9 +23,10 @@ public final class UpdateService: ObservableObject {
     @Published public var isInstallingUpdate: Bool = false
     @Published public var installProgress: Double = 0.0
     @Published public var installErrorMessage: String? = nil
+    @Published public var postUpdateTCCNotice: String? = nil
     @Published public var autoCheckUpdates: Bool {
         didSet {
-            UserDefaults.standard.set(autoCheckUpdates, forKey: "autoCheckUpdates")
+            AppDefaults.shared.set(autoCheckUpdates, forKey: "autoCheckUpdates")
             if autoCheckUpdates {
                 startAutoCheckTimer()
                 Task {
@@ -67,21 +68,21 @@ public final class UpdateService: ObservableObject {
 
     public var currentVersion: String {
         if let bundleID = Bundle.main.bundleIdentifier, bundleID != "com.pastevault.app" {
-            return "1.0.1"
+            return "1.1.0"
         }
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
         if Bundle.main.bundlePath.contains("xctest") || raw.isEmpty {
-            return "1.0.1"
+            return "1.1.0"
         }
         return raw
     }
 
     private init() {
-        if UserDefaults.standard.object(forKey: "autoCheckUpdates") == nil {
-            UserDefaults.standard.set(false, forKey: "autoCheckUpdates")
+        if AppDefaults.shared.object(forKey: "autoCheckUpdates") == nil {
+            AppDefaults.shared.set(false, forKey: "autoCheckUpdates")
             self.autoCheckUpdates = false
         } else {
-            self.autoCheckUpdates = UserDefaults.standard.bool(forKey: "autoCheckUpdates")
+            self.autoCheckUpdates = AppDefaults.shared.bool(forKey: "autoCheckUpdates")
         }
 
         setupLifecycleObservers()
@@ -188,6 +189,9 @@ public final class UpdateService: ObservableObject {
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let session = URLSession(configuration: config)
+        defer {
+            session.finishTasksAndInvalidate()
+        }
 
         var request = URLRequest(url: Self.latestReleaseAPIURL)
         request.httpMethod = "GET"
@@ -205,11 +209,8 @@ public final class UpdateService: ObservableObject {
             }
 
             if httpResponse.statusCode == 404 {
-                // Если релизов на GitHub еще нет, установленная версия v1.0.0 является актуальной
-                state = .upToDate(currentVersion: localVersion)
-                if manual {
-                    isUpToDateModalPresented = true
-                }
+                // Отсутствие /releases/latest (404 — нет релизов, приватный или перенесённый репозиторий) не выдаём за «установлена последняя версия»
+                state = .privateOrOffline(currentVersion: localVersion, releasesURL: Self.releasesPageURL)
                 return
             }
 
@@ -220,11 +221,13 @@ public final class UpdateService: ObservableObject {
 
             let release = try JSONDecoder().decode(GitHubReleaseResponse.self, from: data)
             let remoteClean = Self.cleanVersionString(release.tagName)
-            let pageURL = URL(string: release.htmlURL) ?? Self.releasesPageURL
+            let parsedPageURL = URL(string: release.htmlURL)
+            let pageURL = (parsedPageURL.map { Self.isTrustedUpdateURL($0) } == true) ? parsedPageURL! : Self.releasesPageURL
 
             let dmgAssetURL = release.assets
                 .first(where: { $0.name.lowercased().hasSuffix(".dmg") })
                 .flatMap { URL(string: $0.browserDownloadURL) }
+                .flatMap { Self.isTrustedUpdateURL($0) ? $0 : nil }
             let downloadURL = dmgAssetURL ?? pageURL
 
             if Self.isVersion(release.tagName, newerThan: localVersion) {
@@ -354,7 +357,52 @@ public final class UpdateService: ObservableObject {
         }
     }
 
+    /// Проверяет, что URL обновления ведёт строго на официальный репозиторий GitHub или официальные asset-домены GitHub
+    nonisolated public static func isTrustedUpdateURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(), !host.isEmpty else {
+            return false
+        }
+        if host == "github.com" {
+            return url.path.hasPrefix("/GarbGhost/PasteVault/") || url.path == "/GarbGhost/PasteVault"
+        }
+        if host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" {
+            return true
+        }
+        return false
+    }
+
+    nonisolated private static func runProcessAsync(executablePath: String, arguments: [String]) async throws -> (status: Int32, stderr: String) {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executablePath)
+                process.arguments = arguments
+                let errPipe = Pipe()
+                process.standardError = errPipe
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    continuation.resume(returning: (process.terminationStatus, errText))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     public func downloadAndInstallUpdate(from downloadURL: URL, silent: Bool = false) async {
+        guard Self.isTrustedUpdateURL(downloadURL) else {
+            installProgress = 0.0
+            isInstallingUpdate = false
+            installErrorMessage = AppLanguage.current == .en
+                ? "Untrusted update download URL blocked."
+                : "Заблокирован недоверенный URL загрузки обновления."
+            return
+        }
+
         isInstallingUpdate = true
         installProgress = 0.1
         installErrorMessage = nil
@@ -365,51 +413,142 @@ public final class UpdateService: ObservableObject {
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let session = URLSession(configuration: config)
+        defer {
+            session.finishTasksAndInvalidate()
+        }
+
+        var downloadedTempURL: URL? = nil
+        var mountedPointToDetach: String? = nil
+        var stagingDirURL: URL? = nil
+        let fileManager = FileManager.default
+
+        defer {
+            if let mountPoint = mountedPointToDetach {
+                let detachProcess = Process()
+                detachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                detachProcess.arguments = ["detach", mountPoint, "-force"]
+                try? detachProcess.run()
+                detachProcess.waitUntilExit()
+            }
+            if let downloadedTempURL {
+                try? fileManager.removeItem(at: downloadedTempURL)
+            }
+            if let stagingDirURL {
+                try? fileManager.removeItem(at: stagingDirURL)
+            }
+        }
 
         do {
-            let (tempLocalURL, _) = try await session.download(from: downloadURL)
-            installProgress = 0.6
+            let (tempLocalURL, response) = try await session.download(from: downloadURL)
+            downloadedTempURL = tempLocalURL
+            if let finalURL = response.url, !Self.isTrustedUpdateURL(finalURL) {
+                throw NSError(
+                    domain: "PasteVault.Update",
+                    code: 403,
+                    userInfo: [NSLocalizedDescriptionKey: "Redirected update URL is not trusted: \(finalURL.absoluteString)"]
+                )
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw NSError(
+                    domain: "PasteVault.Update",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP error \(http.statusCode) while downloading update"]
+                )
+            }
+            installProgress = 0.55
 
-            let fileManager = FileManager.default
             let dmgPath = tempLocalURL.path
-
-            if downloadURL.pathExtension.lowercased() == "dmg" || dmgPath.hasSuffix(".dmg") {
-                let mountPoint = "/Volumes/PasteVaultUpdate_\(UUID().uuidString.prefix(6))"
-                let attachProcess = Process()
-                attachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-                attachProcess.arguments = ["attach", "-nobrowse", "-readonly", dmgPath, "-mountpoint", mountPoint]
-                try attachProcess.run()
-                attachProcess.waitUntilExit()
-
-                if attachProcess.terminationStatus == 0 {
-                    installProgress = 0.8
-                    let mountedAppPath = "\(mountPoint)/Paste Vault.app"
-                    let targetAppPath = "/Applications/Paste Vault.app"
-
-                    if fileManager.fileExists(atPath: mountedAppPath) {
-                        let sourceBinary = "\(mountedAppPath)/Contents/MacOS/Paste Vault"
-                        let targetBinary = "\(targetAppPath)/Contents/MacOS/Paste Vault"
-
-                        if fileManager.fileExists(atPath: sourceBinary) && fileManager.fileExists(atPath: targetBinary) {
-                            try? fileManager.removeItem(atPath: targetBinary)
-                            try fileManager.copyItem(atPath: sourceBinary, toPath: targetBinary)
-
-                            let codesignProcess = Process()
-                            codesignProcess.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-                            codesignProcess.arguments = ["--force", "--deep", "--sign", "-", "--identifier", "com.pastevault.app", targetAppPath]
-                            try? codesignProcess.run()
-                            codesignProcess.waitUntilExit()
-                        }
-                    }
-
-                    let detachProcess = Process()
-                    detachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-                    detachProcess.arguments = ["detach", mountPoint, "-force"]
-                    try? detachProcess.run()
-                    detachProcess.waitUntilExit()
+            guard downloadURL.pathExtension.lowercased() == "dmg" || dmgPath.hasSuffix(".dmg") else {
+                isInstallingUpdate = false
+                installProgress = 0.0
+                if !silent {
+                    NSWorkspace.shared.open(downloadURL)
                 }
-            } else {
-                NSWorkspace.shared.open(downloadURL)
+                return
+            }
+
+            let mountPoint = "/Volumes/PasteVaultUpdate_\(UUID().uuidString.prefix(6))"
+            let attachRes = try await Self.runProcessAsync(
+                executablePath: "/usr/bin/hdiutil",
+                arguments: ["attach", "-nobrowse", "-readonly", dmgPath, "-mountpoint", mountPoint]
+            )
+            guard attachRes.status == 0 else {
+                throw NSError(
+                    domain: "PasteVault.Update",
+                    code: Int(attachRes.status),
+                    userInfo: [NSLocalizedDescriptionKey: "hdiutil attach failed (\(attachRes.status)): \(attachRes.stderr)"]
+                )
+            }
+            mountedPointToDetach = mountPoint
+            installProgress = 0.72
+
+            let mountedAppURL = URL(fileURLWithPath: mountPoint, isDirectory: true).appendingPathComponent("Paste Vault.app", isDirectory: true)
+            let mountedBinaryURL = mountedAppURL.appendingPathComponent("Contents/MacOS/Paste Vault")
+            let mountedPlistURL = mountedAppURL.appendingPathComponent("Contents/Info.plist")
+            guard fileManager.fileExists(atPath: mountedAppURL.path),
+                  fileManager.fileExists(atPath: mountedBinaryURL.path),
+                  fileManager.fileExists(atPath: mountedPlistURL.path) else {
+                throw NSError(
+                    domain: "PasteVault.Update",
+                    code: 404,
+                    userInfo: [NSLocalizedDescriptionKey: "Paste Vault.app bundle inside DMG is missing or incomplete"]
+                )
+            }
+
+            let targetAppURL = URL(fileURLWithPath: "/Applications/Paste Vault.app", isDirectory: true)
+            let targetParentURL = targetAppURL.deletingLastPathComponent()
+            let stagingDir = targetParentURL.appendingPathComponent(".PasteVaultUpdateStaging_\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try fileManager.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+            stagingDirURL = stagingDir
+
+            let stagedAppURL = stagingDir.appendingPathComponent("Paste Vault.app", isDirectory: true)
+            let dittoRes = try await Self.runProcessAsync(
+                executablePath: "/usr/bin/ditto",
+                arguments: [mountedAppURL.path, stagedAppURL.path]
+            )
+            guard dittoRes.status == 0 else {
+                throw NSError(
+                    domain: "PasteVault.Update",
+                    code: Int(dittoRes.status),
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to stage updated .app bundle: \(dittoRes.stderr)"]
+                )
+            }
+            installProgress = 0.85
+
+            let bundleId = Bundle.main.bundleIdentifier ?? "com.pastevault.app"
+            let codesignRes = try await Self.runProcessAsync(
+                executablePath: "/usr/bin/codesign",
+                arguments: ["--force", "--deep", "--sign", "-", "--identifier", bundleId, stagedAppURL.path]
+            )
+            guard codesignRes.status == 0 else {
+                throw NSError(
+                    domain: "PasteVault.Update",
+                    code: Int(codesignRes.status),
+                    userInfo: [NSLocalizedDescriptionKey: "codesign failed (\(codesignRes.status)): \(codesignRes.stderr)"]
+                )
+            }
+
+            // Атомарная подмена всего .app бандла с откатом на бэкап при ошибке (обновляет Info.plist, Resources и бинарник)
+            let backupOldAppURL = stagingDir.appendingPathComponent("Paste Vault.previous.app", isDirectory: true)
+            let hadExistingTarget = fileManager.fileExists(atPath: targetAppURL.path)
+            if hadExistingTarget {
+                try fileManager.moveItem(at: targetAppURL, to: backupOldAppURL)
+            }
+            do {
+                try fileManager.moveItem(at: stagedAppURL, to: targetAppURL)
+            } catch {
+                if hadExistingTarget, fileManager.fileExists(atPath: backupOldAppURL.path), !fileManager.fileExists(atPath: targetAppURL.path) {
+                    try? fileManager.moveItem(at: backupOldAppURL, to: targetAppURL)
+                }
+                throw error
+            }
+
+            // Предупреждаем систему баннера, что после переподписи новой версии macOS может потребовать повторное подтверждение Универсального доступа
+            AppDefaults.shared.set(false, forKey: "isAccessibilityBannerDismissed")
+            if !AccessibilityService.isAccessibilityTrusted() {
+                postUpdateTCCNotice = AppLanguage.current == .en
+                    ? "Update installed. macOS may ask to re-confirm Accessibility permission after relaunch."
+                    : "Обновление установлено. После перезапуска macOS может потребовать повторно подтвердить Универсальный доступ."
             }
 
             installProgress = 1.0
@@ -417,10 +556,9 @@ public final class UpdateService: ObservableObject {
 
             if !silent {
                 dismissModal()
-                // Перезапуск обновлённого приложения
                 let relaunch = Process()
                 relaunch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                relaunch.arguments = ["-a", "/Applications/Paste Vault.app"]
+                relaunch.arguments = ["-a", targetAppURL.path]
                 try? relaunch.run()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     NSApplication.shared.terminate(nil)
@@ -428,10 +566,8 @@ public final class UpdateService: ObservableObject {
             }
         } catch {
             isInstallingUpdate = false
+            installProgress = 0.0
             installErrorMessage = error.localizedDescription
-            if !silent {
-                NSWorkspace.shared.open(downloadURL)
-            }
         }
     }
 

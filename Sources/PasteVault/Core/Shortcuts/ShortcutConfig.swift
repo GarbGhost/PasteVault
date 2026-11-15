@@ -18,6 +18,11 @@ public struct KeyCombo: Codable, Equatable, Hashable, Sendable {
         NSEvent.ModifierFlags(rawValue: modifiers).intersection(.deviceIndependentFlagsMask)
     }
 
+    public static let digitKeyCodeMap: [UInt16: Int] = [
+        18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9,
+        83: 1, 84: 2, 85: 3, 86: 4, 87: 5, 88: 6, 89: 7, 91: 8, 92: 9
+    ]
+
     /// Проверяет, совпадает ли входящее событие клавиатуры с данной комбинацией
     public func matches(event: NSEvent) -> Bool {
         let eventFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -26,6 +31,15 @@ public struct KeyCombo: Codable, Equatable, Hashable, Sendable {
 
         guard eventFlags == targetFlags else { return false }
         if keyCode == event.keyCode { return true }
+
+        // Numpad Enter (76) эквивалентен Return (36)
+        if (keyCode == 36 || keyCode == 76) && (event.keyCode == 36 || event.keyCode == 76) {
+            return true
+        }
+        // Forward Delete (117) эквивалентен Backspace Delete (51)
+        if (keyCode == 51 || keyCode == 117) && (event.keyCode == 51 || event.keyCode == 117) {
+            return true
+        }
 
         // Дополнительная проверка символов для раскладко-независимости
         if let char = event.charactersIgnoringModifiers?.uppercased(),
@@ -40,7 +54,8 @@ public struct KeyCombo: Codable, Equatable, Hashable, Sendable {
         switch code {
         case 49: return "Space"
         case 36, 76: return "Enter"
-        case 51, 117: return "⌫"
+        case 51: return "⌫"
+        case 117: return "⌦"
         case 43: return ","
         case 48: return "Tab"
         case 53: return "Esc"
@@ -286,26 +301,22 @@ public struct ShortcutConfig: Codable, Equatable, Sendable {
         }
     }
 
-    /// Проверяет совпадение модификатора быстрой вставки (1..9)
+    /// Проверяет совпадение модификатора быстрой вставки (1..9) с поддержкой AZERTY/раскладок и Numpad
     public func matchesQuickPaste(event: NSEvent) -> Bool {
-        let eventFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            .subtracting([.numericPad, .function, .capsLock])
-        let targetFlags = quickPasteModifier.modifierFlags.subtracting([.numericPad, .function, .capsLock])
-        guard eventFlags == targetFlags else { return false }
-        guard let chars = event.charactersIgnoringModifiers,
-              let digit = Int(chars), (1...9).contains(digit) else {
-            return false
-        }
-        return true
+        quickPasteDigit(event: event) != nil
     }
 
     public func quickPasteDigit(event: NSEvent) -> Int? {
-        guard matchesQuickPaste(event: event),
-              let chars = event.charactersIgnoringModifiers,
-              let digit = Int(chars), (1...9).contains(digit) else {
-            return nil
+        let eventFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function, .capsLock])
+        let targetFlags = quickPasteModifier.modifierFlags.subtracting([.numericPad, .function, .capsLock])
+        guard eventFlags == targetFlags else { return nil }
+
+        if let chars = event.charactersIgnoringModifiers,
+           let digit = Int(chars), (1...9).contains(digit) {
+            return digit
         }
-        return digit
+        return KeyCombo.digitKeyCodeMap[event.keyCode]
     }
 
     public var quickPastePrefix: String {

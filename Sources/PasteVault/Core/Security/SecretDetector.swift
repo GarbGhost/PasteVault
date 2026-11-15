@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 public struct SecretAnalysis: Sendable {
     public let isSensitive: Bool
@@ -11,8 +10,8 @@ public struct SecretAnalysis: Sendable {
 public enum SecretDetector {
     private static let patterns: [(name: String, regex: NSRegularExpression, ttl: Int64)] = {
         let specs: [(String, String, Int64)] = [
-            ("JWT Token (RFC 7519)", #"^eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$"#, 120),
-            ("Private SSH / PEM Key", #"-----BEGIN (?:OPENSSH|RSA|EC|DSA|PGP) PRIVATE KEY-----"#, 60),
+            ("JWT Token (RFC 7519)", #"^(?:[Bb][Ee][Aa][Rr][Ee][Rr]\s+)?eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$"#, 120),
+            ("Private SSH / PEM Key", #"-----BEGIN (?:OPENSSH |RSA |EC |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----"#, 60),
             ("AWS IAM Access Key", #"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"#, 90),
             ("GitHub Personal Token", #"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{24,}\b"#, 90),
             ("Production API Secret", #"\b(?:sk_live_|rk_live_|sk-live-|rk-live-|sk-proj-|xox[baprs]-)[A-Za-z0-9_-]{16,}\b"#, 60)
@@ -22,6 +21,10 @@ public enum SecretDetector {
             return (name, regex, ttl)
         }
     }()
+
+    private static let emailRegex = try? NSRegularExpression(pattern: #"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"#)
+    private static let hostPortRegex = try? NSRegularExpression(pattern: #"^(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+):\d{1,5}(?:/\S*)?$"#)
+    private static let hexColorRegex = try? NSRegularExpression(pattern: #"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"#)
 
     /// Проверяет, является ли строка вероятным именем файла с расширением
     public static func isLikelyFileName(_ text: String) -> Bool {
@@ -54,17 +57,7 @@ public enum SecretDetector {
         return hasCyrillic && !hasDigits
     }
 
-    public static func inspect(_ rawText: String) -> SecretAnalysis {
-        // Ограничение O(1): строки длиннее 512 символов отсекаются мгновенно
-        guard rawText.count <= 512 else {
-            return SecretAnalysis(
-                isSensitive: false,
-                secretKind: nil,
-                recommendedTTLSeconds: nil,
-                shannonEntropy: 0
-            )
-        }
-
+    public static func inspect(_ rawText: String, language: AppLanguage? = nil) -> SecretAnalysis {
         let sample = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sample.isEmpty else {
             return SecretAnalysis(
@@ -75,32 +68,15 @@ public enum SecretDetector {
             )
         }
 
-        let entropy = calculateShannonEntropy(sample)
-
-        // Имена файлов с расширениями никогда не являются паролями
-        if isLikelyFileName(sample) {
-            return SecretAnalysis(
-                isSensitive: false,
-                secretKind: nil,
-                recommendedTTLSeconds: nil,
-                shannonEntropy: entropy
-            )
-        }
-
-        // Кириллическая строка без цифр (например, слова через _) никогда не является паролем
-        if isCyrillicSnakeOrKebabWithoutDigits(sample) {
-            return SecretAnalysis(
-                isSensitive: false,
-                secretKind: nil,
-                recommendedTTLSeconds: nil,
-                shannonEntropy: entropy
-            )
-        }
-
-        let range = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        // Проверяем PEM/SSH/PGP ключи и известные паттерны ДО ограничения длины 512 символов,
+        // чтобы длинные RSA/OpenSSH/EC/PGP приватные ключи (1600–3200+ символов) всегда распознавались как секреты.
+        let patternScanSample = sample.count > 32_768 ? String(sample.prefix(32_768)) : sample
+        let patternRange = NSRange(patternScanSample.startIndex..<patternScanSample.endIndex, in: patternScanSample)
+        let entropySample = sample.count > 512 ? String(sample.prefix(512)) : sample
+        let entropy = calculateShannonEntropy(entropySample)
 
         for rule in patterns {
-            if rule.regex.firstMatch(in: sample, options: [], range: range) != nil {
+            if rule.regex.firstMatch(in: patternScanSample, options: [], range: patternRange) != nil {
                 return SecretAnalysis(
                     isSensitive: true,
                     secretKind: rule.name,
@@ -110,22 +86,63 @@ public enum SecretDetector {
             }
         }
 
-        // Проверка на пароли и секреты от 8 до 128 символов без пробелов
+        // Ограничение O(1) для эвристики паролей: строки длиннее 512 символов отсекаются мгновенно
+        guard rawText.count <= 512 else {
+            return SecretAnalysis(
+                isSensitive: false,
+                secretKind: nil,
+                recommendedTTLSeconds: nil,
+                shannonEntropy: 0
+            )
+        }
+
+        // Имена файлов с расширениями и кириллические фразы без цифр никогда не являются паролями
+        if isLikelyFileName(sample) || isCyrillicSnakeOrKebabWithoutDigits(sample) {
+            return SecretAnalysis(
+                isSensitive: false,
+                secretKind: nil,
+                recommendedTTLSeconds: nil,
+                shannonEntropy: entropy
+            )
+        }
+
+        let range = NSRange(sample.startIndex..<sample.endIndex, in: sample)
         let hasNoWhitespace = !sample.contains(" ") && !sample.contains("\t") && !sample.contains("\n") && !sample.contains("\r")
         let lower = sample.lowercased()
+        let isKnownAbsPath = lower.hasPrefix("/users/") || lower.hasPrefix("/applications/") ||
+                             lower.hasPrefix("/library/") || lower.hasPrefix("/system/") ||
+                             lower.hasPrefix("/private/") || lower.hasPrefix("/volumes/") ||
+                             lower.hasPrefix("/opt/") || lower.hasPrefix("/usr/") ||
+                             lower.hasPrefix("/var/") || lower.hasPrefix("/etc/") ||
+                             lower.hasPrefix("/bin/") || lower.hasPrefix("/sbin/")
+        let pathComponents = sample.split(separator: "/")
+        let isGenericUnixPath = sample.hasPrefix("/") &&
+                                pathComponents.count >= 2 &&
+                                sample.allSatisfy { $0.isLetter || $0.isNumber || $0 == "/" || $0 == "." || $0 == "_" || $0 == "-" }
         let isURLOrPath = lower.hasPrefix("http://") || lower.hasPrefix("https://") ||
-                          lower.hasPrefix("file://") || lower.hasPrefix("/users/") ||
-                          sample.hasPrefix("~/") || sample.hasPrefix("/")
-        let isHexColor = sample.hasPrefix("#")
-        let isStructuredData = sample.hasPrefix("{") || sample.hasPrefix("[")
-        let isFilename = isLikelyFileName(sample)
+                          lower.hasPrefix("file://") || sample.hasPrefix("~/") ||
+                          isKnownAbsPath || isGenericUnixPath
+        let isHexColor = hexColorRegex?.firstMatch(in: sample, options: [], range: range) != nil
+        let isStructuredData = (sample.hasPrefix("{") && sample.hasSuffix("}") && (sample.contains(":") || sample.contains("\""))) ||
+                               (sample.hasPrefix("[") && sample.hasSuffix("]") && (sample.contains(",") || sample.contains("\"") || sample.contains(":")))
+        let isEmail = emailRegex?.firstMatch(in: sample, options: [], range: range) != nil
+        let isHostPort = hostPortRegex?.firstMatch(in: sample, options: [], range: range) != nil
 
-        if hasNoWhitespace && !isURLOrPath && !isHexColor && !isStructuredData && !isFilename && !isCyrillicSnakeOrKebabWithoutDigits(sample) && (8...128).contains(sample.count) {
+        // Проверка на пароли и секреты от 8 до 128 символов без пробелов
+        if hasNoWhitespace && !isURLOrPath && !isHexColor && !isStructuredData && !isEmail && !isHostPort && (8...128).contains(sample.count) {
+            let hyphenParts = sample.split(separator: "-", omittingEmptySubsequences: false)
+            let isPureLettersHyphenated = hyphenParts.count >= 2
+                && hyphenParts.allSatisfy { part in
+                    !part.isEmpty && part.allSatisfy { $0.isLetter && !$0.isUppercase }
+                }
+
             let specialChars = Set("!@#$%^&*()_+-=[]{}|;:'\",.<>?/`~")
             let hasLower = sample.contains { $0.isLowercase }
             let hasUpper = sample.contains { $0.isUppercase }
             let hasDigit = sample.contains { $0.isNumber }
-            let hasSymbol = sample.contains { specialChars.contains($0) || $0.isPunctuation || $0.isSymbol }
+            let hasSymbol = isPureLettersHyphenated
+                ? false
+                : sample.contains { specialChars.contains($0) || $0.isPunctuation || $0.isSymbol }
 
             var classCount = 0
             if hasLower { classCount += 1 }
@@ -133,30 +150,29 @@ public enum SecretDetector {
             if hasDigit { classCount += 1 }
             if hasSymbol { classCount += 1 }
 
-            // в) Мнемоническая фраза из 3–6 слов через дефис без пробелов
-            let hyphenParts = sample.split(separator: "-", omittingEmptySubsequences: false)
-            let isMnemonic = (3...6).contains(hyphenParts.count) && hyphenParts.allSatisfy { $0.count >= 2 && $0.allSatisfy { $0.isLetter } }
-
             // б) Буквы + цифры + хотя бы 1 спецсимвол
             let hasLettersDigitsAndSymbol = (hasLower || hasUpper) && hasDigit && sample.contains { specialChars.contains($0) }
 
             // а) Как минимум 3 из 4 классов символов
             let hasThreeClasses = (classCount >= 3)
 
+            let resolvedLang = language ?? AppLanguage.current
+            let passwordLabel = (resolvedLang == .en) ? "Password" : "Пароль"
+
             if (8...15).contains(sample.count) {
-                if hasThreeClasses || hasLettersDigitsAndSymbol || isMnemonic {
+                if hasThreeClasses || hasLettersDigitsAndSymbol {
                     return SecretAnalysis(
                         isSensitive: true,
-                        secretKind: "Пароль",
+                        secretKind: passwordLabel,
                         recommendedTTLSeconds: 60,
                         shannonEntropy: entropy
                     )
                 }
             } else if (16...128).contains(sample.count) {
-                if (entropy >= 3.55 && classCount >= 2) || hasThreeClasses || hasLettersDigitsAndSymbol || isMnemonic {
+                if (entropy >= 3.55 && classCount >= 2) || hasThreeClasses || hasLettersDigitsAndSymbol {
                     return SecretAnalysis(
                         isSensitive: true,
-                        secretKind: "Пароль",
+                        secretKind: passwordLabel,
                         recommendedTTLSeconds: 60,
                         shannonEntropy: entropy
                     )

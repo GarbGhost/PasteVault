@@ -26,14 +26,6 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
     public var displayName: String { title }
 
-    public var flagEmoji: String {
-        shortCode
-    }
-
-    public var flagAndTitle: String {
-        title
-    }
-
     public var shortCode: String {
         switch self {
         case .ru: return "RU"
@@ -42,7 +34,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 
     public static var current: AppLanguage {
-        let raw = UserDefaults.standard.string(forKey: "appLanguage") ?? AppLanguage.ru.rawValue
+        let raw = AppDefaults.shared.string(forKey: "appLanguage") ?? AppLanguage.ru.rawValue
         return AppLanguage(rawValue: raw) ?? .ru
     }
 }
@@ -172,11 +164,15 @@ public enum ClipboardFilterSelection: Hashable {
     }
 
     public static func localizedTag(_ tag: String, in lang: AppLanguage) -> String {
-        guard lang == .en else { return tag }
         switch tag {
-        case "#UTM-трекер": return "#UTM-Tracker"
-        case "Цвет": return "Color"
-        default: return tag
+        case "#UTM-трекер", "#UTM-tracker":
+            return lang == .en ? "#UTM-Tracker" : "#UTM-трекер"
+        case "Цвет", "Color":
+            return lang == .en ? "Color" : "Цвет"
+        case "#Файл", "#File":
+            return lang == .en ? "#File" : "#Файл"
+        default:
+            return tag
         }
     }
 
@@ -222,21 +218,6 @@ public enum AppTheme: String, CaseIterable, Identifiable {
         case .catppuccinMocha: return lang == .en ? "Mocha" : "Мокко"
         case .solarizedPaper: return lang == .en ? "Paper" : "Бумага"
         case .carbonBrutalist: return lang == .en ? "Carbon" : "Карбон"
-        }
-    }
-
-    public var subtitle: String {
-        switch self {
-        case .obsidian: return "Obsidian Dark"
-        case .midnight: return "Midnight Purple"
-        case .emerald: return "Emerald Matrix"
-        case .amber: return "Warm Amber"
-        case .frost: return "Frost Light"
-        case .nordicSlate: return "Nordic Slate (Matte)"
-        case .tokyoNight: return "Tokyo Night (Matte)"
-        case .catppuccinMocha: return "Catppuccin Mocha (Matte)"
-        case .solarizedPaper: return "Solarized Paper (Matte)"
-        case .carbonBrutalist: return "Carbon Brutalist (Matte)"
         }
     }
 
@@ -459,7 +440,7 @@ public enum AppFont: String, CaseIterable, Identifiable, Sendable {
     public static let `default`: AppFont = .inter
 
     public static var current: AppFont {
-        AppFont(fromRaw: UserDefaults.standard.string(forKey: "selectedFontId"))
+        AppFont(fromRaw: AppDefaults.shared.string(forKey: "selectedFontId"))
     }
 
     public init(fromRaw: String?) {
@@ -499,15 +480,6 @@ public enum AppFont: String, CaseIterable, Identifiable, Sendable {
         case .jura: return lang == .en ? "Cosmic Sci-Fi Interface" : "Космический Sci-Fi интерфейс"
         case .tektur: return lang == .en ? "Cyberpunk 45° Chamfered" : "Киберпанк с гранёными углами"
         case .comfortaa: return lang == .en ? "Soft Teardrop Geo-Art" : "Мягкий каплевидный гео-арт"
-        }
-    }
-
-    public var isUnusual: Bool {
-        switch self {
-        case .jura, .tektur, .comfortaa:
-            return true
-        default:
-            return false
         }
     }
 
@@ -554,54 +526,26 @@ public final class FontManager: ObservableObject {
 
     @Published public var resolvedPostScriptNames: [AppFont: String] = [:]
 
-    private struct RemoteFontSpec: Sendable {
-        let appFont: AppFont
-        let filename: String
-        let legacyFilename: String
-        let urlString: String
+    public struct BundledFontSpec: Sendable {
+        public let appFont: AppFont
+        public let filename: String
+        public let resourceBaseName: String
     }
 
-    private let specs: [RemoteFontSpec] = [
-        RemoteFontSpec(
-            appFont: .inter,
-            filename: "Inter.ttf",
-            legacyFilename: "PasteVault-Inter.ttf",
-            urlString: "https://raw.githubusercontent.com/google/fonts/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf"
-        ),
-        RemoteFontSpec(
-            appFont: .manrope,
-            filename: "Manrope.ttf",
-            legacyFilename: "PasteVault-Manrope.ttf",
-            urlString: "https://raw.githubusercontent.com/google/fonts/main/ofl/manrope/Manrope%5Bwght%5D.ttf"
-        ),
-        RemoteFontSpec(
-            appFont: .jetBrainsMono,
-            filename: "JetBrainsMono.ttf",
-            legacyFilename: "PasteVault-JetBrainsMono.ttf",
-            urlString: "https://raw.githubusercontent.com/google/fonts/main/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf"
-        ),
-        RemoteFontSpec(
-            appFont: .jura,
-            filename: "Jura.ttf",
-            legacyFilename: "PasteVault-Jura.ttf",
-            urlString: "https://raw.githubusercontent.com/google/fonts/main/ofl/jura/Jura%5Bwght%5D.ttf"
-        ),
-        RemoteFontSpec(
-            appFont: .tektur,
-            filename: "Tektur.ttf",
-            legacyFilename: "PasteVault-Tektur.ttf",
-            urlString: "https://raw.githubusercontent.com/google/fonts/main/ofl/tektur/Tektur%5Bwdth%2Cwght%5D.ttf"
-        ),
-        RemoteFontSpec(
-            appFont: .comfortaa,
-            filename: "Comfortaa.ttf",
-            legacyFilename: "PasteVault-Comfortaa.ttf",
-            urlString: "https://raw.githubusercontent.com/google/fonts/main/ofl/comfortaa/Comfortaa%5Bwght%5D.ttf"
-        )
+    public nonisolated static let fontSpecs: [BundledFontSpec] = [
+        BundledFontSpec(appFont: .inter, filename: "Inter.ttf", resourceBaseName: "Inter"),
+        BundledFontSpec(appFont: .manrope, filename: "Manrope.ttf", resourceBaseName: "Manrope"),
+        BundledFontSpec(appFont: .jetBrainsMono, filename: "JetBrainsMono.ttf", resourceBaseName: "JetBrainsMono"),
+        BundledFontSpec(appFont: .jura, filename: "Jura.ttf", resourceBaseName: "Jura"),
+        BundledFontSpec(appFont: .tektur, filename: "Tektur.ttf", resourceBaseName: "Tektur"),
+        BundledFontSpec(appFont: .comfortaa, filename: "Comfortaa.ttf", resourceBaseName: "Comfortaa")
     ]
 
+    private var isLoadingFonts: Bool = false
+    public private(set) var hasCompletedLoad: Bool = false
+
     private init() {
-        registerExistingFontsSynchronously()
+        ensureFontsInstalled()
     }
 
     nonisolated private static func registerAndExtractPostScriptName(at fileURL: URL) -> String? {
@@ -626,157 +570,89 @@ public final class FontManager: ObservableObject {
         return psName
     }
 
-    private func candidateFontDirectories() -> [URL] {
+    /// Безопасно ищет директории встроенных шрифтов (Bundle.main, Contents/Resources/Fonts, вложенный бандл ресурсов SwiftPM и исходники)
+    nonisolated public static func candidateBundledFontDirectories() -> [URL] {
         var dirs: [URL] = []
-        if let bundleFonts = Bundle.main.resourceURL?.appendingPathComponent("Fonts", isDirectory: true) {
-            dirs.append(bundleFonts)
+        if let mainResources = Bundle.main.resourceURL {
+            dirs.append(mainResources.appendingPathComponent("Fonts", isDirectory: true))
+            dirs.append(mainResources.appendingPathComponent("PasteVault_PasteVault.bundle/Contents/Resources/Fonts", isDirectory: true))
+            dirs.append(mainResources.appendingPathComponent("PasteVault_PasteVault.bundle/Fonts", isDirectory: true))
         }
-        dirs.append(Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Fonts", isDirectory: true))
-        dirs.append(URL(fileURLWithPath: "/Applications/Paste Vault.app/Contents/Resources/Fonts", isDirectory: true))
-        // Локальный путь исходников (только для прогона swift test при разработке, без привязки к /Users/...)
-        let sourceRepoFonts = URL(fileURLWithPath: #filePath)
+        let mainBundle = Bundle.main.bundleURL
+        dirs.append(mainBundle.appendingPathComponent("Contents/Resources/Fonts", isDirectory: true))
+        dirs.append(mainBundle.appendingPathComponent("PasteVault_PasteVault.bundle/Contents/Resources/Fonts", isDirectory: true))
+        dirs.append(mainBundle.appendingPathComponent("PasteVault_PasteVault.bundle/Fonts", isDirectory: true))
+
+        if let execDir = Bundle.main.executableURL?.deletingLastPathComponent() {
+            dirs.append(execDir.appendingPathComponent("PasteVault_PasteVault.bundle/Contents/Resources/Fonts", isDirectory: true))
+            dirs.append(execDir.appendingPathComponent("PasteVault_PasteVault.bundle/Fonts", isDirectory: true))
+        }
+
+        for bundle in Bundle.allBundles + Bundle.allFrameworks {
+            if let resURL = bundle.resourceURL {
+                dirs.append(resURL.appendingPathComponent("Fonts", isDirectory: true))
+                dirs.append(resURL.appendingPathComponent("PasteVault_PasteVault.bundle/Contents/Resources/Fonts", isDirectory: true))
+            }
+        }
+
+        let targetFontsURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/Fonts", isDirectory: true)
+        dirs.append(targetFontsURL)
+
+        let repoRootFonts = targetFontsURL
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Resources/Fonts", isDirectory: true)
-        dirs.append(sourceRepoFonts)
-        let vaultFontsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Fonts/PasteVaultFonts", isDirectory: true)
-        dirs.append(vaultFontsDir)
-        return dirs
+        dirs.append(repoRootFonts)
+
+        var seen = Set<String>()
+        return dirs.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
-    private func registerExistingFontsSynchronously() {
-        let baseFontsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Fonts", isDirectory: true)
-        let vaultFontsDir = baseFontsDir.appendingPathComponent("PasteVaultFonts", isDirectory: true)
-        try? FileManager.default.createDirectory(at: vaultFontsDir, withIntermediateDirectories: true)
-
-        let searchDirs = candidateFontDirectories()
-        var updatedMap = resolvedPostScriptNames
-        for spec in specs {
-            var resolvedURL: URL? = nil
+    nonisolated public static func discoverBundledFontURLs() -> [AppFont: URL] {
+        let fm = FileManager.default
+        let searchDirs = candidateBundledFontDirectories()
+        var found: [AppFont: URL] = [:]
+        for spec in fontSpecs {
             for dir in searchDirs {
                 let candidate = dir.appendingPathComponent(spec.filename)
-                if FileManager.default.fileExists(atPath: candidate.path) {
-                    resolvedURL = candidate
+                if fm.fileExists(atPath: candidate.path) {
+                    found[spec.appFont] = candidate
                     break
                 }
             }
-            if resolvedURL == nil {
-                let legacyURL = baseFontsDir.appendingPathComponent(spec.legacyFilename)
-                if FileManager.default.fileExists(atPath: legacyURL.path) {
-                    let vaultCopy = vaultFontsDir.appendingPathComponent(spec.filename)
-                    try? FileManager.default.copyItem(at: legacyURL, to: vaultCopy)
-                    resolvedURL = FileManager.default.fileExists(atPath: vaultCopy.path) ? vaultCopy : legacyURL
-                }
-            }
-            if let fileURL = resolvedURL,
-               let psName = Self.registerAndExtractPostScriptName(at: fileURL) {
-                updatedMap[spec.appFont] = psName
-                // Если шрифт найден в бандле, но ещё не скопирован в локальный кэш пользователя — синхронизируем
-                let userCacheURL = vaultFontsDir.appendingPathComponent(spec.filename)
-                if !FileManager.default.fileExists(atPath: userCacheURL.path) && fileURL != userCacheURL {
-                    try? FileManager.default.copyItem(at: fileURL, to: userCacheURL)
-                }
-            }
         }
-        if updatedMap != resolvedPostScriptNames {
-            resolvedPostScriptNames = updatedMap
-        }
+        return found
     }
 
+    /// Асинхронная офлайн-регистрация встроенных шрифтов без блокировки главного потока и без сетевых обращений
     public func ensureFontsInstalled() {
-        registerExistingFontsSynchronously()
-
-        let vaultFontsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Fonts/PasteVaultFonts", isDirectory: true)
-        try? FileManager.default.createDirectory(at: vaultFontsDir, withIntermediateDirectories: true)
-
-        let missingSpecs = specs.filter { spec in
-            let fileURL = vaultFontsDir.appendingPathComponent(spec.filename)
-            return !FileManager.default.fileExists(atPath: fileURL.path) || resolvedPostScriptNames[spec.appFont] == nil
-        }
-
-        guard !missingSpecs.isEmpty else { return }
+        guard !isLoadingFonts, !hasCompletedLoad else { return }
+        isLoadingFonts = true
 
         Task.detached(priority: .utility) {
-            let config = URLSessionConfiguration.ephemeral
-            config.timeoutIntervalForRequest = 8.0
-            config.timeoutIntervalForResource = 16.0
-            let session = URLSession(configuration: config)
-
-            var newlyResolved: [(AppFont, String)] = []
-            for spec in missingSpecs {
-                let destURL = vaultFontsDir.appendingPathComponent(spec.filename)
-                if FileManager.default.fileExists(atPath: destURL.path),
-                   let psName = Self.registerAndExtractPostScriptName(at: destURL) {
-                    newlyResolved.append((spec.appFont, psName))
-                    continue
-                }
-                guard let url = URL(string: spec.urlString) else { continue }
-                do {
-                    let (data, response) = try await session.data(from: url)
-                    if let http = response as? HTTPURLResponse, http.statusCode == 200, data.count > 10_000 {
-                        try data.write(to: destURL, options: .atomic)
-                        if let psName = Self.registerAndExtractPostScriptName(at: destURL) {
-                            newlyResolved.append((spec.appFont, psName))
-                        }
-                    }
-                } catch {
-                    // Используем системный fallback при отсутствии сети
+            let discovered = Self.discoverBundledFontURLs()
+            var resolvedMap: [AppFont: String] = [:]
+            for spec in Self.fontSpecs {
+                if let fileURL = discovered[spec.appFont],
+                   let psName = Self.registerAndExtractPostScriptName(at: fileURL) {
+                    resolvedMap[spec.appFont] = psName
                 }
             }
 
-            if !newlyResolved.isEmpty {
-                let itemsToUpdate = newlyResolved
-                await MainActor.run {
-                    for (appFont, psName) in itemsToUpdate {
-                        FontManager.shared.resolvedPostScriptNames[appFont] = psName
-                    }
+            let finalResolvedMap = resolvedMap
+            await MainActor.run {
+                let shared = FontManager.shared
+                shared.isLoadingFonts = false
+                shared.hasCompletedLoad = (finalResolvedMap.count == Self.fontSpecs.count)
+                if shared.resolvedPostScriptNames != finalResolvedMap {
+                    shared.resolvedPostScriptNames = finalResolvedMap
                     NotificationCenter.default.post(name: Notification.Name("pasteVaultFontsUpdated"), object: nil)
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Isolated 1s Countdown Subview (Zero Global Redraws)
-public struct SecretCountdownLabel: View {
-    public let expiresAt: Date
-    public let compact: Bool
-    public let language: AppLanguage
-
-    public init(expiresAt: Date, compact: Bool, language: AppLanguage = AppLanguage.current) {
-        self.expiresAt = expiresAt
-        self.compact = compact
-        self.language = language
-    }
-
-    public var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0)) { context in
-            let remaining = max(0, Int(ceil(expiresAt.timeIntervalSince(context.date))))
-            if compact {
-                HStack(spacing: 3) {
-                    Image(systemName: "timer")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 9, weight: .bold))
-                    Text(tr("\(remaining) сек ✕", "\(remaining)s ✕", lang: language))
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                }
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-            } else {
-                HStack(spacing: 5) {
-                    Image(systemName: "timer")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 11, weight: .bold))
-                    Text(tr("Удалится через \(remaining) сек", "Purges in \(remaining)s", lang: language))
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
         }
@@ -785,10 +661,12 @@ public struct SecretCountdownLabel: View {
 
 // MARK: - Native QR Code Generator Popover (CoreImage CIQRCodeGenerator ~180x180)
 public struct QRCodePopoverView: View {
+    private static let sharedCIContext = CIContext()
+
     public let url: String
     public let theme: AppTheme
     public let language: AppLanguage
-    @AppStorage("selectedFontId") private var selectedFontId: String = AppFont.default.rawValue
+    @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
 
     private var currentFont: AppFont {
         AppFont(fromRaw: selectedFontId)
@@ -805,8 +683,7 @@ public struct QRCodePopoverView: View {
         guard extent.width > 0, extent.height > 0 else { return nil }
         let scale = 180.0 / extent.width
         let transformed = outputCI.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(transformed, from: transformed.extent) else { return nil }
+        guard let cgImage = Self.sharedCIContext.createCGImage(transformed, from: transformed.extent) else { return nil }
         return NSImage(cgImage: cgImage, size: NSSize(width: 180, height: 180))
     }
 
@@ -859,12 +736,12 @@ public final class TapticSoundAndHaptics {
     private let queue = DispatchQueue(label: "com.pastevault.tapticsound", qos: .userInteractive)
     private let lock = NSLock()
 
-    /// Окно подавления дублей для одиночного клика кнопки (250 мс)
-    public static let clickDebounceInterval: TimeInterval = 0.25
+    /// Окно подавления дублей для одиночного клика кнопки (350 мс)
+    public static let clickDebounceInterval: TimeInterval = 0.35
     /// Быстрый интервал для прокрутки делений таймера (35 мс)
     public static let wheelTickInterval: TimeInterval = 0.035
-    /// Минимальный интервал между микро-щелчками (строгий debounce 250 мс для защиты от двойного щелчка)
-    public static let minTickInterval: TimeInterval = 0.25
+    /// Минимальный интервал между микро-щелчками (строгий debounce 350 мс для защиты от двойного щелчка)
+    public static let minTickInterval: TimeInterval = 0.35
 
     /// Аппаратно-событийный гейт клика мыши (One-Click-Per-MouseDown Gate)
     private var isMouseButtonDown: Bool = false
@@ -872,13 +749,13 @@ public final class TapticSoundAndHaptics {
     private var lastMouseUpTime: TimeInterval = 0
     private var mouseMonitor: Any?
 
-    /// Время последнего одиночного клика — защищено lock по monotonic clock
+    /// Время последнего одиночного клика — защищено lock по CFAbsoluteTimeGetCurrent()
     private var lastClickTime: TimeInterval = 0
     /// Время последнего вращения делений таймера
     private var lastWheelTickTime: TimeInterval = 0
     /// Время последнего щелчка (для обратной совместимости)
     private var lastTickTime: TimeInterval = 0
-    /// Время последнего тактильного отклика — изменяется ТОЛЬКО на главном потоке
+    /// Время последнего тактильного отклика — защищено lock
     private var lastHapticTime: TimeInterval = 0
 
     private init() {
@@ -905,7 +782,7 @@ public final class TapticSoundAndHaptics {
 
     /// Обработка физических событий мыши для аппаратно-событийного гейта
     public func handleMouseEvent(type: NSEvent.EventType) {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
         if type == .leftMouseDown {
             if !isMouseButtonDown {
@@ -933,8 +810,7 @@ public final class TapticSoundAndHaptics {
         isMouseButtonDown = false
         hasPlayedInCurrentMouseCycle = false
         lastMouseUpTime = 0
-        lastClickTime = 0
-        lastTickTime = 0
+        // Не сбрасываем lastClickTime, чтобы гарантировать соблюдение debounce 350 мс
         lock.unlock()
     }
 
@@ -1013,10 +889,10 @@ public final class TapticSoundAndHaptics {
     }
 
     public static var isAudioFeedbackEnabled: Bool {
-        if UserDefaults.standard.object(forKey: "tapticAudioFeedbackEnabled") == nil {
+        if AppDefaults.shared.object(forKey: "tapticAudioFeedbackEnabled") == nil {
             return true
         }
-        return UserDefaults.standard.bool(forKey: "tapticAudioFeedbackEnabled")
+        return AppDefaults.shared.bool(forKey: "tapticAudioFeedbackEnabled")
     }
 
     public func playTick() {
@@ -1025,19 +901,19 @@ public final class TapticSoundAndHaptics {
 
     @discardableResult
     public func playClick() -> Bool {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
 
         let isPhysicalDown = isMouseButtonDown || (NSEvent.pressedMouseButtons & 1 != 0)
 
         // One-Click-Per-MouseDown Gate: если в текущем цикле клика мыши звук уже играл
-        // И (кнопка зажата ИЛИ с момента отпускания прошло менее 0.25 с) — блокируем дублирующий щелчок!
+        // И (кнопка зажата ИЛИ с момента отпускания прошло менее 0.35 с) — блокируем дублирующий щелчок!
         if hasPlayedInCurrentMouseCycle && (isPhysicalDown || (now - lastMouseUpTime < Self.clickDebounceInterval)) {
             lock.unlock()
             return false
         }
 
-        // Базовый debounce интервал 250 мс
+        // Жёсткий аппаратный debounce интервал: минимум 350 мс между щелчками
         guard now - lastClickTime >= Self.clickDebounceInterval else {
             lock.unlock()
             return false
@@ -1046,11 +922,10 @@ public final class TapticSoundAndHaptics {
         hasPlayedInCurrentMouseCycle = true
         lastClickTime = now
         lastTickTime = now
+        lastHapticTime = now
         lock.unlock()
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.lastHapticTime = now
+        DispatchQueue.main.async {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         }
 
@@ -1067,7 +942,7 @@ public final class TapticSoundAndHaptics {
 
     @discardableResult
     public func playWheelTick() -> Bool {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
         guard now - lastWheelTickTime >= Self.wheelTickInterval else {
             lock.unlock()
@@ -1075,11 +950,10 @@ public final class TapticSoundAndHaptics {
         }
         lastWheelTickTime = now
         lastTickTime = now
+        lastHapticTime = now
         lock.unlock()
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.lastHapticTime = now
+        DispatchQueue.main.async {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         }
 
@@ -1099,7 +973,7 @@ public final class TapticSoundAndHaptics {
     }
 
     public func playConfirmClick() {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
         guard now - lastTickTime >= Self.minTickInterval else {
             lock.unlock()
@@ -1128,18 +1002,36 @@ public final class TapticSoundAndHaptics {
         playConfirmClick()
     }
 
+    private func playPurgePulseSound(confirm: Bool) {
+        let now = CFAbsoluteTimeGetCurrent()
+        lock.lock()
+        lastTickTime = now
+        lastHapticTime = now
+        lock.unlock()
+
+        guard Self.isAudioFeedbackEnabled else { return }
+        queue.async { [weak self] in
+            guard let self = self,
+                  let buf = confirm ? self.confirmBuffer : self.tickBuffer else { return }
+            self.ensureEngineRunning()
+            self.player.stop()
+            self.player.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
+            self.player.play()
+        }
+    }
+
     public func performTriplePurgePulse() {
         DispatchQueue.main.async {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         }
-        playTick()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        playPurgePulseSound(confirm: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-            self.playTick()
+            self?.playPurgePulseSound(confirm: false)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) { [weak self] in
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-            self.playConfirmClick()
+            self?.playPurgePulseSound(confirm: true)
         }
     }
 }
@@ -1355,6 +1247,21 @@ public struct TapticCircularTimerPopover: View {
                     }
 
                     Spacer()
+
+                    Button {
+                        TapticSoundAndHaptics.shared.performDialTick()
+                        onClose()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .symbolRenderingMode(.monochrome)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(currentTheme.secondaryText)
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(currentTheme.primaryText.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help(tr("Закрыть", "Close", lang: language))
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
@@ -1510,9 +1417,6 @@ public struct TapticCircularTimerPopover: View {
                             }
                             return
                         }
-                        if !isHovering {
-                            NSApp.activate(ignoringOtherApps: true)
-                        }
                         isHovering = true
                         hoverPoint = location
                         NSCursor.pointingHand.set()
@@ -1541,9 +1445,6 @@ public struct TapticCircularTimerPopover: View {
                                 }
                                 return
                             }
-                            if !isDragging {
-                                NSApp.activate(ignoringOtherApps: true)
-                            }
                             isDragging = true
                             hoverPoint = value.location
                             NSCursor.pointingHand.set()
@@ -1565,7 +1466,6 @@ public struct TapticCircularTimerPopover: View {
                             isDragging = false
                             let cursor = cursorAngleAndSeconds(at: value.location)
                             monitor.startTimerForItem(id: item.id, seconds: cursor.seconds)
-                            monitor.autoPurgeSecretsSeconds = cursor.seconds
                             triggerClickImpulse(for: cursor.seconds)
                             TapticSoundAndHaptics.shared.performDialClickConfirm()
                         }
@@ -1579,9 +1479,6 @@ public struct TapticCircularTimerPopover: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(currentTheme.borderColor, lineWidth: 1)
             )
-            .onAppear {
-                NSApp.activate(ignoringOtherApps: true)
-            }
             .onChange(of: remainingSeconds) { _, newRem in
                 if !isPaused && newRem > 0 && newRem % 10 == 0 && newRem != lastCountdown10s {
                     lastCountdown10s = newRem
@@ -1601,7 +1498,7 @@ public struct InfoTooltipBadge: View {
     @State private var isShowingPopover: Bool = false
     @State private var isHovering: Bool = false
     @State private var hoverTask: Task<Void, Never>? = nil
-    @AppStorage("selectedFontId") private var selectedFontId: String = AppFont.default.rawValue
+    @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
 
     private var currentFont: AppFont {
         AppFont(fromRaw: selectedFontId)
@@ -1952,7 +1849,7 @@ private struct PVButtonBody: View {
     let customBorderColor: Color?
 
     @State private var isHovered: Bool = false
-    @AppStorage("selectedFontId") private var selectedFontId: String = AppFont.default.rawValue
+    @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
     @ObservedObject private var fontManager = FontManager.shared
 
     private var currentFont: AppFont {
@@ -2095,18 +1992,37 @@ public struct QuickSnippetItem: Identifiable, Codable, Equatable, Sendable {
     public var category: String
     public var shortcutHint: String?
     public var isPinned: Bool = false
+    public var imagePath: String? = nil
+    public var imageDataBase64: String? = nil
+    public var useCount: Int = 0
+    public var createdAt: Double = Date().timeIntervalSince1970
 
-    public init(id: String = UUID().uuidString, title: String, content: String, category: String, shortcutHint: String? = nil, isPinned: Bool = false) {
+    public init(
+        id: String = UUID().uuidString,
+        title: String,
+        content: String,
+        category: String,
+        shortcutHint: String? = nil,
+        isPinned: Bool = false,
+        imagePath: String? = nil,
+        imageDataBase64: String? = nil,
+        useCount: Int = 0,
+        createdAt: Double = Date().timeIntervalSince1970
+    ) {
         self.id = id
         self.title = title
         self.content = content
         self.category = category
         self.shortcutHint = shortcutHint
         self.isPinned = isPinned
+        self.imagePath = imagePath
+        self.imageDataBase64 = imageDataBase64
+        self.useCount = useCount
+        self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, content, category, shortcutHint, isPinned
+        case id, title, content, category, shortcutHint, isPinned, imagePath, imageDataBase64, useCount, createdAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -2117,6 +2033,10 @@ public struct QuickSnippetItem: Identifiable, Codable, Equatable, Sendable {
         self.category = try container.decode(String.self, forKey: .category)
         self.shortcutHint = try container.decodeIfPresent(String.self, forKey: .shortcutHint)
         self.isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        self.imagePath = try container.decodeIfPresent(String.self, forKey: .imagePath)
+        self.imageDataBase64 = try container.decodeIfPresent(String.self, forKey: .imageDataBase64)
+        self.useCount = try container.decodeIfPresent(Int.self, forKey: .useCount) ?? 0
+        self.createdAt = try container.decodeIfPresent(Double.self, forKey: .createdAt) ?? Date().timeIntervalSince1970
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -2127,6 +2047,216 @@ public struct QuickSnippetItem: Identifiable, Codable, Equatable, Sendable {
         try container.encode(category, forKey: .category)
         try container.encodeIfPresent(shortcutHint, forKey: .shortcutHint)
         try container.encode(isPinned, forKey: .isPinned)
+        try container.encodeIfPresent(imagePath, forKey: .imagePath)
+        try container.encodeIfPresent(imageDataBase64, forKey: .imageDataBase64)
+        try container.encode(useCount, forKey: .useCount)
+        try container.encode(createdAt, forKey: .createdAt)
+    }
+}
+
+// MARK: - Pointing Hand Cursor View (AppKit Cursor Rects + Click Protection)
+@MainActor
+public final class PointingHandCursorCoordinator {
+    public static let shared = PointingHandCursorCoordinator()
+
+    private let registeredViews = NSHashTable<PointingHandCursorView.PointingHandNSView>.weakObjects()
+    private var eventMonitor: Any?
+    private var wasInsidePointingHand: Bool = false
+
+    private init() {}
+
+    public func register(_ view: PointingHandCursorView.PointingHandNSView) {
+        if !registeredViews.contains(view) {
+            registeredViews.add(view)
+        }
+        installMonitorIfNeeded()
+    }
+
+    public func unregister(_ view: PointingHandCursorView.PointingHandNSView) {
+        registeredViews.remove(view)
+    }
+
+    public var registeredViewCount: Int {
+        registeredViews.allObjects.count
+    }
+
+    public func containsMouseLocation(
+        _ pointInWindow: NSPoint,
+        in window: NSWindow,
+        excluding excludedView: PointingHandCursorView.PointingHandNSView? = nil
+    ) -> Bool {
+        for view in registeredViews.allObjects {
+            if let excludedView, view === excludedView { continue }
+            guard view.window === window,
+                  !view.isHiddenOrHasHiddenAncestor,
+                  !view.bounds.isEmpty else {
+                continue
+            }
+            let rectInWindow = view.convert(view.bounds, to: nil)
+            if rectInWindow.contains(pointInWindow) {
+                return true
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    public func refreshCursorIfNeeded(for window: NSWindow?, pointInWindow overridePoint: NSPoint? = nil) -> Bool {
+        guard let window else { return false }
+        let point = overridePoint ?? window.mouseLocationOutsideOfEventStream
+        if containsMouseLocation(point, in: window) {
+            wasInsidePointingHand = true
+            NSCursor.pointingHand.set()
+            return true
+        }
+        if wasInsidePointingHand {
+            wasInsidePointingHand = false
+            NSCursor.arrow.set()
+        }
+        return false
+    }
+
+    public func handleMouseClick(in window: NSWindow?, pointInWindow overridePoint: NSPoint? = nil) {
+        guard let window else { return }
+        if refreshCursorIfNeeded(for: window, pointInWindow: overridePoint) {
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.refreshCursorIfNeeded(for: window, pointInWindow: overridePoint)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.refreshCursorIfNeeded(for: window, pointInWindow: overridePoint)
+            }
+        }
+    }
+
+    private func installMonitorIfNeeded() {
+        guard eventMonitor == nil else { return }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .cursorUpdate, .leftMouseDown, .leftMouseUp]) { [weak self] event in
+            guard let self else { return event }
+            let eventTypeRaw = event.type.rawValue
+            let windowNumber = event.windowNumber
+            let suppressEvent: Bool = MainActor.assumeIsolated {
+                let targetWindow = NSApp.window(withWindowNumber: windowNumber) ?? NSApp.keyWindow
+                let eventType = NSEvent.EventType(rawValue: eventTypeRaw)
+                switch eventType {
+                case .leftMouseDown, .leftMouseUp:
+                    self.handleMouseClick(in: targetWindow)
+                    return false
+                case .cursorUpdate:
+                    if let targetWindow, self.refreshCursorIfNeeded(for: targetWindow) {
+                        DispatchQueue.main.async { [weak self, weak targetWindow] in
+                            guard let self, let targetWindow else { return }
+                            _ = self.refreshCursorIfNeeded(for: targetWindow)
+                        }
+                        return true
+                    }
+                    return false
+                case .mouseMoved:
+                    _ = self.refreshCursorIfNeeded(for: targetWindow)
+                    return false
+                default:
+                    return false
+                }
+            }
+            return suppressEvent ? nil : event
+        }
+    }
+}
+
+public struct PointingHandCursorView: NSViewRepresentable {
+    public init() {}
+
+    public func makeNSView(context: Context) -> PointingHandNSView {
+        PointingHandNSView()
+    }
+
+    public func updateNSView(_ nsView: PointingHandNSView, context: Context) {
+        nsView.window?.invalidateCursorRects(for: nsView)
+        PointingHandCursorCoordinator.shared.refreshCursorIfNeeded(for: nsView.window)
+    }
+
+    public final class PointingHandNSView: NSView {
+        private var trackingArea: NSTrackingArea?
+
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                PointingHandCursorCoordinator.shared.register(self)
+                updateTrackingAreas()
+                window?.invalidateCursorRects(for: self)
+            } else {
+                PointingHandCursorCoordinator.shared.unregister(self)
+            }
+        }
+
+        public override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let trackingArea {
+                removeTrackingArea(trackingArea)
+                self.trackingArea = nil
+            }
+            guard !bounds.isEmpty else { return }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        public override func mouseEntered(with event: NSEvent) {
+            super.mouseEntered(with: event)
+            NSCursor.pointingHand.set()
+        }
+
+        public override func mouseMoved(with event: NSEvent) {
+            super.mouseMoved(with: event)
+            NSCursor.pointingHand.set()
+        }
+
+        public override func cursorUpdate(with event: NSEvent) {
+            NSCursor.pointingHand.set()
+        }
+
+        public override func mouseExited(with event: NSEvent) {
+            super.mouseExited(with: event)
+            guard let window else { return }
+            let pointInWindow = window.mouseLocationOutsideOfEventStream
+            let pointInView = convert(pointInWindow, from: nil)
+            let insideSelf = bounds.contains(pointInView) && !isHiddenOrHasHiddenAncestor && !bounds.isEmpty
+            if !insideSelf && !PointingHandCursorCoordinator.shared.containsMouseLocation(pointInWindow, in: window, excluding: self) {
+                NSCursor.arrow.set()
+            }
+        }
+
+        public override func resetCursorRects() {
+            super.resetCursorRects()
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+
+        public override func layout() {
+            super.layout()
+            updateTrackingAreas()
+            window?.invalidateCursorRects(for: self)
+        }
+
+        public override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder
+    public func pointingHandCursor(_ enabled: Bool = true) -> some View {
+        if enabled {
+            self.background(PointingHandCursorView())
+        } else {
+            self
+        }
     }
 }
 
@@ -2287,16 +2417,18 @@ public struct ClipboardRowCardView: View {
     public let windowOpacity: Double
     public let monitor: ClipboardMonitor
     public var isPastedToast: Bool = false
+    public var isPasteFailedToast: Bool = false
     public var searchQuery: String = ""
     public let onSelect: () -> Void
     public let onPaste: () -> Void
     public let onDelete: () -> Void
     public let onTogglePin: () -> Void
     public var onToggleSecret: (() -> Void)? = nil
-    public let onStartTimer: () -> Void
-    public let onCancelTimer: () -> Void
+    public var onCreateSnippet: (() -> Void)? = nil
 
     @State private var isHovered: Bool = false
+    @State private var isBoltHovered: Bool = false
+    @State private var lastBoltTapAt: Date = .distantPast
     @State private var isKeyHovered: Bool = false
     @State private var isPinHovered: Bool = false
     @State private var isPasteHovered: Bool = false
@@ -2305,6 +2437,46 @@ public struct ClipboardRowCardView: View {
 
     private var isSecretItem: Bool {
         item.isSensitive || item.effectiveContentType == .secret
+    }
+
+    private var pasteBtnFill: Color {
+        if isPasteFailedToast { return Color.red }
+        if isPastedToast { return Color(red: 0.10, green: 0.78, blue: 0.45) }
+        if isPasteHovered { return currentTheme.accentColor }
+        return isSelected ? currentTheme.badgeFill : currentTheme.primaryText.opacity(0.08)
+    }
+
+    private var pasteBtnForeground: Color {
+        if isPasteFailedToast || isPastedToast || isPasteHovered { return Color.white }
+        return isSelected ? currentTheme.badgeText : currentTheme.primaryText.opacity(0.85)
+    }
+
+    private var pasteBtnBorder: Color {
+        if isPasteFailedToast { return Color.red }
+        if isPastedToast { return Color(red: 0.10, green: 0.78, blue: 0.45) }
+        return isPasteHovered ? currentTheme.accentColor : Color.clear
+    }
+
+    private var pasteBtnShadowColor: Color {
+        if isPasteFailedToast { return Color.red.opacity(0.55) }
+        if isPastedToast { return Color(red: 0.10, green: 0.78, blue: 0.45).opacity(0.55) }
+        return Color.clear
+    }
+
+    private var cardOutlineColor: Color {
+        if isPasteFailedToast { return Color.red }
+        if isPastedToast { return Color(red: 0.10, green: 0.78, blue: 0.45) }
+        return item.isPinned ? currentTheme.accentColor.opacity(0.45) : Color.clear
+    }
+
+    private var cardOutlineWidth: CGFloat {
+        (isPasteFailedToast || isPastedToast) ? 2.0 : (item.isPinned ? 1.5 : 0)
+    }
+
+    private var cardShadowColor: Color {
+        if isPasteFailedToast { return Color.red.opacity(0.45) }
+        if isPastedToast { return Color(red: 0.10, green: 0.78, blue: 0.45).opacity(0.45) }
+        return Color.clear
     }
 
     public static func isPasswordCandidate(_ item: ClipboardItemRow) -> Bool {
@@ -2449,11 +2621,47 @@ public struct ClipboardRowCardView: View {
                                 .animation(.easeOut(duration: 0.12), value: isKeyHovered)
                         }
                         .buttonStyle(.plain)
+                        .contentShape(Rectangle())
                         .help(isSec ? tr("Сделать обычным текстом", "Make Plain Text", lang: language) : tr("Скрыть как пароль", "Mark as Password", lang: language))
                         .onHover { hovering in
                             isKeyHovered = hovering
-                            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                         }
+                        .pointingHandCursor()
+                    }
+
+                    let isSnippetSupportedType = (item.effectiveContentType == .text || item.effectiveContentType == .code || item.effectiveContentType == .image || item.contentType == .text || item.contentType == .code || item.contentType == .image)
+                    if let onCreateSnippet, isSnippetSupportedType {
+                        Button {
+                            // Защита от двойного клика: игнорируем повторное нажатие в течение 0.6 с
+                            let now = Date()
+                            guard now.timeIntervalSince(lastBoltTapAt) > 0.6 else { return }
+                            lastBoltTapAt = now
+                            TapticSoundAndHaptics.shared.performDialTick()
+                            onCreateSnippet()
+                        } label: {
+                            Image(systemName: "bolt.fill")
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(isBoltHovered ? currentTheme.accentColor : currentTheme.primaryText)
+                                .padding(3)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(isBoltHovered ? currentTheme.accentColor.opacity(0.22) : Color.clear)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(isBoltHovered ? currentTheme.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+                                )
+                                .scaleEffect(isBoltHovered ? 1.04 : 1.0)
+                                .animation(.easeOut(duration: 0.12), value: isBoltHovered)
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(Rectangle())
+                        .help(tr("Создать фрагмент", "Create snippet", lang: language))
+                        .onHover { hovering in
+                            isBoltHovered = hovering
+                        }
+                        .pointingHandCursor()
                     }
 
                     Button {
@@ -2477,11 +2685,12 @@ public struct ClipboardRowCardView: View {
                             .animation(.easeOut(duration: 0.12), value: isPinHovered)
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Rectangle())
                     .help(item.isPinned ? tr("Открепить (⌥P)", "Unpin (⌥P)", lang: language) : tr("Закрепить (⌥P)", "Pin (⌥P)", lang: language))
                     .onHover { hovering in
                         isPinHovered = hovering
-                        if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
+                    .pointingHandCursor()
 
                     Button {
                         for window in NSApp.windows {
@@ -2494,7 +2703,7 @@ public struct ClipboardRowCardView: View {
                         onPaste()
                     } label: {
                         HStack(spacing: 3) {
-                            if isPastedToast {
+                            if isPastedToast && !isPasteFailedToast {
                                 Image(systemName: "checkmark")
                                     .symbolRenderingMode(.monochrome)
                                     .font(.system(size: 8, weight: .bold))
@@ -2514,23 +2723,27 @@ public struct ClipboardRowCardView: View {
                         .padding(.vertical, 2)
                         .background(
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(isPastedToast ? Color(red: 0.10, green: 0.78, blue: 0.45) : (isPasteHovered ? currentTheme.accentColor : (isSelected ? currentTheme.badgeFill : currentTheme.primaryText.opacity(0.08))))
+                                .fill(pasteBtnFill)
                         )
-                        .foregroundStyle(isPastedToast ? Color.white : (isPasteHovered ? Color.white : (isSelected ? currentTheme.badgeText : currentTheme.primaryText.opacity(0.85))))
+                        .foregroundStyle(pasteBtnForeground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .strokeBorder(isPastedToast ? Color(red: 0.10, green: 0.78, blue: 0.45) : (isPasteHovered ? currentTheme.accentColor : Color.clear), lineWidth: 1)
+                                .strokeBorder(pasteBtnBorder, lineWidth: 1)
                         )
-                        .shadow(color: Color(red: 0.10, green: 0.78, blue: 0.45).opacity(isPastedToast ? 0.55 : 0), radius: isPastedToast ? 6 : 0)
+                        .shadow(
+                            color: pasteBtnShadowColor,
+                            radius: (isPasteFailedToast || isPastedToast) ? 6 : 0
+                        )
                         .scaleEffect(isPasteHovered ? 1.03 : 1.0)
-                        .animation(.easeInOut(duration: 0.18), value: isPastedToast)
+                        .animation(.easeInOut(duration: 0.18), value: isPastedToast || isPasteFailedToast)
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Rectangle())
                     .help(tr("Мгновенно вставить в \(targetAppName)", "Instantly paste into \(targetAppName)", lang: language))
                     .onHover { hovering in
                         isPasteHovered = hovering
-                        if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
+                    .pointingHandCursor()
 
                     Button {
                         TapticSoundAndHaptics.shared.performDialTick()
@@ -2553,11 +2766,12 @@ public struct ClipboardRowCardView: View {
                             .animation(.easeOut(duration: 0.12), value: isDeleteHovered)
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Rectangle())
                     .help(tr("Удалить запись", "Delete item", lang: language))
                     .onHover { hovering in
                         isDeleteHovered = hovering
-                        if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
+                    .pointingHandCursor()
                 }
 
                 // Строка 2: Бейдж типа (+ теги) + компактный индикатор таймера
@@ -2583,75 +2797,14 @@ public struct ClipboardRowCardView: View {
                     }
 
                     if isSecretItem {
-                        TimelineView(.periodic(from: .now, by: 1.0)) { context in
-                            let paused = monitor.pausedTimerSeconds[item.id]
-                            let isPaused = (paused != nil && paused! > 0)
-                            let remaining = isPaused ? (paused ?? 0) : max(0, Int(ceil((item.expiresAt ?? .distantPast).timeIntervalSince(context.date))))
-                            let isActive = !isPaused && item.expiresAt != nil && remaining > 0
-
-                            Button {
-                                isRowTimerPopoverPresented.toggle()
-                            } label: {
-                                if isPaused {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "pause.fill")
-                                            .symbolRenderingMode(.monochrome)
-                                            .font(.system(size: 8, weight: .bold))
-                                        Text(formatTimerMMSS(seconds: remaining))
-                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                    }
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(currentTheme.accentColor.opacity(0.14))
-                                    .foregroundStyle(currentTheme.accentColor.opacity(0.85))
-                                    .clipShape(Capsule())
-                                    .overlay(Capsule().strokeBorder(currentTheme.accentColor.opacity(0.35), lineWidth: 0.8))
-                                } else if isActive {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "timer")
-                                            .symbolRenderingMode(.monochrome)
-                                            .font(.system(size: 8.5, weight: .bold))
-                                        Text(formatTimerMMSS(seconds: remaining))
-                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                    }
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(currentTheme.accentColor.opacity(0.18))
-                                    .foregroundStyle(currentTheme.accentColor)
-                                    .clipShape(Capsule())
-                                    .overlay(Capsule().strokeBorder(currentTheme.accentColor.opacity(0.4), lineWidth: 0.8))
-                                } else {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "timer")
-                                            .symbolRenderingMode(.monochrome)
-                                            .font(.system(size: 8.5, weight: .bold))
-                                        Image(systemName: "infinity")
-                                            .symbolRenderingMode(.monochrome)
-                                            .font(.system(size: 8.5, weight: .bold))
-                                    }
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(currentTheme.primaryText.opacity(0.08))
-                                    .foregroundStyle(currentTheme.secondaryText)
-                                    .clipShape(Capsule())
-                                }
+                        let pausedValue = monitor.pausedTimerSeconds[item.id]
+                        let needsLiveTick = (pausedValue == nil || (pausedValue ?? 0) <= 0) && item.expiresAt != nil
+                        if needsLiveTick {
+                            TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                                secretTimerPillButton(now: context.date)
                             }
-                            .buttonStyle(.plain)
-                            .help(isPaused
-                                  ? tr("Таймер на паузе (клик для настройки)", "Timer paused (click to configure)", lang: language)
-                                  : (isActive
-                                     ? tr("Нажмите для настройки кругового таймера автоудаления", "Click to configure auto-purge timer", lang: language)
-                                     : tr("Автоудаление выключено (клик для настройки таймера)", "Auto-purge disabled (click to configure timer)", lang: language)))
-                            .popover(isPresented: $isRowTimerPopoverPresented, arrowEdge: .trailing) {
-                                TapticCircularTimerPopover(
-                                    item: item,
-                                    monitor: monitor,
-                                    currentTheme: currentTheme,
-                                    currentFont: currentFont,
-                                    language: language,
-                                    onClose: { isRowTimerPopoverPresented = false }
-                                )
-                            }
+                        } else {
+                            secretTimerPillButton(now: Date())
                         }
                     }
                 }
@@ -2694,17 +2847,9 @@ public struct ClipboardRowCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(
-                    isPastedToast
-                        ? Color(red: 0.10, green: 0.78, blue: 0.45)
-                        : (item.isPinned ? currentTheme.accentColor.opacity(0.45) : Color.clear),
-                    lineWidth: isPastedToast ? 2.0 : (item.isPinned ? 1.5 : 0)
-                )
-                .shadow(
-                    color: Color(red: 0.10, green: 0.78, blue: 0.45).opacity(isPastedToast ? 0.45 : 0),
-                    radius: isPastedToast ? 6 : 0
-                )
-                .animation(.easeInOut(duration: 0.18), value: isPastedToast)
+                .strokeBorder(cardOutlineColor, lineWidth: cardOutlineWidth)
+                .shadow(color: cardShadowColor, radius: (isPasteFailedToast || isPastedToast) ? 6 : 0)
+                .animation(.easeInOut(duration: 0.18), value: isPastedToast || isPasteFailedToast)
         )
         .clipped()
         .contentShape(Rectangle())
@@ -2745,6 +2890,78 @@ public struct ClipboardRowCardView: View {
         }
     }
 
+    @ViewBuilder
+    private func secretTimerPillButton(now: Date) -> some View {
+        let paused = monitor.pausedTimerSeconds[item.id]
+        let isPaused = (paused != nil && paused! > 0)
+        let remaining = isPaused ? (paused ?? 0) : max(0, Int(ceil((item.expiresAt ?? .distantPast).timeIntervalSince(now))))
+        let isActive = !isPaused && item.expiresAt != nil && remaining > 0
+
+        Button {
+            isRowTimerPopoverPresented.toggle()
+        } label: {
+            if isPaused {
+                HStack(spacing: 3) {
+                    Image(systemName: "pause.fill")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 8, weight: .bold))
+                    Text(formatTimerMMSS(seconds: remaining))
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(currentTheme.accentColor.opacity(0.14))
+                .foregroundStyle(currentTheme.accentColor.opacity(0.85))
+                .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(currentTheme.accentColor.opacity(0.35), lineWidth: 0.8))
+            } else if isActive {
+                HStack(spacing: 3) {
+                    Image(systemName: "timer")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 8.5, weight: .bold))
+                    Text(formatTimerMMSS(seconds: remaining))
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(currentTheme.accentColor.opacity(0.18))
+                .foregroundStyle(currentTheme.accentColor)
+                .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(currentTheme.accentColor.opacity(0.4), lineWidth: 0.8))
+            } else {
+                HStack(spacing: 3) {
+                    Image(systemName: "timer")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 8.5, weight: .bold))
+                    Image(systemName: "infinity")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 8.5, weight: .bold))
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(currentTheme.primaryText.opacity(0.08))
+                .foregroundStyle(currentTheme.secondaryText)
+                .clipShape(Capsule())
+            }
+        }
+        .buttonStyle(.plain)
+        .help(isPaused
+              ? tr("Таймер на паузе (клик для настройки)", "Timer paused (click to configure)", lang: language)
+              : (isActive
+                 ? tr("Нажмите для настройки кругового таймера автоудаления", "Click to configure auto-purge timer", lang: language)
+                 : tr("Автоудаление выключено (клик для настройки таймера)", "Auto-purge disabled (click to configure timer)", lang: language)))
+        .popover(isPresented: $isRowTimerPopoverPresented, arrowEdge: .trailing) {
+            TapticCircularTimerPopover(
+                item: item,
+                monitor: monitor,
+                currentTheme: currentTheme,
+                currentFont: currentFont,
+                language: language,
+                onClose: { isRowTimerPopoverPresented = false }
+            )
+        }
+    }
+
     private func displaySourceAppName(_ name: String?) -> String {
         guard let name = name, !name.isEmpty else {
             return tr("Буфер", "Clipboard", lang: language)
@@ -2759,285 +2976,229 @@ public struct ClipboardRowCardView: View {
     }
 }
 
-// MARK: - Quick Snippet Card Row View
-@MainActor
-public struct QuickSnippetCardRowView: View {
-    public let snippet: QuickSnippetItem
-    public let targetAppName: String
+// MARK: - Reusable Snippet Card Action Button
+public struct SnippetCardActionButton: View {
+    public let icon: String
+    public let isActive: Bool
+    public let activeColor: Color
+    public let defaultColor: Color
+    public let tooltip: String
+    public let currentTheme: AppTheme
+    public let action: () -> Void
+
+    @State private var isHovered: Bool = false
+    @State private var isPressed: Bool = false
+
+    public init(
+        icon: String,
+        isActive: Bool,
+        activeColor: Color,
+        defaultColor: Color,
+        tooltip: String,
+        currentTheme: AppTheme,
+        action: @escaping () -> Void
+    ) {
+        self.icon = icon
+        self.isActive = isActive
+        self.activeColor = activeColor
+        self.defaultColor = defaultColor
+        self.tooltip = tooltip
+        self.currentTheme = currentTheme
+        self.action = action
+    }
+
+    public var body: some View {
+        Button {
+            TapticSoundAndHaptics.shared.playClick()
+            action()
+        } label: {
+            Image(systemName: icon)
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isActive ? activeColor : (isHovered ? currentTheme.primaryText : defaultColor))
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isHovered ? currentTheme.primaryText.opacity(0.12) : (isActive ? activeColor.opacity(0.12) : Color.clear))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(isHovered ? currentTheme.borderColor.opacity(0.6) : Color.clear, lineWidth: 0.5)
+                )
+                .scaleEffect(isPressed ? 0.92 : 1.0)
+                .opacity(isPressed ? 0.85 : 1.0)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+        .help(tooltip)
+    }
+}
+
+// MARK: - Snippet Macro Dropdown Row
+private struct SnippetMacroDropdownRow: View {
+    let macro: SnippetMacroDefinition
+    let currentTheme: AppTheme
+    let currentFont: AppFont
+    let language: AppLanguage
+    let onSelect: () -> Void
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button {
+            TapticSoundAndHaptics.shared.playClick()
+            onSelect()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: macro.icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(currentTheme.accentColor)
+                    .frame(width: 18, alignment: .center)
+
+                Text(macro.title(isEnglish: language == .en))
+                    .font(currentFont.font(size: 12, weight: .medium))
+                    .foregroundStyle(currentTheme.primaryText)
+                    .lineLimit(1)
+
+                Spacer(minLength: 6)
+
+                Text(macro.tag)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(currentTheme.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(currentTheme.accentColor.opacity(0.12))
+                    )
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovered ? currentTheme.accentColor.opacity(0.12) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .pointingHandCursor()
+    }
+}
+
+// MARK: - Snippet Modal Macro Dynamic Banner
+public struct SnippetModalMacroDynamicBanner: View {
+    public let content: String
+    public let selectedMacro: String?
     public let currentTheme: AppTheme
     public let currentFont: AppFont
     public let language: AppLanguage
-    public let windowOpacity: Double
-    public let searchQuery: String
-    public let isTitleMatched: Bool
-    public let isContentMatched: Bool
-    public let isPastedToast: Bool
-    public let isCopiedToast: Bool
-    public let onTogglePin: () -> Void
-    public let onEdit: () -> Void
-    public let onPaste: () -> Void
-    public let onCopy: () -> Void
-    public let onDelete: () -> Void
 
-    @State private var isPinHovered: Bool = false
-    @State private var isEditHovered: Bool = false
-    @State private var isPasteHovered: Bool = false
-    @State private var isCopyHovered: Bool = false
-    @State private var isDeleteHovered: Bool = false
+    public init(
+        content: String,
+        selectedMacro: String? = nil,
+        currentTheme: AppTheme,
+        currentFont: AppFont,
+        language: AppLanguage
+    ) {
+        self.content = content
+        self.selectedMacro = selectedMacro
+        self.currentTheme = currentTheme
+        self.currentFont = currentFont
+        self.language = language
+    }
 
-    public var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            // Левая колонка: название, бейдж категории, плашка «Совпадение в тексте» и превью содержимого
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    if snippet.isPinned {
-                        Image(systemName: "pin.fill")
-                            .symbolRenderingMode(.monochrome)
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(currentTheme.accentColor)
-                            .help(tr("Закреплённый фрагмент (всегда сверху)", "Pinned snippet (always on top)", lang: language))
+    private var effectiveMacro: String? {
+        let lower = content.lowercased()
+        if let sel = selectedMacro?.lowercased(), lower.contains(sel) {
+            return sel
+        }
+        // Если выбранного макроса нет в тексте, ищем последний макрос в тексте
+        let allMacros = SnippetMacroEngine.macros.map { $0.tag }
+        var latestRange: Range<String.Index>? = nil
+        var latestMacro: String? = nil
+        for macro in allMacros {
+            if let r = lower.range(of: macro, options: .backwards) {
+                if let cur = latestRange {
+                    if r.lowerBound > cur.lowerBound {
+                        latestRange = r
+                        latestMacro = macro
                     }
-
-                    let titleText = MainPanelView.localizedSnippetTitle(snippet.title, lang: language)
-                    if !searchQuery.isEmpty {
-                        Text(SearchHighlightHelper.highlight(
-                            text: titleText,
-                            query: searchQuery,
-                            baseFont: currentFont.font(size: 13, weight: .bold),
-                            baseColor: currentTheme.primaryText,
-                            accentColor: currentTheme.accentColor,
-                            isLight: currentTheme.isLight,
-                            bold: true
-                        ))
-                    } else {
-                        Text(titleText)
-                            .font(currentFont.font(size: 13, weight: .bold))
-                            .foregroundStyle(currentTheme.primaryText)
-                    }
-
-                    Text(MainPanelView.localizedSnippetCategory(snippet.category, lang: language))
-                        .font(currentFont.font(size: 9, weight: .semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(currentTheme.badgeFill)
-                        .foregroundStyle(currentTheme.badgeText)
-                        .clipShape(Capsule())
-
-                    // Бейдж «Совпадение в тексте», если запрос найден только в content, а не в title
-                    if !searchQuery.isEmpty && !isTitleMatched && isContentMatched {
-                        HStack(spacing: 3) {
-                            Image(systemName: "text.magnifyingglass")
-                                .font(.system(size: 8.5, weight: .semibold))
-                            Text(tr("Совпадение в тексте", "Match in text", lang: language))
-                                .font(currentFont.font(size: 9, weight: .semibold))
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(currentTheme.accentColor.opacity(0.18))
-                        .foregroundStyle(currentTheme.accentColor)
-                        .clipShape(Capsule())
-                    }
-
-                    Spacer()
-                }
-
-                let contentText = MainPanelView.localizedSnippetContent(snippet.content, lang: language)
-                Text(SearchHighlightHelper.highlightedSnippetText(
-                    contentText,
-                    query: searchQuery,
-                    accentColor: currentTheme.accentColor,
-                    primaryColor: currentTheme.primaryText.opacity(0.9),
-                    baseFontSize: 11,
-                    baseFont: currentFont.font(size: 11, weight: .regular),
-                    isLight: currentTheme.isLight
-                ))
-                .lineLimit(2)
-
-                if SearchHighlightHelper.containsSnippetMacro(snippet.content) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "bolt.fill")
-                            .foregroundStyle(currentTheme.accentColor)
-                            .font(.system(size: 9))
-                        Text(tr("Макросы заменятся при вставке", "Macros expand on paste", lang: language))
-                            .font(currentFont.font(size: 9.5, weight: .medium))
-                            .foregroundStyle(currentTheme.secondaryText)
-                    }
-                    .padding(.top, 1)
-                }
-            }
-
-            // Правая часть: органичный ряд из 5 элементов единой высоты (30 pt) со скруглением 8 pt
-            HStack(spacing: 6) {
-                // 1) Кнопка «Закрепить» (30x30 pt)
-                Button {
-                    TapticSoundAndHaptics.shared.playClick()
-                    onTogglePin()
-                } label: {
-                    Image(systemName: snippet.isPinned ? "pin.fill" : "pin")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 11, weight: snippet.isPinned ? .bold : .medium))
-                        .foregroundStyle(snippet.isPinned ? Color.white : (isPinHovered ? currentTheme.accentColor : currentTheme.primaryText))
-                        .frame(width: 30, height: 30)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(snippet.isPinned
-                                      ? (isPinHovered ? currentTheme.accentColor.opacity(0.85) : currentTheme.accentColor)
-                                      : (isPinHovered ? currentTheme.accentColor.opacity(0.12) : currentTheme.primaryText.opacity(0.06)))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(snippet.isPinned ? Color.white.opacity(0.3) : (isPinHovered ? currentTheme.accentColor.opacity(0.35) : Color.clear), lineWidth: 1)
-                        )
-                        .scaleEffect(isPinHovered ? 1.04 : 1.0)
-                        .animation(.easeOut(duration: 0.12), value: isPinHovered)
-                }
-                .buttonStyle(.plain)
-                .help(snippet.isPinned
-                      ? tr("Открепить фрагмент", "Unpin snippet", lang: language)
-                      : tr("Закрепить фрагмент (всегда сверху)", "Pin snippet (always on top)", lang: language))
-                .onHover { hovering in
-                    isPinHovered = hovering
-                    if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                }
-
-                // 2) Кнопка «Редактировать» (30x30 pt)
-                Button {
-                    TapticSoundAndHaptics.shared.playClick()
-                    onEdit()
-                } label: {
-                    Image(systemName: "pencil")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(isEditHovered ? currentTheme.accentColor : currentTheme.primaryText)
-                        .frame(width: 30, height: 30)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isEditHovered ? currentTheme.accentColor.opacity(0.16) : currentTheme.primaryText.opacity(0.06))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(isEditHovered ? currentTheme.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
-                        )
-                        .scaleEffect(isEditHovered ? 1.04 : 1.0)
-                        .animation(.easeOut(duration: 0.12), value: isEditHovered)
-                }
-                .buttonStyle(.plain)
-                .help(tr("Редактировать фрагмент", "Edit snippet", lang: language))
-                .onHover { hovering in
-                    isEditHovered = hovering
-                    if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                }
-
-                // 3) Главная акцентная кнопка «↩ Вставить в <targetApp>» (высота 30 pt, скругление 8 pt)
-                Button {
-                    onPaste()
-                } label: {
-                    HStack(spacing: 5) {
-                        if isPastedToast {
-                            Image(systemName: "checkmark")
-                                .symbolRenderingMode(.monochrome)
-                                .font(.system(size: 11, weight: .bold))
-                            Text(tr("Вставлено", "Pasted", lang: language))
-                                .font(currentFont.font(size: 11, weight: .bold))
-                                .lineLimit(1)
-                        } else {
-                            Image(systemName: "arrow.turn.down.left")
-                                .symbolRenderingMode(.monochrome)
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(tr("Вставить в \(targetAppName)", "Paste to \(targetAppName)", lang: language))
-                                .font(currentFont.font(size: 11, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isPastedToast
-                                  ? Color(red: 0.10, green: 0.78, blue: 0.45)
-                                  : (isPasteHovered ? currentTheme.accentColor.opacity(0.88) : currentTheme.accentColor))
-                    )
-                    .foregroundStyle(Color.white)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(isPastedToast ? Color.white.opacity(0.3) : Color.white.opacity(0.15), lineWidth: 1)
-                    )
-                    .shadow(color: isPastedToast ? Color(red: 0.10, green: 0.78, blue: 0.45).opacity(0.4) : Color.clear, radius: 4)
-                    .scaleEffect(isPasteHovered && !isPastedToast ? 1.02 : 1.0)
-                    .animation(.easeInOut(duration: 0.15), value: isPastedToast)
-                    .animation(.easeOut(duration: 0.12), value: isPasteHovered)
-                }
-                .buttonStyle(.plain)
-                .help(tr("Вставить фрагмент в активное окно \(targetAppName)", "Paste snippet into active window of \(targetAppName)", lang: language))
-                .onHover { hovering in
-                    isPasteHovered = hovering
-                    if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                }
-
-                // 4) Кнопка «Скопировать» (30x30 pt)
-                Button {
-                    onCopy()
-                } label: {
-                    Image(systemName: isCopiedToast ? "checkmark" : "doc.on.doc")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(isCopiedToast
-                                         ? Color(red: 0.10, green: 0.78, blue: 0.45)
-                                         : (isCopyHovered ? currentTheme.accentColor : currentTheme.primaryText))
-                        .frame(width: 30, height: 30)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isCopiedToast
-                                      ? Color(red: 0.10, green: 0.78, blue: 0.45).opacity(0.18)
-                                      : (isCopyHovered ? currentTheme.accentColor.opacity(0.16) : currentTheme.primaryText.opacity(0.06)))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(isCopiedToast
-                                              ? Color(red: 0.10, green: 0.78, blue: 0.45).opacity(0.4)
-                                              : (isCopyHovered ? currentTheme.accentColor.opacity(0.35) : Color.clear), lineWidth: 1)
-                        )
-                        .scaleEffect(isCopyHovered ? 1.04 : 1.0)
-                        .animation(.easeOut(duration: 0.12), value: isCopyHovered)
-                }
-                .buttonStyle(.plain)
-                .help(tr("Скопировать фрагмент", "Copy snippet", lang: language))
-                .onHover { hovering in
-                    isCopyHovered = hovering
-                    if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                }
-
-                // 5) Кнопка «Удалить» (30x30 pt)
-                Button {
-                    TapticSoundAndHaptics.shared.performDialTick()
-                    onDelete()
-                } label: {
-                    Image(systemName: "xmark")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(isDeleteHovered ? Color.red : currentTheme.secondaryText)
-                        .frame(width: 30, height: 30)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isDeleteHovered ? Color.red.opacity(0.16) : currentTheme.primaryText.opacity(0.04))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(isDeleteHovered ? Color.red.opacity(0.45) : Color.clear, lineWidth: 1)
-                        )
-                        .scaleEffect(isDeleteHovered ? 1.04 : 1.0)
-                        .animation(.easeOut(duration: 0.12), value: isDeleteHovered)
-                }
-                .buttonStyle(.plain)
-                .help(tr("Удалить фрагмент", "Delete snippet", lang: language))
-                .onHover { hovering in
-                    isDeleteHovered = hovering
-                    if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                } else {
+                    latestRange = r
+                    latestMacro = macro
                 }
             }
         }
-        .padding(12)
-        .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 11)
+        return latestMacro
+    }
+
+    public var body: some View {
+        guard let macro = effectiveMacro else {
+            return AnyView(EmptyView())
+        }
+
+        let labelText = PasteVault.tr("При вставке заменится:", "Replaces on paste:", lang: language)
+        let locale = (language == .ru) ? Locale(identifier: "ru_RU") : Locale(identifier: "en_US")
+        let badgeText = SnippetMacroEngine.previewValue(for: macro, locale: locale)
+
+        return AnyView(
+            HStack(spacing: 6) {
+                Image(systemName: "bolt.fill")
+                    .foregroundStyle(currentTheme.accentColor)
+                    .font(.system(size: 11))
+
+                Text(labelText)
+                    .font(currentFont.font(size: 11, weight: .medium))
+                    .foregroundStyle(currentTheme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(0)
+
+                Spacer(minLength: 4)
+
+                badgeView(text: badgeText)
+                    .layoutPriority(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(currentTheme.accentColor.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(currentTheme.accentColor.opacity(0.25), lineWidth: 1)
+            )
+        )
+    }
+
+    private func badgeView(text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+            .foregroundStyle(currentTheme.accentColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(currentTheme.accentColor.opacity(0.14))
+            )
+            .lineLimit(1)
+            .truncationMode(.tail)
     }
 }
 
@@ -3058,28 +3219,78 @@ public struct MainPanelView: View {
     @State private var copiedItemToastId: String?
     @State private var copiedOCRToastId: String?
     @State private var pastedItemToastId: String? = nil
+    @State private var pasteFailedItemId: String? = nil
     @State private var lastPastedItemId: String? = nil
     @State private var isShowingQRPopover: Bool = false
     @State private var copiedColorChip: String? = nil
-    @AppStorage("tapticAudioFeedbackEnabled") private var tapticAudioFeedbackEnabled: Bool = true
-    @AppStorage("autoCheckUpdates") private var autoCheckUpdates: Bool = false
+    @AppStorage("tapticAudioFeedbackEnabled", store: AppDefaults.shared) private var tapticAudioFeedbackEnabled: Bool = true
+    @AppStorage("autoCheckUpdates", store: AppDefaults.shared) private var autoCheckUpdates: Bool = false
     @FocusState private var isSearchFocused: Bool
+    @FocusState private var isSnippetsSearchFocused: Bool
+    @State private var isSearchInputLocked: Bool = false
+    @State private var lockedSearchQuerySnapshot: String = ""
+    @State private var lockedSnippetsSearchSnapshot: String = ""
     @State private var isFilterDropdownPresented: Bool = false
     @State private var isSortDropdownPresented: Bool = false
 
     // Snippets State
     @State private var snippetsSearch: String = ""
-    @State private var snippetSearchScope: SnippetSearchScope = .all
     @State private var selectedSnippetCategory: String = "Все"
     @State private var snippetsList: [QuickSnippetItem] = []
+    @State private var snippetCategories: [SnippetCategoryRecord] = []
+    @State private var selectedSnippetId: String? = nil
+    @State private var isSnippetCategoryFilterPopoverPresented: Bool = false
+    @State private var isSnippetCategoryModalPickerPopoverPresented: Bool = false
+    @AppStorage("pasteVaultSnippetSortOrder", store: AppDefaults.shared) private var snippetSortOrder: String = "pinned"
+    @State private var isSnippetSortPopoverPresented: Bool = false
+    @State private var categoryPendingDelete: SnippetCategoryRecord? = nil
     @State private var isAddingSnippet: Bool = false
     @State private var editingSnippet: QuickSnippetItem? = nil
     @State private var newSnippetTitle: String = ""
     @State private var newSnippetContent: String = ""
     @State private var newSnippetCategory: String = "Разработка"
-    @State private var showClearSnippetsConfirmation: Bool = false
     @State private var pastedSnippetToastId: String? = nil
+    @State private var pasteFailedSnippetId: String? = nil
     @State private var copiedSnippetToastId: String? = nil
+    @State private var snippetCreatedToastItemId: String? = nil
+    @State private var pendingSnippetSourceItemId: String? = nil
+    @State private var isModalCategoryPickerHovered: Bool = false
+    @State private var isModalCategoryPickerPressed: Bool = false
+    @State private var currentSelectedMacroToken: String? = nil
+    @State private var showEmptyTitleWarning: Bool = false
+    @State private var showEmptySnippetContentError: Bool = false
+    @State private var showMissingCategoryWarning: Bool = false
+    @State private var inlineNewCategoryName: String = ""
+    @State private var inlineNewCategoryIcon: String = "folder.fill"
+    @State private var isInlineCategoryIconPickerOpen: Bool = false
+    @State private var isInlineIconBtnHovered: Bool = false
+    @State private var isInlineIconBtnPressed: Bool = false
+    @State private var isInlinePlusBtnHovered: Bool = false
+    @State private var isInlinePlusBtnPressed: Bool = false
+    @State private var categoryShakeOffset: CGFloat = 0
+    @FocusState private var isInlineNewCategoryFocused: Bool
+    @State private var snippetDraftImage: NSImage? = nil
+    @State private var snippetDraftImagePath: String? = nil
+    @State private var snippetSessionCreatedImagePaths: [String] = []
+    @State private var isMacroDropdownOpen: Bool = false
+    @State private var snippetEditorController = SnippetInlineEditorController()
+    @State private var isMacroPickerHovered: Bool = false
+    @State private var isMacroPickerPressed: Bool = false
+
+    // 3D Deck Animation States (п. 2.1)
+    @State private var activeSnippetIndex: Int = 0
+    @State private var pinnedSortSnapshotIds: [String] = []
+    @State private var shuffleCardId: String? = nil
+    @State private var shuffleDirection: DeckScrollDirection = .up
+    @State private var shufflePhase: DeckAnimPhase = .idle
+    @State private var isDeckAnimating: Bool = false
+    @State private var lastDeckScrollTime: Date = .distantPast
+    @State private var isContinuousScrolling: Bool = false
+    @State private var continuousScrollTask: Task<Void, Never>? = nil
+    @State private var continuousScrollStepCount: Int = 0
+    @State private var lastContinuousSoundTime: CFAbsoluteTime = 0
+    @State private var deckShuffleGeneration: Int = 0
+    @FocusState private var isSnippetTitleFocused: Bool
 
     // Lightbox, Screenshot Editor & Quick Text Editing State
     @State private var isImageLightboxPresented: Bool = false
@@ -3113,6 +3324,11 @@ public struct MainPanelView: View {
     @State private var exportIncludeShortcuts: Bool = true
     @State private var exportIncludeAppearance: Bool = true
 
+    private enum ImportPasswordFocusField: Hashable {
+        case secure
+        case plain
+    }
+
     @State private var showImportConfirmationModal: Bool = false
     @State private var importArchive: PasteVaultBackupArchive? = nil
     @State private var importFileName: String = ""
@@ -3120,6 +3336,13 @@ public struct MainPanelView: View {
     @State private var importRestoreSnippets: Bool = true
     @State private var importRestoreSettings: Bool = true
     @State private var importMergeMode: Bool = true
+    @State private var showImportPasswordModal: Bool = false
+    @State private var pendingImportFileURL: URL? = nil
+    @State private var pendingImportFileName: String = ""
+    @State private var importPasswordInput: String = ""
+    @State private var importPasswordError: String? = nil
+    @State private var isImportPasswordVisible: Bool = false
+    @FocusState private var focusedImportPasswordField: ImportPasswordFocusField?
 
     // Settings, Theme, Font, Shortcuts & Language State
     @ObservedObject private var shortcutManager = ShortcutManager.shared
@@ -3130,27 +3353,14 @@ public struct MainPanelView: View {
     @State private var isInspectorTimerPopoverPresented: Bool = false
     @State private var isExportFormatPopoverPresented: Bool = false
     @State private var isShortcutsExpanded: Bool = true
-    @State private var hoveredFont: AppFont? = nil
-    @State private var isRunningAppsMenuHovered: Bool = false
     @State private var isRunningAppsDropdownPresented: Bool = false
-    @AppStorage("selectedThemeId") private var selectedThemeId: String = AppTheme.obsidian.rawValue
-    @AppStorage("userGlassLevel") private var userGlassLevel: Double = 0.70
-    @AppStorage("selectedFontId") private var selectedFontId: String = AppFont.inter.rawValue
-    @AppStorage("appLanguage") private var appLanguageRaw: String = AppLanguage.ru.rawValue
+    @AppStorage("selectedThemeId", store: AppDefaults.shared) private var selectedThemeId: String = AppTheme.obsidian.rawValue
+    @AppStorage("userGlassLevel", store: AppDefaults.shared) private var userGlassLevel: Double = 0.70
+    @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.inter.rawValue
+    @AppStorage("appLanguage", store: AppDefaults.shared) private var appLanguageRaw: String = AppLanguage.ru.rawValue
     @State private var fontRefreshTick: Int = 0
 
-    // Hover States for Visual Feedback & Pointer Hand
-    @State private var hoveredTab: AppTab? = nil
-    @State private var hoveredSidebarSection: SettingsSidebarSection? = nil
     @State private var hoveredThemeId: String? = nil
-    @State private var hoveredOpacityPreset: Double? = nil
-    @State private var hoveredLanguage: AppLanguage? = nil
-    @State private var hoveredHistoryLimit: Int? = nil
-    @State private var hoveredShortcutRecordCommand: ShortcutCommand? = nil
-    @State private var isZoomHovered: Bool = false
-    @State private var isSaveHovered: Bool = false
-    @State private var isLightboxSaveHovered: Bool = false
-    @State private var isLightboxCloseHovered: Bool = false
 
     public static func isPasswordCandidate(_ item: ClipboardItemRow) -> Bool {
         ClipboardRowCardView.isPasswordCandidate(item)
@@ -3214,6 +3424,7 @@ public struct MainPanelView: View {
     @State private var passGeneratedSecret: String = ""
     @State private var passEntropyBits: Int = 92
     @State private var passCopiedNotification: Bool = false
+    @AppStorage("passGenAutoPurgeEnabled", store: AppDefaults.shared) private var passAutoPurgeEnabled: Bool = false
 
     public init(monitor: ClipboardMonitor) {
         self.monitor = monitor
@@ -3225,6 +3436,7 @@ public struct MainPanelView: View {
         return monitor.items.filter { item in
             item.textPreview.localizedCaseInsensitiveContains(trimmed) ||
             (item.sourceAppName?.localizedCaseInsensitiveContains(trimmed) == true) ||
+            (item.ocrText?.localizedCaseInsensitiveContains(trimmed) == true) ||
             item.tags.contains(where: { $0.localizedCaseInsensitiveContains(trimmed) })
         }
     }
@@ -3255,9 +3467,22 @@ public struct MainPanelView: View {
                     return kind == .color
                 }
             case .tag(let tagName):
-                return item.tags.contains(tagName)
+                return item.tags.contains { Self.tagsMatch($0, tagName) }
             }
         }
+    }
+
+    private static func canonicalTagKey(_ tag: String) -> String {
+        switch tag {
+        case "#UTM-трекер", "#UTM-tracker", "#UTM-Tracker": return "#UTM-трекер"
+        case "Цвет", "Color": return "Цвет"
+        case "#Файл", "#File": return "#Файл"
+        default: return tag
+        }
+    }
+
+    private static func tagsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        canonicalTagKey(lhs) == canonicalTagKey(rhs)
     }
 
     private var dynamicTagCounts: [(tag: String, count: Int)] {
@@ -3265,14 +3490,15 @@ public struct MainPanelView: View {
         var counts: [String: Int] = [:]
         for item in activeItemsList {
             for tag in item.tags {
-                counts[tag, default: 0] += 1
+                let key = Self.canonicalTagKey(tag)
+                counts[key, default: 0] += 1
             }
         }
         var result: [(String, Int)] = []
         for tag in canonicalOrder {
             if let c = counts[tag], c > 0 {
                 result.append((tag, c))
-            } else if case .tag(let selectedTag) = selectedFilter, selectedTag == tag {
+            } else if case .tag(let selectedTag) = selectedFilter, Self.tagsMatch(selectedTag, tag) {
                 result.append((tag, 0))
             }
         }
@@ -3282,23 +3508,16 @@ public struct MainPanelView: View {
     private var isAccessibilityGranted: Bool {
         monitor.isAccessibilityGranted
     }
-    @AppStorage("isAccessibilityBannerDismissed") private var isAccessibilityBannerDismissed: Bool = false
+    @AppStorage("isAccessibilityBannerDismissed", store: AppDefaults.shared) private var isAccessibilityBannerDismissed: Bool = false
     @State private var accessibilityToastMessage: String? = nil
     @State private var accessibilityToastIsSuccess: Bool = false
     @State private var syntheticTestToastMessage: String? = nil
-    @State private var isPasteBlockedToastVisible: Bool = false
-    @State private var pasteBlockedToastTask: Task<Void, Never>? = nil
 
     public var body: some View {
         VStack(spacing: 0) {
             topHeaderWithTabs
 
-            if isPasteBlockedToastVisible {
-                pasteBlockedToastBanner
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
-            if !isAccessibilityGranted && !isAccessibilityBannerDismissed && !isPasteBlockedToastVisible {
+            if !isAccessibilityGranted && !isAccessibilityBannerDismissed {
                 accessibilityNoticeBanner
             }
 
@@ -3378,15 +3597,21 @@ public struct MainPanelView: View {
 
             bottomStatusBar
         }
-        .allowsHitTesting(!isImageLightboxPresented && !updateService.isUpdateModalPresented && !updateService.isUpToDateModalPresented && !showClearHistoryConfirmation && !showClearSnippetsConfirmation && !showExportModal && !showImportConfirmationModal)
+        .allowsHitTesting(!isImageLightboxPresented && !updateService.isUpdateModalPresented && !updateService.isUpToDateModalPresented && !showClearHistoryConfirmation && !showExportModal && !showImportPasswordModal && !showImportConfirmationModal && categoryPendingDelete == nil && !isAddingSnippet && editingSnippet == nil)
         .overlay {
             clearHistoryModalOverlay
         }
         .overlay {
-            clearSnippetsModalOverlay
+            deleteCategoryConfirmationModalOverlay
+        }
+        .overlay {
+            snippetEditorModalOverlay
         }
         .overlay {
             exportModalOverlay
+        }
+        .overlay {
+            importPasswordModalOverlay
         }
         .overlay {
             importConfirmationModalOverlay
@@ -3418,13 +3643,18 @@ public struct MainPanelView: View {
             monitor.refreshAccessibilityStatus()
             isSearchFocused = true
             loadDefaultSnippetsIfNeeded()
+            loadSnippetCategories()
             if selectedItemId == nil {
                 selectedItemId = filteredItems.first?.id
             }
             generatePass()
         }
+        .onChange(of: monitor.accessibilityAlertPulseTrigger) { _, _ in
+            isAccessibilityBannerDismissed = false
+        }
         .onChange(of: selectedTab) { _, newTab in
             revealedSecretItemId = nil
+            stopContinuousDeckScroll()
             if newTab == .settings {
                 updateService.onSettingsTabOpened()
             }
@@ -3447,11 +3677,14 @@ public struct MainPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pasteVaultDidCaptureItem)) { _ in
             revealedSecretItemId = nil
         }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            refreshAccessibilityStatus()
-        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             refreshAccessibilityStatus()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            stopContinuousDeckScroll()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultDismissPanel"))) { _ in
+            stopContinuousDeckScroll()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshAccessibilityStatus()
@@ -3461,17 +3694,7 @@ public struct MainPanelView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: ClipboardMonitor.pasteBlockedNotification)) { _ in
             refreshAccessibilityStatus()
-            withAnimation(.easeOut(duration: 0.2)) {
-                isPasteBlockedToastVisible = true
-            }
-            pasteBlockedToastTask?.cancel()
-            pasteBlockedToastTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 9_000_000_000)
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeIn(duration: 0.2)) {
-                    isPasteBlockedToastVisible = false
-                }
-            }
+            isAccessibilityBannerDismissed = false
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultDidCaptureItem"))) { note in
             if let newId = note.object as? String {
@@ -3480,11 +3703,54 @@ public struct MainPanelView: View {
                 selectedItemId = filteredItems.first?.id
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultMoveSelectionDown"))) { _ in
-            moveSelection(delta: 1)
+        .onChange(of: isImageLightboxPresented) { _, presented in
+            if presented {
+                lockedSearchQuerySnapshot = searchQuery
+                lockedSnippetsSearchSnapshot = snippetsSearch
+                isSearchFocused = false
+                isSnippetsSearchFocused = false
+                NSTextInputContext.current?.discardMarkedText()
+                DispatchQueue.main.async {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                }
+            }
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultMoveSelectionUp"))) { _ in
-            moveSelection(delta: -1)
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultMoveSelectionDown"))) { note in
+            if selectedTab == .snippets {
+                let isRepeat = (note.userInfo?["isRepeat"] as? Bool) ?? false
+                if isRepeat {
+                    if !isContinuousScrolling {
+                        guard !isAddingSnippet, editingSnippet == nil, categoryPendingDelete == nil, !isSnippetCategoryFilterPopoverPresented else { return }
+                        if NSApp.keyWindow?.firstResponder is NSText { return }
+                        startContinuousDeckScroll(.down)
+                    }
+                } else {
+                    deckKeyboardStep(.down)
+                }
+            } else {
+                moveSelection(delta: 1)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultMoveSelectionUp"))) { note in
+            if selectedTab == .snippets {
+                let isRepeat = (note.userInfo?["isRepeat"] as? Bool) ?? false
+                if isRepeat {
+                    if !isContinuousScrolling {
+                        guard !isAddingSnippet, editingSnippet == nil, categoryPendingDelete == nil, !isSnippetCategoryFilterPopoverPresented else { return }
+                        if NSApp.keyWindow?.firstResponder is NSText { return }
+                        startContinuousDeckScroll(.up)
+                    }
+                } else {
+                    deckKeyboardStep(.up)
+                }
+            } else {
+                moveSelection(delta: -1)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultMoveSelectionStop"))) { _ in
+            if selectedTab == .snippets {
+                stopContinuousDeckScroll()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultPasteSelected"))) { _ in
             if isImageLightboxPresented {
@@ -3499,25 +3765,26 @@ public struct MainPanelView: View {
                 }
                 return
             }
-            guard !isAddingSnippet else { return }
+            if showImportPasswordModal {
+                attemptDecryptPendingBackup()
+                return
+            }
+            guard !isAddingSnippet && editingSnippet == nil && !showExportModal && !showImportConfirmationModal && !showClearHistoryConfirmation else { return }
             switch selectedTab {
             case .clipboard:
                 if let current = selectedItem {
                     pasteItem(current)
                 }
             case .snippets:
-                let filteredSnippets = snippetsList.filter {
-                    snippetsSearch.isEmpty ||
-                    $0.title.localizedCaseInsensitiveContains(snippetsSearch) ||
-                    $0.content.localizedCaseInsensitiveContains(snippetsSearch)
-                }
-                if let firstSnippet = filteredSnippets.first {
-                    instantCopyAndPaste(text: prepareSnippetForAction(firstSnippet))
+                let deckList = snippetsFilteredList
+                if !deckList.isEmpty {
+                    pasteSnippetAction(deckList[deckActiveIndex(in: deckList)])
                 }
             case .passgen:
                 if !passGeneratedSecret.isEmpty {
-                    _ = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: nil)
-                    instantCopyAndPaste(text: passGeneratedSecret, ttl: nil)
+                    let ttl = effectivePassTTLSeconds
+                    let itemId = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: ttl)
+                    instantCopyAndPaste(text: passGeneratedSecret, ttl: ttl, destructKey: itemId.isEmpty ? nil : itemId)
                 }
             case .settings:
                 break
@@ -3530,25 +3797,22 @@ public struct MainPanelView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultPastePlainText"))) { _ in
-            guard !isAddingSnippet else { return }
+            guard !isAddingSnippet && editingSnippet == nil && !showExportModal && !showImportPasswordModal && !showImportConfirmationModal && !showClearHistoryConfirmation else { return }
             switch selectedTab {
             case .clipboard:
                 if let current = selectedItem {
                     monitor.pasteIntoTargetAppPlainText(current)
                 }
             case .snippets:
-                let filteredSnippets = snippetsList.filter {
-                    snippetsSearch.isEmpty ||
-                    $0.title.localizedCaseInsensitiveContains(snippetsSearch) ||
-                    $0.content.localizedCaseInsensitiveContains(snippetsSearch)
-                }
-                if let firstSnippet = filteredSnippets.first {
-                    instantCopyAndPaste(text: prepareSnippetForAction(firstSnippet))
+                let deckList = snippetsFilteredList
+                if !deckList.isEmpty {
+                    pasteSnippetAction(deckList[deckActiveIndex(in: deckList)])
                 }
             case .passgen:
                 if !passGeneratedSecret.isEmpty {
-                    _ = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: nil)
-                    instantCopyAndPaste(text: passGeneratedSecret, ttl: nil)
+                    let ttl = effectivePassTTLSeconds
+                    let itemId = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: ttl)
+                    instantCopyAndPaste(text: passGeneratedSecret, ttl: ttl, destructKey: itemId.isEmpty ? nil : itemId)
                 }
             case .settings:
                 break
@@ -3596,6 +3860,10 @@ public struct MainPanelView: View {
                 ClipboardMonitor.shared.isModalOverlayActive = false
                 return
             }
+            if showImportPasswordModal {
+                closeImportPasswordModal()
+                return
+            }
             if showImportConfirmationModal {
                 showImportConfirmationModal = false
                 ClipboardMonitor.shared.isModalOverlayActive = false
@@ -3609,6 +3877,11 @@ public struct MainPanelView: View {
                 screenshotEditorEngine.selectedAnnotationId = nil
                 screenshotEditorEngine.activeSubmenu = nil
             } else {
+                closeImageLightbox()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultForceCloseLightbox"))) { _ in
+            if isImageLightboxPresented {
                 closeImageLightbox()
             }
         }
@@ -3721,6 +3994,7 @@ public struct MainPanelView: View {
                         .frame(height: 28)
                     }
                     .buttonStyle(PVButtonStyle(variant: .toggle(isActive: isSelected), size: .small, theme: currentTheme, fixedHeight: 28))
+                    .pointingHandCursor()
                 }
             }
             .padding(3)
@@ -3800,19 +4074,46 @@ public struct MainPanelView: View {
         )
     }
 
-    // MARK: - Accessibility Notice Banner
-    private var accessibilityNoticeBanner: some View {
-        HStack(spacing: 10) {
+    private struct AccessibilityAlertTriangleIcon: View {
+        let pulseTrigger: Int
+        @State private var isPulsing: Bool = false
+
+        var body: some View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(.red)
                 .font(.system(size: 13, weight: .medium))
+                .scaleEffect(isPulsing ? 1.25 : 1.0)
+                .shadow(color: Color.red.opacity(isPulsing ? 0.9 : 0.0), radius: isPulsing ? 8 : 0)
+                .onChange(of: pulseTrigger) { _, _ in
+                    let steps: [(delay: Double, active: Bool)] = [
+                        (0.00, true),
+                        (0.18, false),
+                        (0.36, true),
+                        (0.54, false)
+                    ]
+                    for step in steps {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + step.delay) {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                isPulsing = step.active
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
+    // MARK: - Accessibility Notice Banner
+    private var accessibilityNoticeBanner: some View {
+        HStack(spacing: 10) {
+            AccessibilityAlertTriangleIcon(pulseTrigger: monitor.accessibilityAlertPulseTrigger)
 
             Text(tr(
-                "Для прямой автовставки в \(monitor.targetAppName) по клику/Enter включите Универсальный доступ:",
-                "Enable Accessibility in macOS Settings for direct auto-paste into \(monitor.targetAppName):"
+                "Для вставки перейдите в Настройки → Универсальный доступ и включите тумблер:",
+                "To paste, open System Settings → Accessibility and enable the toggle:"
             ))
                 .font(currentFont.font(size: 11, weight: .regular))
                 .foregroundStyle(currentTheme.primaryText.opacity(0.92))
+                .lineLimit(1)
 
             Spacer()
 
@@ -3885,33 +4186,39 @@ public struct MainPanelView: View {
     /// Обновляет живой статус Универсального доступа
     private func refreshAccessibilityStatus() {
         monitor.refreshAccessibilityStatus()
-        if monitor.isAccessibilityGranted && isPasteBlockedToastVisible {
-            isPasteBlockedToastVisible = false
-        }
     }
 
-    /// Вызывает системный запрос Apple на предоставление Универсального доступа со сбросом старой записи TCC
+    /// Асинхронно сбрасывает старую запись TCC при отсутствии прав и вызывает системный запрос Apple на предоставление Универсального доступа
     private func requestAccessibilityAccess() {
         // 1) Сначала сними окна Paste Vault с экрана
         NSApp.windows.forEach { $0.orderOut(nil) }
         NSApp.deactivate()
 
-        // 2) Запусти синхронно процесс очистки старой записи TCC
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        task.arguments = ["reset", "Accessibility", "com.pastevault.app"]
-        try? task.run()
-        task.waitUntilExit()
+        let showSystemPrompt: @Sendable () -> Void = {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(options)
 
-        // 3) Через 0.15 секунды вызови системное окно запроса Apple
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-
-            // 4) Ещё через 0.2 секунды подними системное окно Apple на передний план
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.UniversalAccessAuthWarn").first?.activate(options: [.activateAllWindows])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.UniversalAccessAuthWarn").first?.activate(options: [.activateAllWindows])
+                }
             }
+        }
+
+        // 2) Асинхронно сбрасываем старую запись TCC на фоновой очереди (без блокировки @MainActor) только если прав ещё нет
+        guard !AXIsProcessTrusted() else {
+            showSystemPrompt()
+            return
+        }
+
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.pastevault.app"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", "Accessibility", bundleId]
+            try? task.run()
+            task.waitUntilExit()
+            showSystemPrompt()
         }
     }
 
@@ -4013,53 +4320,6 @@ public struct MainPanelView: View {
         .animation(.easeInOut(duration: 0.25), value: granted)
     }
 
-    // MARK: - Paste Blocked Toast (no Accessibility)
-    private var pasteBlockedToastBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .symbolRenderingMode(.monochrome)
-                .font(.system(size: 14))
-                .foregroundStyle(currentTheme.primaryText)
-
-            Text(tr(
-                "Для прямой вставки требуется доступ в Настройках macOS. Текст скопирован в буфер — вставьте его вручную (⌘V) или откройте Настройки.",
-                "Direct paste requires Accessibility access in macOS Settings. Text was copied to the clipboard — paste it manually (⌘V) or open Settings."
-            ))
-                .font(currentFont.font(size: 11, weight: .semibold))
-                .foregroundStyle(currentTheme.primaryText)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 6)
-
-            Button {
-                isPasteBlockedToastVisible = false
-                requestAccessibilityAccess()
-            } label: {
-                Text(tr("Разрешить доступ", "Grant Access"))
-            }
-            .buttonStyle(PVButtonStyle(variant: .primary, size: .small, theme: currentTheme))
-
-            Button {
-                pasteBlockedToastTask?.cancel()
-                isPasteBlockedToastVisible = false
-            } label: {
-                Image(systemName: "xmark")
-                    .symbolRenderingMode(.monochrome)
-            }
-            .buttonStyle(PVButtonStyle(variant: .secondary, size: .small, theme: currentTheme))
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(currentTheme.panelFill(opacity: 0.95))
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundStyle(currentTheme.borderColor),
-            alignment: .bottom
-        )
-    }
-
     // MARK: - Tab 1: Clipboard Tab View
     private var clipboardTabView: some View {
         VStack(spacing: 0) {
@@ -4071,27 +4331,25 @@ public struct MainPanelView: View {
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(currentTheme.secondaryText)
 
-                    ZStack(alignment: .leading) {
-                        if searchQuery.isEmpty {
-                            Text(tr("Поиск в истории буфера...", "Search clipboard history..."))
-                                .font(currentFont.font(size: 13, weight: .medium))
-                                .foregroundStyle(currentTheme.secondaryText)
-                                .allowsHitTesting(false)
-                        }
-                        TextField("", text: $searchQuery)
-                            .textFieldStyle(.plain)
-                            .font(currentFont.font(size: 13, weight: .medium))
-                            .foregroundStyle(currentTheme.primaryText)
-                            .focused($isSearchFocused)
-                            .onChange(of: searchQuery) { oldValue, newValue in
-                                if monitor.isPerformingAutoPaste {
-                                    searchQuery = oldValue
-                                    return
-                                }
-                                lastSafeSearchQuery = newValue
-                                monitor.searchQuery = newValue
-                                selectedItemId = filteredItems.first?.id
+                    FocusAwareTextField(
+                        placeholder: tr("Поиск в истории буфера...", "Search clipboard history..."),
+                        text: $searchQuery,
+                        font: currentFont.font(size: 13, weight: .medium),
+                        textColor: currentTheme.primaryText,
+                        placeholderColor: currentTheme.secondaryText.opacity(0.78),
+                        externalFocus: $isSearchFocused
+                    )
+                    .onChange(of: searchQuery) { oldValue, newValue in
+                        if monitor.isPerformingAutoPaste || isImageLightboxPresented || isSearchInputLocked {
+                            let target = isImageLightboxPresented || isSearchInputLocked ? lockedSearchQuerySnapshot : oldValue
+                            if searchQuery != target {
+                                searchQuery = target
                             }
+                            return
+                        }
+                        lastSafeSearchQuery = newValue
+                        monitor.searchQuery = newValue
+                        selectedItemId = filteredItems.first?.id
                     }
 
                     if !searchQuery.isEmpty {
@@ -4139,6 +4397,7 @@ public struct MainPanelView: View {
                         }
                     }
                     .buttonStyle(PVButtonStyle(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 30))
+                    .pointingHandCursor()
                     .help(tr("Удалить незакреплённые записи из истории (закреплённые сохраняются)", "Delete unpinned items from clipboard history (pinned are preserved)"))
                 }
             }
@@ -4216,6 +4475,7 @@ public struct MainPanelView: View {
                 isHovered = hovering
                 if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
             }
+            .pointingHandCursor()
         }
     }
 
@@ -4260,6 +4520,7 @@ public struct MainPanelView: View {
                 isHovered = hovering
                 if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
             }
+            .pointingHandCursor()
         }
     }
 
@@ -4320,12 +4581,6 @@ public struct MainPanelView: View {
             .padding(6)
             .frame(minWidth: 230)
             .background(currentTheme.cardColor)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 3)
             .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
         }
     }
@@ -4385,12 +4640,6 @@ public struct MainPanelView: View {
             .padding(6)
             .frame(minWidth: 175)
             .background(currentTheme.cardColor)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 3)
             .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
         }
     }
@@ -4503,6 +4752,7 @@ public struct MainPanelView: View {
                                     windowOpacity: windowOpacity,
                                     monitor: monitor,
                                     isPastedToast: (pastedItemToastId == item.id),
+                                    isPasteFailedToast: (pasteFailedItemId == item.id),
                                     searchQuery: searchQuery,
                                     onSelect: {
                                         selectCardImmediately(item.id)
@@ -4522,12 +4772,9 @@ public struct MainPanelView: View {
                                             revealedSecretItemId = nil
                                         }
                                     },
-                                    onStartTimer: {
-                                        let ttl = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
-                                        monitor.startTimerForItem(id: item.id, seconds: ttl)
-                                    },
-                                    onCancelTimer: {
-                                        monitor.cancelTimerForItem(id: item.id)
+                                    onCreateSnippet: {
+                                        pendingSnippetSourceItemId = item.id
+                                        createSnippetFromClipboardItem(item)
                                     }
                                 )
                                 .id(item.id)
@@ -4564,6 +4811,8 @@ public struct MainPanelView: View {
                                         windowOpacity: windowOpacity,
                                         monitor: monitor,
                                         isPastedToast: (pastedItemToastId == item.id),
+                                        isPasteFailedToast: (pasteFailedItemId == item.id),
+                                        searchQuery: searchQuery,
                                         onSelect: {
                                             selectCardImmediately(item.id)
                                         },
@@ -4582,12 +4831,9 @@ public struct MainPanelView: View {
                                                 revealedSecretItemId = nil
                                             }
                                         },
-                                        onStartTimer: {
-                                            let ttl = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
-                                            monitor.startTimerForItem(id: item.id, seconds: ttl)
-                                        },
-                                        onCancelTimer: {
-                                            monitor.cancelTimerForItem(id: item.id)
+                                        onCreateSnippet: {
+                                            pendingSnippetSourceItemId = item.id
+                                            createSnippetFromClipboardItem(item)
                                         }
                                     )
                                     .id(item.id)
@@ -4607,6 +4853,7 @@ public struct MainPanelView: View {
                                     windowOpacity: windowOpacity,
                                     monitor: monitor,
                                     isPastedToast: (pastedItemToastId == item.id),
+                                    isPasteFailedToast: (pasteFailedItemId == item.id),
                                     searchQuery: searchQuery,
                                     onSelect: {
                                         selectCardImmediately(item.id)
@@ -4626,12 +4873,9 @@ public struct MainPanelView: View {
                                             revealedSecretItemId = nil
                                         }
                                     },
-                                    onStartTimer: {
-                                        let ttl = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
-                                        monitor.startTimerForItem(id: item.id, seconds: ttl)
-                                    },
-                                    onCancelTimer: {
-                                        monitor.cancelTimerForItem(id: item.id)
+                                    onCreateSnippet: {
+                                        pendingSnippetSourceItemId = item.id
+                                        createSnippetFromClipboardItem(item)
                                     }
                                 )
                                 .id(item.id)
@@ -4660,10 +4904,22 @@ public struct MainPanelView: View {
     }
 
     // MARK: - Macro Live Preview Helper
+    private static let macroLiveRuDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ru_RU")
+        f.dateFormat = "dd.MM.yyyy • HH:mm"
+        return f
+    }()
+
+    private static let macroLiveEnDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US")
+        f.dateFormat = "dd.MM.yyyy • HH:mm"
+        return f
+    }()
+
     private var macroLiveSampleText: String {
-        let formatter = DateFormatter()
-        formatter.locale = (currentLanguage == .ru) ? Locale(identifier: "ru_RU") : Locale(identifier: "en_US")
-        formatter.dateFormat = "dd.MM.yyyy • HH:mm"
+        let formatter = (currentLanguage == .ru) ? Self.macroLiveRuDateFormatter : Self.macroLiveEnDateFormatter
         return formatter.string(from: Date())
     }
 
@@ -4702,6 +4958,153 @@ public struct MainPanelView: View {
         )
     }
 
+    @ViewBuilder
+    private func inspectorTimerAnchorView(for currentItem: ClipboardItemRow, now: Date) -> some View {
+        let paused = monitor.pausedTimerSeconds[currentItem.id]
+        let isPaused = (paused != nil && paused! > 0)
+        let remaining = isPaused ? (paused ?? 0) : (currentItem.expiresAt.map { max(0, Int(ceil($0.timeIntervalSince(now)))) } ?? 0)
+        let isRunning = !isPaused && currentItem.expiresAt != nil && remaining > 0
+        let isExpanded = isRunning || isPaused || isInspectorTimerPopoverPresented
+
+        ZStack(alignment: .trailing) {
+            Color.clear
+                .frame(width: 24, height: 24)
+                .padding(.trailing, isExpanded ? 6 : 8)
+                .popover(isPresented: $isInspectorTimerPopoverPresented, arrowEdge: .bottom) {
+                    TapticCircularTimerPopover(
+                        item: currentItem,
+                        monitor: monitor,
+                        currentTheme: currentTheme,
+                        currentFont: currentFont,
+                        language: currentLanguage,
+                        onClose: {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                                isInspectorTimerPopoverPresented = false
+                            }
+                        }
+                    )
+                }
+
+            if isExpanded {
+                HStack(spacing: 5) {
+                    TimerCapsuleIconButton(
+                        icon: "play.fill",
+                        iconSize: 10,
+                        isEnabled: !isRunning,
+                        isActiveState: false,
+                        theme: currentTheme,
+                        tooltip: isPaused
+                            ? tr("Возобновить отсчёт таймера", "Resume timer countdown")
+                            : tr("Запустить таймер", "Start timer")
+                    ) {
+                        TapticSoundAndHaptics.shared.playClick()
+                        if isPaused {
+                            monitor.resumeTimerForItem(id: currentItem.id)
+                        } else {
+                            let defaultSec = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
+                            monitor.startTimerForItem(id: currentItem.id, seconds: defaultSec)
+                        }
+                    }
+
+                    TimerCapsuleIconButton(
+                        icon: "pause.fill",
+                        iconSize: 10,
+                        isEnabled: isRunning,
+                        isActiveState: isPaused,
+                        theme: currentTheme,
+                        tooltip: tr("Приостановить таймер", "Pause timer")
+                    ) {
+                        TapticSoundAndHaptics.shared.playClick()
+                        monitor.pauseTimerForItem(id: currentItem.id, remainingSeconds: remaining)
+                    }
+
+                    TimerCapsuleIconButton(
+                        icon: "stop.fill",
+                        iconSize: 9,
+                        isEnabled: true,
+                        isActiveState: false,
+                        theme: currentTheme,
+                        tooltip: tr("Сбросить и выключить таймер", "Reset and stop timer")
+                    ) {
+                        TapticSoundAndHaptics.shared.playClick()
+                        monitor.cancelTimerForItem(id: currentItem.id)
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                            isInspectorTimerPopoverPresented = false
+                        }
+                    }
+
+                    Rectangle()
+                        .fill(currentTheme.borderColor.opacity(0.5))
+                        .frame(width: 1, height: 16)
+                        .padding(.horizontal, 1)
+
+                    let statusText: String = {
+                        if isPaused {
+                            return tr("Пауза · \(formatTimerMMSS(seconds: remaining))", "Paused · \(formatTimerMMSS(seconds: remaining))")
+                        } else if isRunning {
+                            return formatTimerMMSS(seconds: remaining)
+                        } else {
+                            return tr("Выбор", "Select")
+                        }
+                    }()
+
+                    Text(statusText)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(isPaused ? currentTheme.accentColor : (isRunning ? currentTheme.accentColor : currentTheme.primaryText))
+                        .lineLimit(1)
+                        .frame(minWidth: isPaused ? 92 : 46, alignment: .center)
+
+                    TimerCapsuleIconButton(
+                        icon: "timer",
+                        iconSize: 12,
+                        isEnabled: true,
+                        isActiveState: isInspectorTimerPopoverPresented,
+                        theme: currentTheme,
+                        tooltip: tr("Открыть / закрыть круговой таймер", "Toggle circular timer dial")
+                    ) {
+                        TapticSoundAndHaptics.shared.playClick()
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                            isInspectorTimerPopoverPresented.toggle()
+                        }
+                    }
+                }
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(currentTheme.cardBackground.opacity(0.92))
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(isPaused ? currentTheme.accentColor.opacity(0.35) : currentTheme.borderColor.opacity(0.7), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.95).combined(with: .opacity),
+                    removal: .scale(scale: 0.95).combined(with: .opacity)
+                ))
+            } else {
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                        isInspectorTimerPopoverPresented = true
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "timer")
+                            .symbolRenderingMode(.monochrome)
+                        Text(tr("Таймер", "Timer"))
+                    }
+                    .frame(height: 28)
+                }
+                .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
+                .help(tr("Настроить таймер автоудаления", "Configure auto-purge timer"))
+                .transition(.opacity)
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isExpanded)
+    }
+
     // MARK: - Right Inspector Column
     private var rightInspectorColumn: some View {
         VStack(spacing: 0) {
@@ -4723,167 +5126,43 @@ public struct MainPanelView: View {
 
                         Spacer()
 
+                        // Счётчик знаков, слов и строк (строго для .text и .code)
+                        let itemKind = currentItem.effectiveContentType
+                        if !isSecret && (itemKind == .text || itemKind == .code) {
+                            let metrics = ClipboardTextMetricsFormatter.compute(for: currentItem.content)
+                            Text(ClipboardTextMetricsFormatter.badgeText(for: itemKind, metrics: metrics, isEnglish: currentLanguage == .en))
+                                .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(currentTheme.secondaryText)
+                                .lineLimit(1)
+                                .padding(.horizontal, 9)
+                                .frame(height: 26)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(currentTheme.cardColor.opacity(0.65))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                                )
+                                .help(ClipboardTextMetricsFormatter.exactTooltip(for: metrics, isEnglish: currentLanguage == .en))
+                        }
+
                         // Кнопка «⏱ Таймер» / Капсула управления (ТОЛЬКО для паролей/секретов)
                         if isSecret {
-                            TimelineView(.periodic(from: .now, by: 1.0)) { _ in
-                                let paused = monitor.pausedTimerSeconds[currentItem.id]
-                                let isPaused = (paused != nil && paused! > 0)
-                                let remaining = isPaused ? (paused ?? 0) : (currentItem.expiresAt.map { max(0, Int(ceil($0.timeIntervalSinceNow))) } ?? 0)
-                                let isRunning = !isPaused && currentItem.expiresAt != nil && remaining > 0
-                                let isExpanded = isRunning || isPaused || isInspectorTimerPopoverPresented
-
-                                ZStack(alignment: .trailing) {
-                                    // Фиксированный невидимый якорь для привязки поповера на правом краю (24x24 pt)
-                                    Color.clear
-                                        .frame(width: 24, height: 24)
-                                        .padding(.trailing, isExpanded ? 6 : 8)
-                                        .popover(isPresented: $isInspectorTimerPopoverPresented, arrowEdge: .bottom) {
-                                            TapticCircularTimerPopover(
-                                                item: currentItem,
-                                                monitor: monitor,
-                                                currentTheme: currentTheme,
-                                                currentFont: currentFont,
-                                                language: currentLanguage,
-                                                onClose: {
-                                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                                                        isInspectorTimerPopoverPresented = false
-                                                    }
-                                                }
-                                            )
-                                        }
-
-                                    if isExpanded {
-                                        // Развёрнутая капсула с 4 кнопками-иконками + моноширинным статусом/временем
-                                        HStack(spacing: 5) {
-                                            // Кнопка 1: «Пуск» ▶
-                                            TimerCapsuleIconButton(
-                                                icon: "play.fill",
-                                                iconSize: 10,
-                                                isEnabled: !isRunning,
-                                                isActiveState: false,
-                                                theme: currentTheme,
-                                                tooltip: isPaused
-                                                    ? tr("Возобновить отсчёт таймера", "Resume timer countdown")
-                                                    : tr("Запустить таймер", "Start timer")
-                                            ) {
-                                                TapticSoundAndHaptics.shared.playClick()
-                                                if isPaused {
-                                                    monitor.resumeTimerForItem(id: currentItem.id)
-                                                } else {
-                                                    let defaultSec = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
-                                                    monitor.startTimerForItem(id: currentItem.id, seconds: defaultSec)
-                                                }
-                                            }
-
-                                            // Кнопка 2: «Пауза» ⏸
-                                            TimerCapsuleIconButton(
-                                                icon: "pause.fill",
-                                                iconSize: 10,
-                                                isEnabled: isRunning,
-                                                isActiveState: isPaused,
-                                                theme: currentTheme,
-                                                tooltip: tr("Приостановить таймер", "Pause timer")
-                                            ) {
-                                                TapticSoundAndHaptics.shared.playClick()
-                                                monitor.pauseTimerForItem(id: currentItem.id, remainingSeconds: remaining)
-                                            }
-
-                                            // Кнопка 3: «Стоп» ■
-                                            TimerCapsuleIconButton(
-                                                icon: "stop.fill",
-                                                iconSize: 9,
-                                                isEnabled: true,
-                                                isActiveState: false,
-                                                theme: currentTheme,
-                                                tooltip: tr("Сбросить и выключить таймер", "Reset and stop timer")
-                                            ) {
-                                                TapticSoundAndHaptics.shared.playClick()
-                                                monitor.cancelTimerForItem(id: currentItem.id)
-                                                withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                                                    isInspectorTimerPopoverPresented = false
-                                                }
-                                            }
-
-                                            // Тонкий вертикальный разделитель
-                                            Rectangle()
-                                                .fill(currentTheme.borderColor.opacity(0.5))
-                                                .frame(width: 1, height: 16)
-                                                .padding(.horizontal, 1)
-
-                                            // Текстовый индикатор состояния и времени
-                                            let statusText: String = {
-                                                if isPaused {
-                                                    return tr("Пауза · \(formatTimerMMSS(seconds: remaining))", "Paused · \(formatTimerMMSS(seconds: remaining))")
-                                                } else if isRunning {
-                                                    return formatTimerMMSS(seconds: remaining)
-                                                } else {
-                                                    return tr("Выбор", "Select")
-                                                }
-                                            }()
-
-                                            Text(statusText)
-                                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                                .monospacedDigit()
-                                                .foregroundStyle(isPaused ? currentTheme.accentColor : (isRunning ? currentTheme.accentColor : currentTheme.primaryText))
-                                                .lineLimit(1)
-                                                .frame(minWidth: isPaused ? 92 : 46, alignment: .center)
-
-                                            // Кнопка 4: «Таймер» ⏱ (переключение поповера с колесом)
-                                            TimerCapsuleIconButton(
-                                                icon: "timer",
-                                                iconSize: 12,
-                                                isEnabled: true,
-                                                isActiveState: isInspectorTimerPopoverPresented,
-                                                theme: currentTheme,
-                                                tooltip: tr("Открыть / закрыть круговой таймер", "Toggle circular timer dial")
-                                            ) {
-                                                TapticSoundAndHaptics.shared.playClick()
-                                                withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                                                    isInspectorTimerPopoverPresented.toggle()
-                                                }
-                                            }
-                                        }
-                                        .padding(3)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .fill(currentTheme.cardBackground.opacity(0.92))
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .strokeBorder(isPaused ? currentTheme.accentColor.opacity(0.35) : currentTheme.borderColor.opacity(0.7), lineWidth: 1)
-                                        )
-                                        .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
-                                        .transition(.asymmetric(
-                                            insertion: .scale(scale: 0.95).combined(with: .opacity),
-                                            removal: .scale(scale: 0.95).combined(with: .opacity)
-                                        ))
-                                    } else {
-                                        // Одиночная аккуратная кнопка «⏱ Таймер» в свёрнутом виде
-                                        Button {
-                                            withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                                                isInspectorTimerPopoverPresented = true
-                                            }
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "timer")
-                                                    .symbolRenderingMode(.monochrome)
-                                                Text(tr("Таймер", "Timer"))
-                                            }
-                                            .frame(height: 28)
-                                        }
-                                        .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
-                                        .help(tr("Настроить таймер автоудаления", "Configure auto-purge timer"))
-                                        .transition(.opacity)
-                                    }
+                            let pausedValue = monitor.pausedTimerSeconds[currentItem.id]
+                            let needsLiveTick = (pausedValue == nil || (pausedValue ?? 0) <= 0) && currentItem.expiresAt != nil
+                            if needsLiveTick {
+                                TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                                    inspectorTimerAnchorView(for: currentItem, now: context.date)
                                 }
-                                .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isExpanded)
+                            } else {
+                                inspectorTimerAnchorView(for: currentItem, now: Date())
                             }
                         }
                     }
 
                     // Быстрые трансформации для ссылок с UTM и JSON
-                    if currentItem.effectiveContentType == .url && currentItem.tags.contains("#UTM-трекер") {
+                    if currentItem.effectiveContentType == .url && (currentItem.tags.contains("#UTM-трекер") || currentItem.tags.contains("#UTM-tracker")) {
                         HStack(spacing: 8) {
                             Image(systemName: "wand.and.stars")
                                 .font(.system(size: 12, weight: .semibold))
@@ -4942,6 +5221,22 @@ public struct MainPanelView: View {
                                 let img = monitor.imageForItem(currentItem) ?? (currentItem.rawImageData.flatMap { NSImage(data: $0) }) ?? ClipboardMonitor.generateSyntheticScreenshotImage(label: currentItem.textPreview)
 
                                 HStack(spacing: 8) {
+                                    Spacer()
+
+                                    Button {
+                                        saveImageToDisk(img: img, defaultName: "Screenshot-\(currentItem.id.prefix(8)).png")
+                                    } label: {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: "square.and.arrow.down")
+                                                .symbolRenderingMode(.monochrome)
+                                            Text(tr("Сохранить PNG", "Save PNG"))
+                                        }
+                                        .frame(height: 28)
+                                    }
+                                    .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
+                                    .contentShape(Rectangle())
+                                    .pointingHandCursor()
+
                                     Button {
                                         zoomedImage = img
                                         zoomedItem = currentItem
@@ -4960,20 +5255,24 @@ public struct MainPanelView: View {
                                         .frame(height: 28)
                                     }
                                     .pvButton(variant: .primary, size: .small, theme: currentTheme, fixedHeight: 28)
+                                    .contentShape(Rectangle())
+                                    .pointingHandCursor()
 
                                     Button {
-                                        saveImageToDisk(img: img, defaultName: "Screenshot-\(currentItem.id.prefix(8)).png")
+                                        pendingSnippetSourceItemId = currentItem.id
+                                        createSnippetFromClipboardItem(currentItem)
                                     } label: {
-                                        HStack(spacing: 5) {
-                                            Image(systemName: "square.and.arrow.down")
-                                                .symbolRenderingMode(.monochrome)
-                                            Text(tr("Сохранить PNG", "Save PNG"))
-                                        }
-                                        .frame(height: 28)
+                                        Image(systemName: "bolt.fill")
+                                            .symbolRenderingMode(.monochrome)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(currentTheme.primaryText)
+                                            .frame(width: 28, height: 28)
                                     }
-                                    .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
-
-                                    Spacer()
+                                    .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedWidth: 28, fixedHeight: 28)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                                    .help(tr("Создать фрагмент", "Create snippet"))
+                                    .pointingHandCursor()
                                 }
 
                                 // Контейнер-холст предпросмотра скриншота с чёткой контрастной рамкой вокруг самой картинки
@@ -5060,9 +5359,7 @@ public struct MainPanelView: View {
                                                 .frame(width: 200, height: 30)
 
                                                 Button {
-                                                    if monitor.checkAccessibilityPermission() {
-                                                        isPasteBlockedToastVisible = false
-                                                    }
+                                                    _ = monitor.checkAccessibilityPermission()
                                                     monitor.pasteIntoTargetApp(text: ocr)
                                                 } label: {
                                                     HStack(spacing: 4) {
@@ -5079,13 +5376,21 @@ public struct MainPanelView: View {
                                                 .frame(width: 200, height: 30)
                                             }
                                         }
-                                        Text(ocr)
-                                            .font(currentFont.font(size: 11, weight: .regular))
-                                            .foregroundStyle(currentTheme.primaryText)
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 8)
+                                        Text(
+                                            SearchHighlightHelper.highlightedSnippetText(
+                                                ocr,
+                                                query: searchQuery,
+                                                accentColor: currentTheme.accentColor,
+                                                primaryColor: currentTheme.primaryText,
+                                                baseFontSize: 11,
+                                                baseFont: currentFont.font(size: 11, weight: .regular),
+                                                isLight: currentTheme.isLight
+                                            )
+                                        )
+                                        .textSelection(.enabled)
+                                        .padding(8)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 8)
                                     }
                                     .padding(9)
                                     .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 10)
@@ -5294,6 +5599,8 @@ public struct MainPanelView: View {
                                                     }
                                                     .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
                                                     .fixedSize(horizontal: true, vertical: false)
+                                                    .contentShape(Rectangle())
+                                                    .pointingHandCursor()
                                                     .popover(isPresented: $isExportFormatPopoverPresented, arrowEdge: .bottom) {
                                                         let recFormat = CardFileExporter.recommendedFormat(for: currentItem.textPreview)
                                                         CardExportFormatPicker(
@@ -5333,6 +5640,27 @@ public struct MainPanelView: View {
                                                 }
                                                 .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
                                                 .fixedSize(horizontal: true, vertical: false)
+                                                .contentShape(Rectangle())
+                                                .pointingHandCursor()
+
+                                                if !isSecret && (currentItem.effectiveContentType == .text || currentItem.effectiveContentType == .code || currentItem.effectiveContentType == .url || currentItem.contentType == .text || currentItem.contentType == .code || currentItem.contentType == .url || currentItem.effectiveContentType == .image || currentItem.contentType == .image) {
+                                                    let isSnippetCreatedToast = (snippetCreatedToastItemId == currentItem.id)
+                                                    Button {
+                                                        pendingSnippetSourceItemId = currentItem.id
+                                                        createSnippetFromClipboardItem(currentItem)
+                                                    } label: {
+                                                        Image(systemName: isSnippetCreatedToast ? "checkmark" : "bolt.fill")
+                                                            .symbolRenderingMode(.monochrome)
+                                                            .font(.system(size: 12, weight: .semibold))
+                                                            .foregroundStyle(isSnippetCreatedToast ? Color.green : currentTheme.primaryText)
+                                                            .frame(width: 28, height: 28)
+                                                    }
+                                                    .pvButton(variant: isSnippetCreatedToast ? .primary : .secondary, size: .small, theme: currentTheme, fixedWidth: 28, fixedHeight: 28)
+                                                    .frame(width: 28, height: 28)
+                                                    .contentShape(Rectangle())
+                                                    .help(tr("Создать фрагмент", "Create snippet"))
+                                                    .pointingHandCursor()
+                                                }
 
                                                 if isSecret {
                                                     let isRevealed = (revealedSecretItemId == currentItem.id)
@@ -5356,9 +5684,12 @@ public struct MainPanelView: View {
                                                     }
                                                     .pvButton(variant: .toggle(isActive: isRevealed), size: .small, theme: currentTheme, fixedHeight: 28)
                                                     .fixedSize(horizontal: true, vertical: false)
+                                                    .contentShape(Rectangle())
                                                     .help(tr("Показать / скрыть пароль", "Show / hide password"))
+                                                    .pointingHandCursor()
                                                 }
                                             }
+                                            .zIndex(50)
                                         }
 
                                         if isSecret && (revealedSecretItemId != currentItem.id) {
@@ -5426,7 +5757,7 @@ public struct MainPanelView: View {
                             pasteItem(currentItem)
                         } label: {
                             HStack(spacing: 4) {
-                                if pastedItemToastId == currentItem.id {
+                                if pastedItemToastId == currentItem.id && pasteFailedItemId != currentItem.id {
                                     Image(systemName: "checkmark")
                                         .symbolRenderingMode(.monochrome)
                                         .font(.system(size: 13, weight: .semibold))
@@ -5444,10 +5775,21 @@ public struct MainPanelView: View {
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                        .pvButton(variant: (pastedItemToastId == currentItem.id) ? .success : .primary, size: .regular, theme: currentTheme, fixedHeight: 34)
+                        .pvButton(
+                            variant: (pasteFailedItemId == currentItem.id)
+                                ? .destructive
+                                : ((pastedItemToastId == currentItem.id) ? .success : .primary),
+                            size: .regular,
+                            theme: currentTheme,
+                            fixedHeight: 34,
+                            customBorderColor: (pasteFailedItemId == currentItem.id) ? Color.red : nil
+                        )
                         .animation(.easeInOut(duration: 0.18), value: pastedItemToastId)
+                        .animation(.easeInOut(duration: 0.18), value: pasteFailedItemId)
                         .frame(maxWidth: .infinity)
                         .frame(height: 34)
+                        .contentShape(Rectangle())
+                        .pointingHandCursor()
 
                         Button {
                             if currentItem.effectiveContentType == .image || currentItem.effectiveContentType == .file {
@@ -5474,6 +5816,8 @@ public struct MainPanelView: View {
                         }
                         .pvButton(variant: .secondary, size: .regular, theme: currentTheme, fixedHeight: 34)
                         .frame(height: 34)
+                        .contentShape(Rectangle())
+                        .pointingHandCursor()
 
                         Button {
                             deleteItem(currentItem)
@@ -5485,7 +5829,9 @@ public struct MainPanelView: View {
                         }
                         .pvButton(variant: .secondary, size: .regular, theme: currentTheme, fixedHeight: 34)
                         .frame(height: 34)
+                        .contentShape(Rectangle())
                         .help(tr("Удалить из истории", "Delete from history"))
+                        .pointingHandCursor()
                     }
                 }
                 .padding(16)
@@ -5507,236 +5853,795 @@ public struct MainPanelView: View {
                 currentTheme.panelFill(opacity: currentTheme.usesLiquidGlass ? windowOpacity * 0.35 : 1.0)
             }
         )
+        .onAppear {
+            refreshPinnedSortSnapshot()
+        }
     }
 
-    // MARK: - Tab 2: Snippets Tab View
-    private var snippetsTabView: some View {
+    // MARK: - Tab 2: Snippets Tab View (3D Vertical Deck)
+
+    /// Сквозная нумерация карточек (`1...N` по `createdAt` от самых старых к новым)
+    /// независимо от выбранной категории, сортировки или фильтра поиска.
+    private var snippetGlobalNumbers: [String: Int] {
+        SnippetDeckHelper.computeGlobalNumbers(for: snippetsList)
+    }
+
+    /// Отфильтрованный и отсортированный список фрагментов для 3D-колоды.
+    /// Поиск всегда идёт сразу по названию, содержимому, категории и номеру `#N`.
+    private var snippetsFilteredList: [QuickSnippetItem] {
         let trimmedSearch = snippetsSearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filteredSnippets: [QuickSnippetItem] = {
-            if trimmedSearch.isEmpty {
-                return snippetsList.sorted { $0.isPinned && !$1.isPinned }
+        let categoryFiltered: [QuickSnippetItem] = {
+            if selectedSnippetCategory == "Все" || selectedSnippetCategory.isEmpty {
+                return snippetsList
             } else {
-                let matched = snippetsList.filter { snippet in
-                    let titleMatch = snippet.title.localizedCaseInsensitiveContains(trimmedSearch) ||
-                                     localizedSnippetTitle(snippet.title).localizedCaseInsensitiveContains(trimmedSearch)
-                    if snippetSearchScope == .titleOnly {
-                        return titleMatch
-                    } else {
-                        let contentMatch = snippet.content.localizedCaseInsensitiveContains(trimmedSearch) ||
-                                          localizedSnippetContent(snippet.content).localizedCaseInsensitiveContains(trimmedSearch)
-                        return titleMatch || contentMatch
-                    }
-                }
-                return SearchHighlightHelper.sortSnippets(matched, query: trimmedSearch, scope: snippetSearchScope)
+                return snippetsList.filter { $0.category.localizedCaseInsensitiveCompare(selectedSnippetCategory) == .orderedSame }
             }
         }()
 
-        let unpinnedCount = snippetsList.filter { !$0.isPinned }.count
+        if trimmedSearch.isEmpty {
+            return sortSnippetsByOrder(categoryFiltered)
+        }
+
+        let globalNumbers = snippetGlobalNumbers
+        let matched = categoryFiltered.filter { snippet in
+            let globalNumber = globalNumbers[snippet.id] ?? 0
+            return snippet.title.localizedCaseInsensitiveContains(trimmedSearch) ||
+                localizedSnippetTitle(snippet.title).localizedCaseInsensitiveContains(trimmedSearch) ||
+                snippet.content.localizedCaseInsensitiveContains(trimmedSearch) ||
+                localizedSnippetContent(snippet.content).localizedCaseInsensitiveContains(trimmedSearch) ||
+                snippet.category.localizedCaseInsensitiveContains(trimmedSearch) ||
+                localizedSnippetCategory(snippet.category).localizedCaseInsensitiveContains(trimmedSearch) ||
+                SnippetDeckHelper.matchesNumberQuery(globalNumber: globalNumber, query: trimmedSearch)
+        }
+        return sortSnippetsByOrder(SearchHighlightHelper.sortSnippets(matched, query: trimmedSearch, scope: .all))
+    }
+
+    private func sortSnippetsByOrder(_ list: [QuickSnippetItem]) -> [QuickSnippetItem] {
+        SnippetDeckHelper.sortSnippets(
+            list,
+            order: snippetSortOrder,
+            pinnedSnapshotIds: (snippetSortOrder == "pinned" || snippetSortOrder == "mostUsed") ? pinnedSortSnapshotIds : []
+        ) { title in
+            localizedSnippetTitle(title)
+        }
+    }
+
+    private func refreshPinnedSortSnapshot() {
+        pinnedSortSnapshotIds = SnippetDeckHelper.sortSnippets(snippetsList, order: snippetSortOrder) { title in
+            localizedSnippetTitle(title)
+        }.map(\.id)
+    }
+
+    /// Индекс активной (передней) карточки в списке колоды
+    private func deckActiveIndex(in list: [QuickSnippetItem]) -> Int {
+        guard !list.isEmpty else { return 0 }
+        if activeSnippetIndex >= 0 && activeSnippetIndex < list.count {
+            return activeSnippetIndex
+        }
+        if let id = selectedSnippetId, let idx = list.firstIndex(where: { $0.id == id }) {
+            return idx
+        }
+        return 0
+    }
+
+    private var snippetsTabView: some View {
+        let list = snippetsFilteredList
+        let trimmedSearch = snippetsSearch.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return VStack(spacing: 0) {
-            // Верхняя панель: поиск, переключатель режима поиска, кнопка очистки и кнопка создания
-            HStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(currentTheme.secondaryText)
-
-                    ZStack(alignment: .leading) {
-                        if snippetsSearch.isEmpty {
-                            Text(tr("Поиск быстрых фрагментов (Snippets)...", "Search quick snippets..."))
-                                .font(currentFont.font(size: 13, weight: .medium))
-                                .foregroundStyle(currentTheme.secondaryText)
-                                .allowsHitTesting(false)
-                        }
-                        TextField("", text: $snippetsSearch)
-                            .textFieldStyle(.plain)
-                            .font(currentFont.font(size: 13, weight: .medium))
-                            .foregroundStyle(currentTheme.primaryText)
-                    }
-
-                    if !snippetsSearch.isEmpty {
-                        Button {
-                            snippetsSearch = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(currentTheme.secondaryText)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(currentTheme.isLight ? Color.white.opacity(0.75) : Color.clear)
-                )
-                .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(currentTheme.primaryText.opacity(currentTheme.isLight ? 0.18 : 0.08), lineWidth: 1)
-                )
-
-                // Переключатель режима поиска «Заголовок + Текст» / «Только название» при наличии запроса
-                if !trimmedSearch.isEmpty {
-                    HStack(spacing: 2) {
-                        Button {
-                            snippetSearchScope = .all
-                            TapticSoundAndHaptics.shared.performDialTick()
-                        } label: {
-                            Text(tr("Заголовок + Текст", "Title + Text"))
-                                .font(currentFont.font(size: 10.5, weight: snippetSearchScope == .all ? .semibold : .medium))
-                                .padding(.horizontal, 8)
-                                .frame(height: 26)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .fill(snippetSearchScope == .all ? currentTheme.accentColor.opacity(currentTheme.isLight ? 0.22 : 0.32) : Color.clear)
-                                )
-                                .foregroundStyle(snippetSearchScope == .all ? currentTheme.accentColor : currentTheme.secondaryText)
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            snippetSearchScope = .titleOnly
-                            TapticSoundAndHaptics.shared.performDialTick()
-                        } label: {
-                            Text(tr("Только название", "Title Only"))
-                                .font(currentFont.font(size: 10.5, weight: snippetSearchScope == .titleOnly ? .semibold : .medium))
-                                .padding(.horizontal, 8)
-                                .frame(height: 26)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .fill(snippetSearchScope == .titleOnly ? currentTheme.accentColor.opacity(currentTheme.isLight ? 0.22 : 0.32) : Color.clear)
-                                )
-                                .foregroundStyle(snippetSearchScope == .titleOnly ? currentTheme.accentColor : currentTheme.secondaryText)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(2)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(currentTheme.primaryText.opacity(0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-                    )
-                }
-
-                Spacer()
-
-                // Кнопка очистки незакрепленных фрагментов
-                if unpinnedCount > 0 {
-                    Button {
-                        showClearSnippetsConfirmation = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "trash")
-                                .symbolRenderingMode(.monochrome)
-                            Text(tr("Очистить (\(unpinnedCount))", "Clear (\(unpinnedCount))"))
-                        }
-                    }
-                    .buttonStyle(PVButtonStyle(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 30))
-                    .help(tr("Удалить все незакрепленные фрагменты (закрепленные сохраняются)", "Delete all unpinned snippets (pinned are preserved)"))
-                }
-
-                Button {
-                    isAddingSnippet = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus")
-                            .symbolRenderingMode(.monochrome)
-                        Text(tr("Новый фрагмент", "New Snippet"))
-                    }
-                }
-                .buttonStyle(PVButtonStyle(variant: .primary, size: .small, theme: currentTheme, fixedHeight: 30))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            snippetsTopBar
 
             Divider()
                 .background(currentTheme.borderColor)
 
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    if filteredSnippets.isEmpty {
-                        VStack(spacing: 10) {
-                            Image(systemName: "text.quote")
-                                .symbolRenderingMode(.monochrome)
-                                .font(.system(size: 32))
-                                .foregroundStyle(currentTheme.secondaryText)
-                            Text(tr("Фрагментов пока нет", "No snippets yet"))
-                                .font(currentFont.font(size: 13, weight: .regular))
-                                .foregroundStyle(currentTheme.secondaryText)
+            if list.isEmpty {
+                VStack(spacing: 12) {
+                    if !trimmedSearch.isEmpty {
+                        Image(systemName: "magnifyingglass")
+                            .symbolRenderingMode(.monochrome)
+                            .font(.system(size: 28))
+                            .foregroundStyle(currentTheme.secondaryText)
+                        Text(tr("По запросу «\(trimmedSearch)» ничего не найдено", "No snippets found for \"\(trimmedSearch)\""))
+                            .font(currentFont.font(size: 13, weight: .semibold))
+                            .foregroundStyle(currentTheme.secondaryText)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 20)
+                        Button {
+                            snippetsSearch = ""
+                        } label: {
+                            Text(tr("Сбросить поиск", "Clear Search"))
                         }
-                        .padding(.top, 40)
+                        .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+                        .padding(.top, 4)
                     } else {
-                        ForEach(filteredSnippets) { snippet in
-                            let titleMatch = snippet.title.localizedCaseInsensitiveContains(trimmedSearch) || localizedSnippetTitle(snippet.title).localizedCaseInsensitiveContains(trimmedSearch)
-                            let contentMatch = snippet.content.localizedCaseInsensitiveContains(trimmedSearch) || localizedSnippetContent(snippet.content).localizedCaseInsensitiveContains(trimmedSearch)
+                        Image(systemName: "text.quote")
+                            .symbolRenderingMode(.monochrome)
+                            .font(.system(size: 28))
+                            .foregroundStyle(currentTheme.secondaryText)
+                        Text(tr("Фрагментов пока нет", "No snippets yet"))
+                            .font(currentFont.font(size: 13, weight: .semibold))
+                            .foregroundStyle(currentTheme.secondaryText)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                snippetDeckScene(list: list, trimmedSearch: trimmedSearch)
+            }
+        }
+        .background(
+            ZStack {
+                WindowDragHandle()
+                currentTheme.panelFill(opacity: currentTheme.usesLiquidGlass ? windowOpacity * 0.35 : 1.0)
+            }
+        )
+        .onAppear {
+            refreshPinnedSortSnapshot()
+        }
+    }
 
-                            QuickSnippetCardRowView(
-                                snippet: snippet,
-                                targetAppName: monitor.targetAppName,
-                                currentTheme: currentTheme,
-                                currentFont: currentFont,
-                                language: currentLanguage,
-                                windowOpacity: windowOpacity,
-                                searchQuery: trimmedSearch,
-                                isTitleMatched: titleMatch,
-                                isContentMatched: contentMatch,
-                                isPastedToast: (pastedSnippetToastId == snippet.id),
-                                isCopiedToast: (copiedSnippetToastId == snippet.id),
-                                onTogglePin: {
-                                    if let idx = snippetsList.firstIndex(where: { $0.id == snippet.id }) {
-                                        snippetsList[idx].isPinned.toggle()
-                                        saveSnippets()
-                                    }
-                                },
-                                onEdit: {
-                                    editingSnippet = snippet
-                                    newSnippetTitle = snippet.title
-                                    newSnippetCategory = snippet.category
-                                    newSnippetContent = snippet.content
-                                },
-                                onPaste: {
-                                    pastedSnippetToastId = snippet.id
-                                    TapticSoundAndHaptics.shared.playClick()
-                                    instantCopyAndPaste(text: prepareSnippetForAction(snippet))
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                        if pastedSnippetToastId == snippet.id {
-                                            pastedSnippetToastId = nil
-                                        }
-                                    }
-                                },
-                                onCopy: {
-                                    monitor.copyToPasteboardImmediately(text: prepareSnippetForAction(snippet))
-                                    copiedSnippetToastId = snippet.id
-                                    TapticSoundAndHaptics.shared.playClick()
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                        if copiedSnippetToastId == snippet.id {
-                                            copiedSnippetToastId = nil
-                                        }
-                                    }
-                                },
-                                onDelete: {
-                                    snippetsList.removeAll { $0.id == snippet.id }
-                                    saveSnippets()
-                                }
-                            )
-                            .id(snippet.id)
+    // MARK: Top bar: [ 🔍 Поиск ] [ ⊞ Все категории N ▾ ] [ + Новый фрагмент ]
+    private var snippetsTopBar: some View {
+        HStack(spacing: 10) {
+            // 1) Широкое поле поиска (название + содержимое + категория)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(currentTheme.secondaryText)
+
+                FocusAwareTextField(
+                    placeholder: tr("Поиск по фрагментам...", "Search snippets..."),
+                    text: $snippetsSearch,
+                    font: currentFont.font(size: 12.5, weight: .medium),
+                    textColor: currentTheme.primaryText,
+                    placeholderColor: currentTheme.secondaryText.opacity(0.78),
+                    externalFocus: $isSnippetsSearchFocused
+                )
+                .onChange(of: snippetsSearch) { oldValue, _ in
+                    if isImageLightboxPresented || isSearchInputLocked {
+                        if snippetsSearch != lockedSnippetsSearchSnapshot {
+                            snippetsSearch = lockedSnippetsSearchSnapshot
+                        }
+                        return
+                    }
+                    refreshPinnedSortSnapshot()
+                }
+
+                if !snippetsSearch.isEmpty {
+                    Button {
+                        snippetsSearch = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(currentTheme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(currentTheme.isLight ? Color.white.opacity(0.75) : Color.clear)
+            )
+            .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(currentTheme.primaryText.opacity(currentTheme.isLight ? 0.18 : 0.08), lineWidth: 1)
+            )
+
+            // 2) Компактная кнопка сортировки фрагментов (слева от категорий, как «Новые сверху» во вкладке Буфер обмена)
+            snippetSortMenu
+
+            // 3) Выпадающий фильтр категорий: [ ⊞ Все категории N ▾ ]
+            Button {
+                isSnippetCategoryFilterPopoverPresented.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    if selectedSnippetCategory == "Все" || selectedSnippetCategory.isEmpty {
+                        Image(systemName: "square.grid.2x2.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(currentTheme.accentColor)
+                        Text(tr("Все категории", "All Categories"))
+                            .font(currentFont.font(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text("\(snippetCategories.count)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(currentTheme.secondaryText)
+                    } else {
+                        Image(systemName: categoryIcon(for: selectedSnippetCategory))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(currentTheme.accentColor)
+                        let count = snippetsList.filter { $0.category.localizedCaseInsensitiveCompare(selectedSnippetCategory) == .orderedSame }.count
+                        Text(localizedSnippetCategory(selectedSnippetCategory))
+                            .font(currentFont.font(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text("\(count)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(currentTheme.secondaryText)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(currentTheme.secondaryText)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .contentShape(Rectangle())
+            }
+            .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 30)
+            .pointingHandCursor()
+            .popover(isPresented: $isSnippetCategoryFilterPopoverPresented, arrowEdge: .bottom) {
+                SnippetCategoryDropdownMenu(
+                    isFilterMode: true,
+                    categories: snippetCategories,
+                    selectedCategoryName: selectedSnippetCategory,
+                    snippets: snippetsList,
+                    currentTheme: currentTheme,
+                    currentFont: currentFont,
+                    language: currentLanguage,
+                    onSelectCategory: { name in
+                        selectedSnippetCategory = name
+                        isSnippetCategoryFilterPopoverPresented = false
+                        refreshPinnedSortSnapshot()
+                        activeSnippetIndex = 0
+                        selectedSnippetId = snippetsFilteredList.first?.id
+                    },
+                    onCreateCategory: { name, icon in
+                        createNewSnippetCategory(name: name, icon: icon)
+                    },
+                    onUpdateCategory: { id, name, icon in
+                        updateSnippetCategoryRecord(id: id, newName: name, newIcon: icon)
+                    },
+                    onDeleteCategoryRequest: { cat in
+                        isSnippetCategoryFilterPopoverPresented = false
+                        categoryPendingDelete = cat
+                    },
+                    onDismiss: {
+                        isSnippetCategoryFilterPopoverPresented = false
+                    }
+                )
+            }
+
+            // 4) Акцентная кнопка создания нового фрагмента
+            Button {
+                editingSnippet = nil
+                newSnippetTitle = ""
+                newSnippetContent = ""
+                snippetDraftImage = nil
+                snippetDraftImagePath = nil
+                isMacroDropdownOpen = false
+                showEmptyTitleWarning = false
+                showEmptySnippetContentError = false
+                resetInlineCategoryDraftState()
+                currentSelectedMacroToken = nil
+                if selectedSnippetCategory != "Все" && selectedSnippetCategory != "All" && !selectedSnippetCategory.isEmpty {
+                    newSnippetCategory = selectedSnippetCategory
+                } else {
+                    newSnippetCategory = snippetCategories.first?.name ?? ""
+                }
+                isAddingSnippet = true
+                Task {
+                    let cats = await DatabaseManager.shared.fetchSnippetCategories()
+                    await MainActor.run {
+                        self.snippetCategories = cats
+                        if cats.isEmpty {
+                            self.newSnippetCategory = ""
+                        } else if !cats.contains(where: { $0.name == self.newSnippetCategory }) {
+                            if self.selectedSnippetCategory != "Все" && self.selectedSnippetCategory != "All" && !self.selectedSnippetCategory.isEmpty && cats.contains(where: { $0.name == self.selectedSnippetCategory }) {
+                                self.newSnippetCategory = self.selectedSnippetCategory
+                            } else {
+                                self.newSnippetCategory = cats.first?.name ?? ""
+                            }
                         }
                     }
                 }
-                .padding(16)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus")
+                        .symbolRenderingMode(.monochrome)
+                    Text(tr("Новый фрагмент", "New Snippet"))
+                }
             }
-            .scrollContentBackground(.hidden)
+            .buttonStyle(PVButtonStyle(variant: .primary, size: .small, theme: currentTheme, fixedHeight: 30))
+            .pointingHandCursor()
         }
-        .sheet(isPresented: Binding(
-            get: { isAddingSnippet || editingSnippet != nil },
-            set: { if !$0 { isAddingSnippet = false; editingSnippet = nil } }
-        )) {
-            addSnippetSheetView
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .zIndex(100)
+    }
+
+    private var currentSnippetSortTitle: String {
+        switch snippetSortOrder {
+        case "mostUsed": return tr("Часто используемые", "Most used")
+        case "newest": return tr("Сначала новые", "Newest first")
+        case "oldest": return tr("Сначала старые", "Oldest first")
+        case "alphabetical": return tr("По алфавиту (А–Я)", "Alphabetical (A–Z)")
+        default: return tr("По закреплённым", "Pinned first")
         }
+    }
+
+    private var snippetSortMenu: some View {
+        Button {
+            TapticSoundAndHaptics.shared.performDialTick()
+            isSnippetSortPopoverPresented.toggle()
+        } label: {
+            CompactDropdownPlate(
+                icon: "arrow.up.arrow.down",
+                title: currentSnippetSortTitle,
+                theme: currentTheme,
+                font: currentFont
+            )
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isSnippetSortPopoverPresented, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                snippetSortMenuRow(id: "pinned", title: tr("По закреплённым", "Pinned first"), icon: "pin.fill")
+                snippetSortMenuRow(id: "mostUsed", title: tr("Часто используемые", "Most used"), icon: "flame.fill")
+                snippetSortMenuRow(id: "newest", title: tr("Сначала новые", "Newest first"), icon: "sparkles")
+                snippetSortMenuRow(id: "oldest", title: tr("Сначала старые", "Oldest first"), icon: "clock")
+                snippetSortMenuRow(id: "alphabetical", title: tr("По алфавиту (А–Я)", "Alphabetical (A–Z)"), icon: "textformat.abc")
+            }
+            .padding(6)
+            .frame(minWidth: 200)
+            .background(currentTheme.cardColor)
+            .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
+        }
+    }
+
+    private func snippetSortMenuRow(id: String, title: String, icon: String) -> some View {
+        CustomDropdownItemRow(
+            title: title,
+            icon: icon,
+            isSelected: snippetSortOrder == id,
+            currentTheme: currentTheme,
+            currentFont: currentFont
+        ) {
+            snippetSortOrder = id
+            isSnippetSortPopoverPresented = false
+            refreshPinnedSortSnapshot()
+            activeSnippetIndex = 0
+            selectedSnippetId = snippetsFilteredList.first?.id
+        }
+    }
+
+    // MARK: 3D Deck Scene (колода + вертикальный пульт справа)
+    private func snippetDeckScene(list: [QuickSnippetItem], trimmedSearch: String) -> some View {
+        let total = list.count
+        let activeIndex = deckActiveIndex(in: list)
+        let isDeckInputEnabled = !isAddingSnippet && editingSnippet == nil && categoryPendingDelete == nil && !isSnippetCategoryFilterPopoverPresented
+        let isShufflingActive = (shufflePhase != .idle && shuffleCardId != nil)
+        let shufflingCardDepth: Int? = {
+            guard isShufflingActive, let sid = shuffleCardId,
+                  let sIdx = list.firstIndex(where: { $0.id == sid }) else { return nil }
+            return SnippetDeckHelper.circularDepth(index: sIdx, activeIndex: activeIndex, total: total)
+        }()
+
+        return HStack(alignment: .center, spacing: 20) {
+            ZStack {
+                ForEach(Array(list.enumerated()), id: \.element.id) { idx, snippet in
+                    let depth = SnippetDeckHelper.circularDepth(index: idx, activeIndex: activeIndex, total: total)
+                    if SnippetDeckHelper.isCardVisible(
+                        depth: depth,
+                        total: total,
+                        isShuffling: snippet.id == shuffleCardId,
+                        isShufflingActive: isShufflingActive,
+                        shufflingCardDepth: shufflingCardDepth
+                    ) {
+                        deckCard(
+                            snippet: snippet,
+                            idx: idx,
+                            depth: depth,
+                            total: total,
+                            trimmedSearch: trimmedSearch
+                        )
+                        .transition(.identity)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 430)
+            .background(
+                DeckScrollWheelCatcher(
+                    isEnabled: isDeckInputEnabled,
+                    frontOffsetY: 82 + SnippetDeckHelper.centeringShiftUp(forTotal: total)
+                ) { direction in
+                    triggerDeckShuffle(direction)
+                }
+            )
+            .onDisappear {
+                stopContinuousDeckScroll()
+            }
+
+            SnippetDeckControlRail(
+                total: total,
+                activeIndex: activeIndex,
+                currentTheme: currentTheme,
+                onUp: { triggerDeckShuffle(.up) },
+                onDown: { triggerDeckShuffle(.down) },
+                onSelectIndex: { i in
+                    let currentList = snippetsFilteredList
+                    guard i >= 0, i < currentList.count else { return }
+                    jumpToDeckCard(currentList[i])
+                },
+                onContinuousStart: { direction in
+                    startContinuousDeckScroll(direction)
+                },
+                onContinuousEnd: {
+                    stopContinuousDeckScroll()
+                },
+                onScrubberChange: { i in
+                    scrubberStepToIndex(i)
+                },
+                onScrubberEnd: {
+                    stopContinuousDeckScroll()
+                }
+            )
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Содержимое карточки колоды (правило «1 фрагмент = максимум 1 картинка»):
+    /// - Если есть текст: только чистый текст (без `[[img:...]]`, с расшифрованными макросами и лимитом 35 000 символов).
+    /// - Если текста нет, а картинка есть: одна картинка по центру.
+    private func deckBodySegments(for snippet: QuickSnippetItem, trimmedSearch: String) -> [SnippetDeckBodySegment] {
+        let rawContent = SnippetInlineContent.plainText(of: localizedSnippetContent(snippet.content))
+        let trimmedText = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedText.isEmpty {
+            let resolvedPath = snippet.imagePath ?? SnippetInlineContent.imageNames(in: snippet.content).first.flatMap { SnippetInlineContent.fullPath(forName: $0) }
+            if let path = resolvedPath, let img = SnippetInlineContent.image(forName: path) {
+                return [SnippetDeckBodySegment(id: 0, image: img)]
+            }
+            return []
+        }
+
+        let displayUUID = (UUID(uuidString: snippet.id)?.uuidString ?? snippet.id).lowercased()
+        let budget = 35_000
+        var truncated = false
+        var chunk = rawContent.trimmingCharacters(in: .newlines)
+        if chunk.count > budget {
+            chunk = String(chunk.prefix(budget))
+            truncated = true
+        }
+        var shown = chunk
+        if shown.contains("{{") {
+            shown = shown.replacingOccurrences(of: "{{uuid}}", with: displayUUID, options: .caseInsensitive)
+            shown = SnippetMacroEngine.expand(shown, targetAppName: monitor.targetAppName)
+        }
+        let attributed = SearchHighlightHelper.highlight(
+            text: shown,
+            query: trimmedSearch,
+            baseFont: currentFont.font(size: 13, weight: .regular),
+            baseColor: currentTheme.primaryText,
+            accentColor: currentTheme.accentColor,
+            isLight: currentTheme.isLight,
+            bold: false
+        )
+        var out = [SnippetDeckBodySegment(id: 0, text: Text(attributed))]
+        if truncated {
+            out.append(SnippetDeckBodySegment(
+                id: 1,
+                text: Text(tr(
+                    "… [Текст показан частично для быстродействия, при вставке будет использован полностью]",
+                    "… [Text partially shown for performance; full text will be used on paste]"
+                ))
+                    .foregroundColor(currentTheme.secondaryText)
+            ))
+        }
+        return out
+    }
+
+    @ViewBuilder
+    private func deckCard(snippet: QuickSnippetItem, idx: Int, depth: Int, total: Int, trimmedSearch: String) -> some View {
+        let totalCount = total
+        let centeringShiftUp: CGFloat = SnippetDeckHelper.centeringShiftUp(forTotal: totalCount)
+        let slot = SnippetDeckHelper.visualSlot(forDepth: depth, total: total)
+        let isBeingShuffled = (snippet.id == shuffleCardId)
+        let pose = SnippetDeckHelper.calculatePose(
+            slot: slot,
+            depth: depth,
+            isBeingShuffled: isBeingShuffled,
+            direction: shuffleDirection,
+            phase: shufflePhase,
+            total: total
+        )
+        let finalOffsetY: CGFloat = {
+            if isBeingShuffled && shufflePhase == .lift {
+                switch totalCount {
+                case 2: return -18
+                case 3: return -42
+                default: return pose.offsetY + centeringShiftUp
+                }
+            } else {
+                return pose.offsetY + centeringShiftUp
+            }
+        }()
+        let bodySegments = deckBodySegments(for: snippet, trimmedSearch: trimmedSearch)
+
+        let titleHighlighted = Text(SearchHighlightHelper.highlight(
+            text: localizedSnippetTitle(snippet.title),
+            query: trimmedSearch,
+            baseFont: currentFont.font(size: 13.5, weight: .bold),
+            baseColor: currentTheme.primaryText,
+            accentColor: currentTheme.accentColor,
+            isLight: currentTheme.isLight,
+            bold: true
+        ))
+
+        let cardNumber = snippetGlobalNumbers[snippet.id] ?? (idx + 1)
+        let isNumberMatched = !trimmedSearch.isEmpty && SnippetDeckHelper.matchesNumberQuery(globalNumber: cardNumber, query: trimmedSearch)
+
+        SnippetDeckCardView(
+            snippet: snippet,
+            index: idx,
+            cardNumber: cardNumber,
+            depth: depth,
+            total: total,
+            pose: pose,
+            centeringShiftUp: centeringShiftUp,
+            isBeingShuffled: isBeingShuffled,
+            shuffleDirection: shuffleDirection,
+            shufflePhase: shufflePhase,
+            customFinalOffsetY: finalOffsetY,
+            titleText: localizedSnippetTitle(snippet.title),
+            titleView: titleHighlighted,
+            isNumberHighlighted: isNumberMatched,
+            categoryName: localizedSnippetCategory(snippet.category),
+            categoryIconName: categoryIcon(for: snippet.category),
+            bodySegments: bodySegments,
+            targetAppName: monitor.targetAppName,
+            targetAppIcon: monitor.targetAppIcon,
+            isPasted: pastedSnippetToastId == snippet.id,
+            isPasteFailed: pasteFailedSnippetId == snippet.id,
+            isCopied: copiedSnippetToastId == snippet.id,
+            currentTheme: currentTheme,
+            currentFont: currentFont,
+            isCategoryFilterActive: selectedSnippetCategory != "Все" && selectedSnippetCategory != "All" && !selectedSnippetCategory.isEmpty,
+            isContinuousScrolling: isContinuousScrolling,
+            onTogglePin: {
+                let targetId = snippet.id
+                if let i = snippetsList.firstIndex(where: { $0.id == targetId }) {
+                    snippetsList[i].isPinned.toggle()
+                    saveSnippets(changedSnippet: snippetsList[i])
+                    selectedSnippetId = targetId
+                    // Не пересчитываем pinnedSortSnapshotIds при клике на булавку — колода остаётся на месте
+                }
+            },
+            onEdit: {
+                editingSnippet = snippet
+                newSnippetTitle = snippet.title
+                newSnippetCategory = snippet.category
+                newSnippetContent = SnippetInlineContent.plainText(of: snippet.content).trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedPath = snippet.imagePath ?? SnippetInlineContent.imageNames(in: snippet.content).first.flatMap { SnippetInlineContent.fullPath(forName: $0) }
+                snippetDraftImagePath = resolvedPath
+                snippetDraftImage = resolvedPath.flatMap { SnippetInlineContent.image(forName: $0) }
+                isMacroDropdownOpen = false
+                showEmptyTitleWarning = false
+                showEmptySnippetContentError = false
+                resetInlineCategoryDraftState()
+                isAddingSnippet = true
+            },
+            onCopy: {
+                copySnippetAction(snippet)
+                copiedSnippetToastId = snippet.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if copiedSnippetToastId == snippet.id {
+                        copiedSnippetToastId = nil
+                    }
+                }
+            },
+            onDelete: {
+                let list = snippetsFilteredList
+                let nextId: String? = list.count > 1
+                    ? list[(idx + 1) % list.count].id
+                    : nil
+                deleteSingleSnippet(snippet)
+                selectedSnippetId = nextId
+                if activeSnippetIndex >= list.count - 1 {
+                    activeSnippetIndex = max(0, list.count - 2)
+                }
+            },
+            onPaste: {
+                if monitor.checkAccessibilityPermission() {
+                    pasteFailedSnippetId = nil
+                    pastedSnippetToastId = snippet.id
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        if pastedSnippetToastId == snippet.id {
+                            pastedSnippetToastId = nil
+                        }
+                    }
+                } else {
+                    pastedSnippetToastId = nil
+                    pasteFailedSnippetId = snippet.id
+                    monitor.triggerAccessibilityAlertPulse()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                        if pasteFailedSnippetId == snippet.id {
+                            pasteFailedSnippetId = nil
+                        }
+                    }
+                }
+                pasteSnippetAction(snippet)
+            },
+            onTapRearCard: {
+                jumpToDeckCard(snippet)
+            },
+            onTapCategory: {
+                if selectedSnippetCategory.localizedCaseInsensitiveCompare(snippet.category) == .orderedSame {
+                    selectedSnippetCategory = "Все"
+                } else {
+                    selectedSnippetCategory = snippet.category
+                }
+                refreshPinnedSortSnapshot()
+                activeSnippetIndex = 0
+                selectedSnippetId = snippetsFilteredList.first?.id
+            }
+        )
+    }
+
+    // MARK: Deck shuffle animation
+
+    /// Клик по задней карточке или точке пульта: колода плавно перелистывается к выбранной карточке
+    private func jumpToDeckCard(_ target: QuickSnippetItem) {
+        let list = snippetsFilteredList
+        guard list.count > 1, let targetIdx = list.firstIndex(where: { $0.id == target.id }) else { return }
+        let currentIdx = deckActiveIndex(in: list)
+        guard targetIdx != currentIdx else { return }
+        let depth = SnippetDeckHelper.circularDepth(index: targetIdx, activeIndex: currentIdx, total: list.count)
+        guard depth != 0 else { return }
+        let direction: DeckScrollDirection = (depth <= list.count / 2) ? .up : .down
+        triggerDeckShuffle(direction, targetIndex: targetIdx)
+    }
+
+    /// Плавная двухфазная 3D-анимация перекладывания колоды с физическими кривыми
+    private func triggerDeckShuffle(_ direction: DeckScrollDirection, targetIndex: Int? = nil) {
+        let now = Date()
+        guard now.timeIntervalSince(lastDeckScrollTime) >= 0.75 else { return }
+        let list = snippetsFilteredList
+        let total = list.count
+        guard total > 1, !isDeckAnimating else { return }
+
+        lastDeckScrollTime = now
+        isDeckAnimating = true
+        shuffleDirection = direction
+        deckShuffleGeneration += 1
+        let gen = deckShuffleGeneration
+
+        let currentIdx = deckActiveIndex(in: list)
+        let nextIdx: Int
+        if direction == .up {
+            nextIdx = targetIndex ?? SnippetDeckHelper.wrappedDeckIndex(currentIndex: currentIdx, direction: .up, total: total)
+            shuffleCardId = list[currentIdx].id
+        } else {
+            nextIdx = targetIndex ?? SnippetDeckHelper.wrappedDeckIndex(currentIndex: currentIdx, direction: .down, total: total)
+            shuffleCardId = list[nextIdx].id
+        }
+
+        TapticSoundAndHaptics.shared.performDialTick()
+
+        // Фаза 1: подъём карточки (0.42 сек)
+        withAnimation(.timingCurve(0.32, 0.72, 0.0, 1.0, duration: 0.42)) {
+            shufflePhase = .lift
+        }
+
+        // Фаза 2: опускание и смена активной карточки (после 0.42 сек, длительность 0.46 сек)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            guard deckShuffleGeneration == gen else { return }
+            withAnimation(.timingCurve(0.22, 1.0, 0.36, 1.0, duration: 0.46)) {
+                activeSnippetIndex = nextIdx
+                selectedSnippetId = list[nextIdx].id
+                shufflePhase = .settle
+            }
+            // Завершение анимации (0.42 + 0.46 = 0.88 сек)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.46) {
+                guard deckShuffleGeneration == gen else { return }
+                finishDeckShuffle()
+            }
+        }
+    }
+
+    private func finishDeckShuffle() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            shuffleCardId = nil
+            shufflePhase = .idle
+        }
+        isDeckAnimating = false
+    }
+
+    // MARK: Continuous Riffle Scroll (Режим Б)
+
+    private func startContinuousDeckScroll(_ direction: DeckScrollDirection) {
+        let list = snippetsFilteredList
+        guard list.count > 1 else { return }
+
+        deckShuffleGeneration += 1
+        shuffleCardId = nil
+        shufflePhase = .idle
+        isDeckAnimating = false
+
+        continuousScrollTask?.cancel()
+        continuousScrollStepCount = 0
+
+        withAnimation(.interactiveSpring(response: 0.13, dampingFraction: 0.84, blendDuration: 0.08)) {
+            isContinuousScrolling = true
+        }
+
+        performContinuousDeckStep(direction)
+
+        continuousScrollTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let interval = SnippetDeckHelper.continuousStepInterval(stepCount: continuousScrollStepCount)
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                if Task.isCancelled { break }
+                performContinuousDeckStep(direction)
+            }
+        }
+    }
+
+    private func performContinuousDeckStep(_ direction: DeckScrollDirection) {
+        let list = snippetsFilteredList
+        let total = list.count
+        guard total > 1 else {
+            stopContinuousDeckScroll()
+            return
+        }
+        let currentIdx = deckActiveIndex(in: list)
+        let nextIdx = SnippetDeckHelper.wrappedDeckIndex(currentIndex: currentIdx, direction: direction, total: total)
+
+        withAnimation(.interactiveSpring(response: 0.13, dampingFraction: 0.84, blendDuration: 0.08)) {
+            activeSnippetIndex = nextIdx
+            selectedSnippetId = list[nextIdx].id
+        }
+        continuousScrollStepCount += 1
+        emitContinuousScrollFeedback()
+    }
+
+    private func scrubberStepToIndex(_ index: Int) {
+        let list = snippetsFilteredList
+        guard index >= 0, index < list.count else { return }
+        if !isContinuousScrolling {
+            deckShuffleGeneration += 1
+            shuffleCardId = nil
+            shufflePhase = .idle
+            isDeckAnimating = false
+        }
+        withAnimation(.interactiveSpring(response: 0.13, dampingFraction: 0.84, blendDuration: 0.08)) {
+            isContinuousScrolling = true
+            activeSnippetIndex = index
+            selectedSnippetId = list[index].id
+        }
+        emitContinuousScrollFeedback()
+    }
+
+    private func stopContinuousDeckScroll() {
+        continuousScrollTask?.cancel()
+        continuousScrollTask = nil
+        continuousScrollStepCount = 0
+        if isContinuousScrolling {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                isContinuousScrolling = false
+            }
+        }
+    }
+
+    private func emitContinuousScrollFeedback() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastContinuousSoundTime >= 0.075 {
+            lastContinuousSoundTime = now
+            TapticSoundAndHaptics.shared.performDialTick()
+        }
+    }
+
+    /// Перелистывание колоды клавишами ↑ / ↓ (не при открытой модалке и не при фокусе в текстовом поле)
+    private func deckKeyboardStep(_ direction: DeckScrollDirection) {
+        guard !isAddingSnippet, editingSnippet == nil, categoryPendingDelete == nil, !isSnippetCategoryFilterPopoverPresented else { return }
+        if NSApp.keyWindow?.firstResponder is NSText { return }
+        triggerDeckShuffle(direction)
     }
 
     private var addSnippetSheetView: some View {
@@ -5747,116 +6652,466 @@ public struct MainPanelView: View {
                 .foregroundStyle(currentTheme.primaryText)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(tr("Название фрагмента", "Snippet Title"))
-                    .font(currentFont.font(size: 11, weight: .medium))
-                    .foregroundStyle(currentTheme.secondaryText)
-                TextField(tr("Название фрагмента", "Snippet Title"), text: $newSnippetTitle)
-                    .textFieldStyle(.plain)
-                    .font(currentFont.font(size: 13, weight: .medium))
-                    .foregroundStyle(currentTheme.primaryText)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(currentTheme.isLight ? Color.white : currentTheme.primaryText.opacity(0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-                    )
-            }
+                HStack(spacing: 6) {
+                    Text(tr("Название фрагмента", "Snippet Title"))
+                        .font(currentFont.font(size: 11, weight: .medium))
+                        .foregroundStyle(currentTheme.secondaryText)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(tr("Категория", "Category"))
-                    .font(currentFont.font(size: 11, weight: .medium))
-                    .foregroundStyle(currentTheme.secondaryText)
-                Picker("", selection: $newSnippetCategory) {
-                    Text(tr("Разработка", "Dev")).tag("Разработка")
-                    Text(tr("Работа", "Work")).tag("Работа")
-                    Text(tr("Поддержка", "Support")).tag("Контакты")
-                    Text(tr("Шаблоны", "Templates")).tag("Шаблоны")
+                    if showEmptyTitleWarning {
+                        Text(tr("• Введите название", "• Enter a title"))
+                            .font(currentFont.font(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.red.opacity(0.90))
+                            .transition(.opacity)
+                    }
                 }
-                .pickerStyle(.segmented)
-            }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(tr("Текст фрагмента...", "Snippet content..."))
-                    .font(currentFont.font(size: 11, weight: .medium))
-                    .foregroundStyle(currentTheme.secondaryText)
-
-                TextEditor(text: $newSnippetContent)
-                    .font(currentFont.font(size: 12, weight: .regular))
-                    .foregroundStyle(currentTheme.primaryText)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
+                FocusAwareTextField(
+                    placeholder: tr("Название фрагмента", "Snippet Title"),
+                    text: $newSnippetTitle,
+                    font: currentFont.font(size: 13, weight: .medium),
+                    textColor: currentTheme.primaryText,
+                    placeholderColor: currentTheme.secondaryText.opacity(0.78),
+                    externalFocus: $isSnippetTitleFocused
+                )
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(currentTheme.isLight ? Color.white : currentTheme.primaryText.opacity(0.06))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(currentTheme.borderColor, lineWidth: 1)
+                            .strokeBorder(showEmptyTitleWarning ? Color.red.opacity(0.85) : currentTheme.borderColor, lineWidth: showEmptyTitleWarning ? 1.5 : 1)
                     )
-                    .frame(height: 110)
+                    .onChange(of: newSnippetTitle) { _, newVal in
+                        if showEmptyTitleWarning && !newVal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            showEmptyTitleWarning = false
+                        }
+                    }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(tr("Категория", "Category"))
+                        .font(currentFont.font(size: 11, weight: .medium))
+                        .foregroundStyle(currentTheme.secondaryText)
+
+                    if showMissingCategoryWarning {
+                        Text(tr("Создайте категорию", "Create a category"))
+                            .font(currentFont.font(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.red.opacity(0.90))
+                            .transition(.opacity)
+                    }
+                }
+
+                if snippetCategories.isEmpty {
+                    HStack(spacing: 6) {
+                        Button {
+                            isInlineCategoryIconPickerOpen.toggle()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: inlineNewCategoryIcon)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(currentTheme.accentColor)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(currentTheme.secondaryText)
+                            }
+                            .padding(.horizontal, 7)
+                            .frame(height: 24)
+                            .background(isInlineIconBtnHovered ? currentTheme.accentColor.opacity(0.16) : currentTheme.primaryText.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(isInlineIconBtnHovered ? currentTheme.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+                            )
+                            .scaleEffect(isInlineIconBtnPressed ? 0.95 : 1.0)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { isInlineIconBtnHovered = $0 }
+                        .pointingHandCursor()
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { _ in isInlineIconBtnPressed = true }
+                                .onEnded { _ in isInlineIconBtnPressed = false }
+                        )
+                        .popover(isPresented: $isInlineCategoryIconPickerOpen, arrowEdge: .leading) {
+                            SnippetCategoryIconPicker(currentTheme: currentTheme, selectedIcon: inlineNewCategoryIcon) { chosen in
+                                inlineNewCategoryIcon = chosen
+                                isInlineCategoryIconPickerOpen = false
+                            }
+                        }
+
+                        FocusAwareTextField(
+                            placeholder: tr("Новая категория", "New category"),
+                            text: $inlineNewCategoryName,
+                            font: currentFont.font(size: 12.5, weight: .medium),
+                            textColor: currentTheme.primaryText,
+                            placeholderColor: currentTheme.secondaryText.opacity(0.78),
+                            externalFocus: $isInlineNewCategoryFocused,
+                            onSubmit: { commitInlineNewCategory() }
+                        )
+                        .onChange(of: inlineNewCategoryName) { _, newVal in
+                            let sanitized = sanitizeCategoryNameInput(newVal)
+                            if sanitized != newVal {
+                                inlineNewCategoryName = sanitized
+                            }
+                            if showMissingCategoryWarning && !sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    showMissingCategoryWarning = false
+                                }
+                            }
+                        }
+
+                        Button {
+                            commitInlineNewCategory()
+                        } label: {
+                            let isEmpty = inlineNewCategoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(Color.white)
+                                .frame(width: 24, height: 24)
+                                .background(isEmpty ? currentTheme.secondaryText.opacity(0.4) : (isInlinePlusBtnHovered ? currentTheme.accentColor.opacity(0.85) : currentTheme.accentColor))
+                                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                .scaleEffect(isInlinePlusBtnPressed && !isEmpty ? 0.92 : 1.0)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(inlineNewCategoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .onHover { isInlinePlusBtnHovered = $0 }
+                        .pointingHandCursor()
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { _ in isInlinePlusBtnPressed = true }
+                                .onEnded { _ in isInlinePlusBtnPressed = false }
+                        )
+                    }
+                    .padding(.horizontal, 6)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(currentTheme.isLight ? Color.white : currentTheme.primaryText.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(showMissingCategoryWarning ? Color.red.opacity(0.75) : currentTheme.borderColor, lineWidth: showMissingCategoryWarning ? 1.5 : 1)
+                    )
+                    .offset(x: categoryShakeOffset)
+                } else {
+                    let selectedCategoryName: String = {
+                        if snippetCategories.contains(where: { $0.name.localizedCaseInsensitiveCompare(newSnippetCategory) == .orderedSame }) {
+                            return newSnippetCategory
+                        }
+                        return snippetCategories.first?.name ?? ""
+                    }()
+                    Button {
+                        isMacroDropdownOpen = false
+                        isSnippetCategoryModalPickerPopoverPresented.toggle()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: categoryIcon(for: selectedCategoryName))
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(currentTheme.accentColor)
+                            Text(localizedSnippetCategory(selectedCategoryName))
+                                .font(currentFont.font(size: 12.5, weight: .medium))
+                                .foregroundStyle(currentTheme.primaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(currentTheme.secondaryText)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(isModalCategoryPickerHovered ? currentTheme.accentColor.opacity(0.12) : (currentTheme.isLight ? Color.white : currentTheme.primaryText.opacity(0.06)))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(isModalCategoryPickerHovered ? currentTheme.accentColor.opacity(0.6) : currentTheme.borderColor, lineWidth: 1)
+                        )
+                        .scaleEffect(isModalCategoryPickerPressed ? 0.97 : 1.0)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isModalCategoryPickerHovered = $0 }
+                    .pointingHandCursor()
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in isModalCategoryPickerPressed = true }
+                            .onEnded { _ in isModalCategoryPickerPressed = false }
+                    )
+                    .popover(isPresented: $isSnippetCategoryModalPickerPopoverPresented, arrowEdge: .bottom) {
+                        SnippetCategoryDropdownMenu(
+                            isFilterMode: false,
+                            categories: snippetCategories,
+                            selectedCategoryName: selectedCategoryName,
+                            snippets: snippetsList,
+                            currentTheme: currentTheme,
+                            currentFont: currentFont,
+                            language: currentLanguage,
+                            onSelectCategory: { name in
+                                newSnippetCategory = name
+                                showMissingCategoryWarning = false
+                                isSnippetCategoryModalPickerPopoverPresented = false
+                            },
+                            onCreateCategory: { name, icon in
+                                createNewSnippetCategory(name: name, icon: icon)
+                                newSnippetCategory = sanitizeCategoryNameInput(name).trimmingCharacters(in: .whitespacesAndNewlines)
+                                showMissingCategoryWarning = false
+                                isSnippetCategoryModalPickerPopoverPresented = false
+                            },
+                            onUpdateCategory: { id, name, icon in
+                                updateSnippetCategoryRecord(id: id, newName: name, newIcon: icon)
+                            },
+                            onDeleteCategoryRequest: { cat in
+                                isSnippetCategoryModalPickerPopoverPresented = false
+                                categoryPendingDelete = cat
+                            },
+                            onDismiss: {
+                                isSnippetCategoryModalPickerPopoverPresented = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(tr("Текст фрагмента", "Snippet text"))
+                        .font(currentFont.font(size: 11, weight: .medium))
+                        .foregroundStyle(currentTheme.secondaryText)
+
+                    if showEmptySnippetContentError {
+                        Text(tr("• Введите текст фрагмента", "• Enter snippet text"))
+                            .font(currentFont.font(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.red.opacity(0.90))
+                            .transition(.opacity)
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 8) {
+                        if let draftImage = snippetDraftImage {
+                            Image(nsImage: draftImage)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 28, height: 28)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                                )
+                                .overlay(alignment: .topTrailing) {
+                                    Button {
+                                        TapticSoundAndHaptics.shared.playClick()
+                                        snippetDraftImage = nil
+                                        snippetDraftImagePath = nil
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 7, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .frame(width: 14, height: 14)
+                                            .background(Circle().fill(Color.black.opacity(0.75)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .pointingHandCursor()
+                                    .offset(x: 4, y: -4)
+                                    .help(tr("Удалить фото", "Remove photo"))
+                                }
+                        }
+
+                        Button {
+                            TapticSoundAndHaptics.shared.playClick()
+                            chooseSnippetPhotoFromMac()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(tr("Выбрать фото...", "Choose photo..."))
+                                    .font(currentFont.font(size: 11, weight: .medium))
+                            }
+                            .foregroundStyle(currentTheme.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(currentTheme.accentColor.opacity(0.12))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(snippetDraftImage != nil)
+                        .opacity(snippetDraftImage != nil ? 0.45 : 1.0)
+                        .pointingHandCursor(snippetDraftImage == nil)
+                        .help(snippetDraftImage != nil
+                              ? tr("Удалите текущее фото, чтобы выбрать другое", "Remove current photo to choose another")
+                              : tr("Выбрать фото с Mac (максимум 1 фото на фрагмент)", "Choose a photo from your Mac (max 1 photo per snippet)"))
+                    }
+                }
+
+                SnippetInlineTextView(
+                    text: $newSnippetContent,
+                    controller: snippetEditorController,
+                    font: currentFont.nsFont(size: 12),
+                    textColor: NSColor(currentTheme.primaryText),
+                    onPasteImage: { pastedImage in
+                        guard self.snippetDraftImage == nil else {
+                            NSSound.beep()
+                            return
+                        }
+                        if let savedPath = DatabaseManager.saveSnippetImage(pastedImage) {
+                            self.snippetSessionCreatedImagePaths.append(savedPath)
+                            self.snippetDraftImage = pastedImage
+                            self.snippetDraftImagePath = savedPath
+                            self.showEmptySnippetContentError = false
+                        } else {
+                            NSSound.beep()
+                        }
+                    }
+                )
+                .frame(height: 140)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(currentTheme.isLight ? Color.white : currentTheme.primaryText.opacity(0.06))
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(showEmptySnippetContentError ? Color.red.opacity(0.85) : currentTheme.borderColor, lineWidth: showEmptySnippetContentError ? 1.5 : 1)
+                )
+                .onChange(of: newSnippetContent) { _, newVal in
+                    if showEmptySnippetContentError && !newVal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        showEmptySnippetContentError = false
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(tr("Доступные макросы:", "Available macros:"))
                         .font(currentFont.font(size: 10, weight: .medium))
                         .foregroundStyle(currentTheme.secondaryText)
 
-                    HStack(spacing: 6) {
-                        ForEach(["{{date}}", "{{time}}", "{{datetime}}", "{{clipboard}}"], id: \.self) { macro in
-                            Button {
-                                newSnippetContent.append(macro)
-                            } label: {
-                                Text(macro)
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3.5)
-                                    .foregroundStyle(currentTheme.accentColor)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                            .fill(currentTheme.accentColor.opacity(0.14))
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                            .strokeBorder(currentTheme.accentColor.opacity(0.35), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .help(tr("Вставить макрос \(macro)", "Insert macro \(macro)"))
+                    // Выпадающий селектор макросов в точном стиле «Категория»
+                    Button {
+                        TapticSoundAndHaptics.shared.playClick()
+                        isMacroDropdownOpen.toggle()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(currentTheme.accentColor)
+                            Text(tr("Выбрать макрос...", "Select macro..."))
+                                .font(currentFont.font(size: 12.5, weight: .medium))
+                                .foregroundStyle(currentTheme.primaryText)
+                            Spacer()
+                            Image(systemName: isMacroDropdownOpen ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(currentTheme.secondaryText)
                         }
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(isMacroPickerHovered ? currentTheme.accentColor.opacity(0.12) : (currentTheme.isLight ? Color.white : currentTheme.primaryText.opacity(0.06)))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(isMacroPickerHovered ? currentTheme.accentColor.opacity(0.6) : currentTheme.borderColor, lineWidth: 1)
+                        )
+                        .scaleEffect(isMacroPickerPressed ? 0.97 : 1.0)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isMacroPickerHovered = $0 }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in isMacroPickerPressed = true }
+                            .onEnded { _ in isMacroPickerPressed = false }
+                    )
+                    .pointingHandCursor()
+                    .popover(isPresented: $isMacroDropdownOpen, arrowEdge: .top) {
+                        VStack(spacing: 2) {
+                            ForEach(SnippetMacroEngine.macros) { m in
+                                SnippetMacroDropdownRow(
+                                    macro: m,
+                                    currentTheme: currentTheme,
+                                    currentFont: currentFont,
+                                    language: currentLanguage
+                                ) {
+                                    snippetEditorController.insertText(m.tag)
+                                    currentSelectedMacroToken = m.tag
+                                    if showEmptySnippetContentError {
+                                        showEmptySnippetContentError = false
+                                    }
+                                    isMacroDropdownOpen = false
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .frame(width: 340)
+                        .background(currentTheme.isLight ? Color.white : currentTheme.cardColor)
+                        .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
+                        .preferredColorScheme(currentTheme.isLight ? .light : .dark)
                     }
 
-                    if SearchHighlightHelper.containsSnippetMacro(newSnippetContent) {
-                        macroLivePreviewBanner
-                            .padding(.top, 4)
-                    }
+                    SnippetModalMacroDynamicBanner(
+                        content: newSnippetContent,
+                        selectedMacro: currentSelectedMacroToken,
+                        currentTheme: currentTheme,
+                        currentFont: currentFont,
+                        language: currentLanguage
+                    )
+                    .padding(.top, 4)
                 }
                 .padding(.top, 2)
             }
 
             HStack {
                 Button {
+                    let originalPath = editingSnippet?.imagePath
+                    for path in snippetSessionCreatedImagePaths where path != originalPath {
+                        DatabaseManager.deleteSnippetImageFileIfNeeded(path)
+                    }
+                    snippetSessionCreatedImagePaths.removeAll()
                     isAddingSnippet = false
                     editingSnippet = nil
                     newSnippetTitle = ""
                     newSnippetContent = ""
+                    snippetDraftImage = nil
+                    snippetDraftImagePath = nil
+                    isMacroDropdownOpen = false
+                    showEmptyTitleWarning = false
+                    showEmptySnippetContentError = false
+                    resetInlineCategoryDraftState()
+                    currentSelectedMacroToken = nil
+                    pendingSnippetSourceItemId = nil
                 } label: {
                     Text(tr("Отмена", "Cancel"))
                 }
                 .pvButton(variant: .secondary, size: .regular, theme: currentTheme)
+                .pointingHandCursor()
                 .keyboardShortcut(.cancelAction)
 
                 if isEditing, let editing = editingSnippet {
                     Button {
-                        snippetsList.removeAll { $0.id == editing.id }
-                        saveSnippets()
+                        deleteSingleSnippet(editing)
                         isAddingSnippet = false
                         editingSnippet = nil
                         newSnippetTitle = ""
                         newSnippetContent = ""
-                        TapticSoundAndHaptics.shared.performDialTick()
+                        snippetDraftImage = nil
+                        snippetDraftImagePath = nil
+                        isMacroDropdownOpen = false
+                        showEmptyTitleWarning = false
+                        showEmptySnippetContentError = false
+                        resetInlineCategoryDraftState()
+                        currentSelectedMacroToken = nil
+                        pendingSnippetSourceItemId = nil
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "trash")
@@ -5865,45 +7120,38 @@ public struct MainPanelView: View {
                         }
                     }
                     .pvButton(variant: .destructive, size: .regular, theme: currentTheme)
+                    .pointingHandCursor()
                     .help(tr("Удалить этот фрагмент", "Delete this snippet"))
                 }
 
                 Spacer()
 
                 Button {
-                    if !newSnippetTitle.isEmpty && !newSnippetContent.isEmpty {
-                        if let existing = editingSnippet, let idx = snippetsList.firstIndex(where: { $0.id == existing.id }) {
-                            snippetsList[idx].title = newSnippetTitle
-                            snippetsList[idx].category = newSnippetCategory
-                            snippetsList[idx].content = newSnippetContent
-                        } else {
-                            let item = QuickSnippetItem(
-                                title: newSnippetTitle,
-                                content: newSnippetContent,
-                                category: newSnippetCategory
-                            )
-                            snippetsList.insert(item, at: 0)
-                        }
-                        saveSnippets()
-                        newSnippetTitle = ""
-                        newSnippetContent = ""
-                        isAddingSnippet = false
-                        editingSnippet = nil
-                    }
+                    saveSnippetFromEditorModal()
                 } label: {
                     Text(tr("Сохранить", "Save"))
                 }
                 .pvButton(variant: .primary, size: .regular, theme: currentTheme)
-                .keyboardShortcut(.defaultAction)
+                .pointingHandCursor()
+                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(20)
         .frame(width: 440)
         .background(currentTheme.isLight ? Color.white : currentTheme.cardColor)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(currentTheme.borderColor, lineWidth: 1)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isMacroDropdownOpen {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isMacroDropdownOpen = false
+                }
+            }
+        }
         .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
         .preferredColorScheme(currentTheme.isLight ? .light : .dark)
     }
@@ -6013,12 +7261,21 @@ public struct MainPanelView: View {
                                     .onChange(of: passIncludeUppercase) { _, _ in generatePass() }
                             }
                         }
+
+                        let configuredTTL = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
+                        Toggle(
+                            tr("Автоудаление секрета из буфера и истории (\(configuredTTL) сек)", "Auto-purge secret from clipboard & history (\(configuredTTL)s)"),
+                            isOn: $passAutoPurgeEnabled
+                        )
+                        .font(currentFont.font(size: 12, weight: .regular))
+                        .foregroundStyle(currentTheme.primaryText)
                     }
 
                     HStack(spacing: 12) {
                         Button {
-                            _ = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: nil)
-                            instantCopyAndPaste(text: passGeneratedSecret, ttl: nil)
+                            let ttl = effectivePassTTLSeconds
+                            let itemId = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: ttl)
+                            instantCopyAndPaste(text: passGeneratedSecret, ttl: ttl, destructKey: itemId.isEmpty ? nil : itemId)
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "bolt.fill")
@@ -6030,7 +7287,7 @@ public struct MainPanelView: View {
                         .pvButton(variant: .primary, size: .regular, theme: currentTheme)
 
                         Button {
-                            _ = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: nil)
+                            _ = monitor.recordGeneratedPassword(passGeneratedSecret, ttlSeconds: effectivePassTTLSeconds)
                             passCopiedNotification = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                                 passCopiedNotification = false
@@ -6164,6 +7421,16 @@ public struct MainPanelView: View {
                             Text(tr("Новая версия", "New Version"))
                                 .font(currentFont.font(size: 11.5, weight: .semibold))
                                 .foregroundStyle(Color.orange)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+                        } else if case .privateOrOffline = updateService.state {
+                            Image(systemName: "wifi.exclamationmark")
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(currentTheme.secondaryText)
+                            Text(tr("Не удалось проверить", "Check Unavailable"))
+                                .font(currentFont.font(size: 11.5, weight: .medium))
+                                .foregroundStyle(currentTheme.secondaryText)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.82)
                         } else {
@@ -6588,12 +7855,6 @@ public struct MainPanelView: View {
             .padding(6)
             .frame(minWidth: 280)
             .background(currentTheme.cardColor)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 3)
             .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
         }
     }
@@ -6874,6 +8135,7 @@ public struct MainPanelView: View {
                 isHovered = hovering
                 if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
             }
+            .pointingHandCursor()
         }
     }
 
@@ -6985,12 +8247,6 @@ public struct MainPanelView: View {
                             .padding(6)
                             .frame(minWidth: 240)
                             .background(currentTheme.cardColor)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-                            )
-                            .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 3)
                             .environment(\.colorScheme, currentTheme.isLight ? .light : .dark)
                         }
 
@@ -7064,8 +8320,8 @@ public struct MainPanelView: View {
         return Button {
             TapticSoundAndHaptics.shared.performDialTick()
             selectedThemeId = theme.rawValue
-            UserDefaults.standard.set(theme.rawValue, forKey: "selectedThemeId")
-            UserDefaults.standard.set(theme.rawValue, forKey: "pasteVaultTheme")
+            AppDefaults.shared.set(theme.rawValue, forKey: "selectedThemeId")
+            AppDefaults.shared.set(theme.rawValue, forKey: "pasteVaultTheme")
             NSApp.windows.first(where: { $0 is NSPanel })?.appearance = NSAppearance(named: theme.isLight ? .aqua : .darkAqua)
         } label: {
             VStack(spacing: 5) {
@@ -7180,6 +8436,7 @@ public struct MainPanelView: View {
         panel.level = targetLevel
 
         let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
+            ClipboardMonitor.shared.isShowingFilePanel = false
             ClipboardMonitor.shared.isModalOverlayActive = false
             hostWindow.makeKeyAndOrderFront(nil)
             if response == .OK, let selectedURL = panel.url {
@@ -7421,6 +8678,7 @@ public struct MainPanelView: View {
                 }
             }
             .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+            .pointingHandCursor()
             .keyboardShortcut("q", modifiers: [.command])
             .help(tr("Полностью закрыть PasteVault (⌘Q)", "Quit PasteVault completely (⌘Q)"))
         }
@@ -7671,13 +8929,591 @@ public struct MainPanelView: View {
         .help(tr("Выбрать и скопировать формат \(format)", "Select and copy \(format) format"))
     }
 
+    public static func localizedCategoryDisplayName(_ rawName: String, isEnglish: Bool) -> String {
+        switch rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "работа", "work":
+            return isEnglish ? "Work" : "Работа"
+        case "разработка", "код", "dev", "development":
+            return isEnglish ? "Dev" : "Разработка"
+        case "шаблоны", "templates":
+            return isEnglish ? "Templates" : "Шаблоны"
+        case "промпты", "prompts":
+            return isEnglish ? "Prompts" : "Промпты"
+        case "все категории", "all categories":
+            return isEnglish ? "All Categories" : "Все категории"
+        case "контакты", "поддержка", "support":
+            return isEnglish ? "Support" : "Поддержка"
+        default:
+            return rawName
+        }
+    }
+
     public static func localizedSnippetCategory(_ category: String, lang: AppLanguage = .ru) -> String {
-        switch category {
-        case "Разработка", "Dev": return PasteVault.tr("Разработка", "Dev", lang: lang)
-        case "Работа", "Work": return PasteVault.tr("Работа", "Work", lang: lang)
-        case "Контакты", "Поддержка", "Support": return PasteVault.tr("Поддержка", "Support", lang: lang)
-        case "Шаблоны", "Templates": return PasteVault.tr("Шаблоны", "Templates", lang: lang)
-        default: return category
+        localizedCategoryDisplayName(category, isEnglish: lang == .en)
+    }
+
+    // MARK: - Snippets 2.0 Auto Title & Helpers
+
+    public static func cleanAutoTitle(from text: String, lang: AppLanguage = AppLanguage.current) -> String {
+        let fallbackTitle = PasteVault.tr("Фрагмент", "Snippet", lang: lang)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallbackTitle }
+
+        // Если это URL
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://"), let url = URL(string: trimmed) {
+            let host = url.host ?? ""
+            let lastPath = url.lastPathComponent
+            if !lastPath.isEmpty && lastPath != "/" {
+                return "\(host)/\(lastPath)"
+            } else if !host.isEmpty {
+                return host
+            }
+        }
+
+        // Построчный поиск первой содержательной строки
+        let lines = trimmed.components(separatedBy: .newlines)
+        var firstValidLine = ""
+        for rawLine in lines {
+            var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+
+            // Убираем ведущие символы разметки и комментариев
+            while let first = line.first, "#/*->;[]".contains(first) || line.hasPrefix("//") || line.hasPrefix("/*") {
+                if line.hasPrefix("//") {
+                    line = String(line.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                } else if line.hasPrefix("/*") {
+                    line = String(line.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    line = String(line.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+
+            if line.count >= 2 {
+                firstValidLine = line
+                break
+            }
+        }
+
+        if firstValidLine.isEmpty {
+            firstValidLine = lines.first ?? fallbackTitle
+        }
+
+        // Разбиваем на слова
+        let rawWords = firstValidLine.split(whereSeparator: { $0.isWhitespace })
+        if rawWords.isEmpty { return fallbackTitle }
+
+        // До 5-6 слов
+        var selectedWords = Array(rawWords.prefix(6)).map { String($0) }
+
+        // Список висячих предлогов и союзов для удаления с конца (RU & EN)
+        let trailingStops: Set<String> = [
+            "и", "в", "во", "на", "с", "со", "к", "ко", "о", "об", "от", "до", "по", "за", "из", "у", "а", "но", "или",
+            "для", "при", "без", "под", "над", "про",
+            "the", "a", "an", "and", "or", "in", "on", "of", "to", "for", "with"
+        ]
+
+        // Обрезаем по длине до ~42 символов
+        while selectedWords.count > 1 && selectedWords.joined(separator: " ").count > 42 {
+            selectedWords.removeLast()
+        }
+
+        // Убираем висящие союзы/предлоги с конца
+        while selectedWords.count > 1, let lastWord = selectedWords.last {
+            let cleanedLast = lastWord.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.whitespaces))
+            if trailingStops.contains(cleanedLast.lowercased()) {
+                selectedWords.removeLast()
+            } else {
+                break
+            }
+        }
+
+        var result = selectedWords.joined(separator: " ")
+        let punctuationToTrim = CharacterSet(charactersIn: ".,:;-—!?;#*/\\_")
+        result = result.trimmingCharacters(in: punctuationToTrim).trimmingCharacters(in: .whitespaces)
+
+        return result.isEmpty ? fallbackTitle : result
+    }
+
+    public nonisolated static func isCategoryEquivalent(_ cat1: String, _ cat2: String) -> Bool {
+        if cat1.localizedCaseInsensitiveCompare(cat2) == .orderedSame { return true }
+        let c1 = cat1.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let c2 = cat2.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if (c1 == "шаблоны" || c1 == "templates") && (c2 == "шаблоны" || c2 == "templates") { return true }
+        if (c1 == "разработка" || c1 == "dev" || c1 == "код") && (c2 == "разработка" || c2 == "dev" || c2 == "код") { return true }
+        if (c1 == "работа" || c1 == "work") && (c2 == "работа" || c2 == "work") { return true }
+        if (c1 == "промпты" || c1 == "prompts") && (c2 == "промпты" || c2 == "prompts") { return true }
+        if (c1 == "поддержка" || c1 == "support" || c1 == "контакты" || c1 == "contacts") && (c2 == "поддержка" || c2 == "support" || c2 == "контакты" || c2 == "contacts") { return true }
+        return false
+    }
+
+    private func categoryIcon(for categoryName: String) -> String {
+        let trimmed = categoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = snippetCategories.first(where: {
+            $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame ||
+            Self.isCategoryEquivalent($0.name, trimmed)
+        }) {
+            return match.iconName
+        }
+        return "doc.text.fill"
+    }
+
+    private func loadSnippetCategories() {
+        Task {
+            let cats = await DatabaseManager.shared.fetchSnippetCategories()
+            await MainActor.run {
+                self.snippetCategories = cats
+                if self.newSnippetCategory.isEmpty, let first = cats.first {
+                    self.newSnippetCategory = first.name
+                }
+            }
+        }
+    }
+
+    private func saveSnippetFromEditorModal() {
+        let trimmedTitle = newSnippetTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContent = SnippetInlineContent.plainText(of: newSnippetContent).trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasImage = (snippetDraftImage != nil || snippetDraftImagePath != nil)
+        var hasError = false
+        if trimmedTitle.isEmpty {
+            showEmptyTitleWarning = true
+            isSnippetTitleFocused = true
+            hasError = true
+        }
+        if trimmedContent.isEmpty && !hasImage {
+            showEmptySnippetContentError = true
+            hasError = true
+        }
+
+        // Разрешение категории: реальная выбранная категория ИЛИ автосоздание из поля «Новая категория»
+        let sanitizedInlineCat = sanitizeCategoryNameInput(inlineNewCategoryName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+        let existingSelectedCat = snippetCategories.first(where: {
+            $0.name.localizedCaseInsensitiveCompare(newSnippetCategory) == .orderedSame
+        })
+        var resolvedCategoryName: String = existingSelectedCat?.name ?? ""
+        var categoryToAutoCreate: (name: String, icon: String)? = nil
+
+        if resolvedCategoryName.isEmpty || snippetCategories.isEmpty {
+            if !sanitizedInlineCat.isEmpty {
+                let inlineKey = SnippetCategoryValidator.normalizedKey(sanitizedInlineCat)
+                if let existingByInline = snippetCategories.first(where: {
+                    SnippetCategoryValidator.normalizedKey($0.name) == inlineKey
+                }) {
+                    resolvedCategoryName = existingByInline.name
+                    newSnippetCategory = existingByInline.name
+                } else {
+                    let validation = SnippetCategoryValidator.validateCandidate(
+                        sanitizedInlineCat,
+                        existingCategories: snippetCategories
+                    )
+                    if validation.isValid {
+                        resolvedCategoryName = sanitizedInlineCat
+                        newSnippetCategory = sanitizedInlineCat
+                        categoryToAutoCreate = (name: sanitizedInlineCat, icon: inlineNewCategoryIcon)
+                    } else {
+                        showMissingCategoryWarning = true
+                        isInlineNewCategoryFocused = true
+                        triggerCategoryShake()
+                        hasError = true
+                    }
+                }
+            } else if let firstCat = snippetCategories.first {
+                resolvedCategoryName = firstCat.name
+                newSnippetCategory = firstCat.name
+            } else {
+                showMissingCategoryWarning = true
+                isInlineNewCategoryFocused = true
+                triggerCategoryShake()
+                hasError = true
+            }
+        }
+
+        if hasError {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            NSSound.beep()
+            return
+        }
+
+        showEmptyTitleWarning = false
+        showEmptySnippetContentError = false
+        showMissingCategoryWarning = false
+
+        // Сохраняем raw-контент 1:1 без автозамены макросов и без маркеров [[img:...]]
+        let finalContent = trimmedContent
+        let finalImagePath: String? = snippetDraftImagePath
+        let finalCategory = resolvedCategoryName
+
+        var savedId: String? = nil
+        var changedItemForDB: QuickSnippetItem? = nil
+        let isCreatingNew = (editingSnippet == nil)
+        if let existing = editingSnippet, let idx = snippetsList.firstIndex(where: { $0.id == existing.id }) {
+            if let oldPath = existing.imagePath, oldPath != finalImagePath {
+                DatabaseManager.deleteSnippetImageFileIfNeeded(oldPath)
+            }
+            snippetsList[idx].title = trimmedTitle
+            snippetsList[idx].category = finalCategory
+            snippetsList[idx].content = finalContent
+            snippetsList[idx].imagePath = finalImagePath
+            savedId = snippetsList[idx].id
+            changedItemForDB = snippetsList[idx]
+        } else {
+            let item = QuickSnippetItem(
+                title: trimmedTitle,
+                content: finalContent,
+                category: finalCategory,
+                imagePath: finalImagePath
+            )
+            snippetsList.insert(item, at: 0)
+            savedId = item.id
+            changedItemForDB = item
+            refreshPinnedSortSnapshot()
+        }
+        for path in snippetSessionCreatedImagePaths where path != finalImagePath {
+            DatabaseManager.deleteSnippetImageFileIfNeeded(path)
+        }
+        snippetSessionCreatedImagePaths.removeAll()
+
+        if let autoCat = categoryToAutoCreate {
+            if let encoded = try? JSONEncoder().encode(snippetsList) {
+                AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+            }
+            let itemToPersist = changedItemForDB
+            Task {
+                if let created = await DatabaseManager.shared.createSnippetCategory(name: autoCat.name, iconName: autoCat.icon) {
+                    await MainActor.run {
+                        if !self.snippetCategories.contains(where: { $0.id == created.id }) {
+                            self.snippetCategories.append(created)
+                            self.snippetCategories.sort { $0.sortOrder < $1.sortOrder }
+                        }
+                        self.newSnippetCategory = created.name
+                    }
+                }
+                if let item = itemToPersist {
+                    _ = await DatabaseManager.shared.insertSnippet(
+                        id: item.id,
+                        title: item.title,
+                        content: item.content,
+                        category: item.category,
+                        isPinned: item.isPinned,
+                        imagePath: item.imagePath,
+                        useCount: item.useCount,
+                        createdAt: item.createdAt
+                    )
+                }
+            }
+        } else {
+            saveSnippets(changedSnippet: changedItemForDB)
+        }
+
+        snippetsSearch = ""
+        if let savedId {
+            selectedSnippetId = savedId
+            if isCreatingNew {
+                activeSnippetIndex = snippetsFilteredList.firstIndex(where: { $0.id == savedId }) ?? 0
+            }
+        }
+
+        if let sourceId = pendingSnippetSourceItemId {
+            snippetCreatedToastItemId = sourceId
+            pendingSnippetSourceItemId = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if snippetCreatedToastItemId == sourceId {
+                    snippetCreatedToastItemId = nil
+                }
+            }
+        }
+
+        newSnippetTitle = ""
+        newSnippetContent = ""
+        snippetDraftImage = nil
+        snippetDraftImagePath = nil
+        isMacroDropdownOpen = false
+        showEmptyTitleWarning = false
+        showEmptySnippetContentError = false
+        resetInlineCategoryDraftState()
+        currentSelectedMacroToken = nil
+        isAddingSnippet = false
+        editingSnippet = nil
+    }
+
+    private func createNewSnippetCategory(name: String, icon: String) {
+        let validName = sanitizeCategoryNameInput(name)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+        let validation = SnippetCategoryValidator.validateCandidate(
+            validName,
+            existingCategories: snippetCategories
+        )
+        guard validation.isValid else {
+            return
+        }
+        Task {
+            if let created = await DatabaseManager.shared.createSnippetCategory(name: validName, iconName: icon) {
+                await MainActor.run {
+                    if !self.snippetCategories.contains(where: { $0.id == created.id }) {
+                        self.snippetCategories.append(created)
+                        self.snippetCategories.sort { $0.sortOrder < $1.sortOrder }
+                    }
+                }
+            }
+        }
+    }
+
+    private func resetInlineCategoryDraftState() {
+        inlineNewCategoryName = ""
+        inlineNewCategoryIcon = "folder.fill"
+        isInlineCategoryIconPickerOpen = false
+        showMissingCategoryWarning = false
+        categoryShakeOffset = 0
+    }
+
+    private func commitInlineNewCategory() {
+        let validName = sanitizeCategoryNameInput(inlineNewCategoryName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+        let validation = SnippetCategoryValidator.validateCandidate(
+            validName,
+            existingCategories: snippetCategories
+        )
+        guard validation.isValid else {
+            showMissingCategoryWarning = true
+            isInlineNewCategoryFocused = true
+            triggerCategoryShake()
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            NSSound.beep()
+            return
+        }
+        TapticSoundAndHaptics.shared.playClick()
+        showMissingCategoryWarning = false
+        createNewSnippetCategory(name: validName, icon: inlineNewCategoryIcon)
+        newSnippetCategory = validName
+        inlineNewCategoryName = ""
+        isInlineCategoryIconPickerOpen = false
+    }
+
+    private func triggerCategoryShake() {
+        let offsets: [(CGFloat, TimeInterval)] = [(6, 0.0), (-6, 0.05), (4, 0.10), (-4, 0.15), (0, 0.20)]
+        for (value, delay) in offsets {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                withAnimation(.linear(duration: 0.04)) {
+                    categoryShakeOffset = value
+                }
+            }
+        }
+    }
+
+    private func updateSnippetCategoryRecord(id: UUID, newName: String, newIcon: String) {
+        let oldCategory = self.snippetCategories.first(where: { $0.id == id })
+        let oldName = oldCategory?.name
+        let validName = sanitizeCategoryNameInput(newName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+        let validation = SnippetCategoryValidator.validateCandidate(
+            validName,
+            existingCategories: snippetCategories,
+            excludingCategoryId: id
+        )
+        guard validation.isValid else {
+            return
+        }
+        Task {
+            try? await DatabaseManager.shared.updateSnippetCategory(id: id, newName: validName, newIconName: newIcon)
+            let cats = await DatabaseManager.shared.fetchSnippetCategories()
+            let freshSnippets = await DatabaseManager.shared.fetchSnippets()
+            await MainActor.run {
+                self.snippetCategories = cats
+                self.snippetsList = freshSnippets
+                if let encoded = try? JSONEncoder().encode(freshSnippets) {
+                    AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+                }
+                if let oldName {
+                    if self.selectedSnippetCategory.localizedCaseInsensitiveCompare(oldName) == .orderedSame {
+                        self.selectedSnippetCategory = validName
+                    }
+                    if self.newSnippetCategory.localizedCaseInsensitiveCompare(oldName) == .orderedSame {
+                        self.newSnippetCategory = validName
+                    }
+                }
+            }
+        }
+    }
+
+    private func closeSnippetEditorModalAndCleanup() {
+        let originalPath = editingSnippet?.imagePath
+        for path in snippetSessionCreatedImagePaths where path != originalPath {
+            DatabaseManager.deleteSnippetImageFileIfNeeded(path)
+        }
+        snippetSessionCreatedImagePaths.removeAll()
+        isAddingSnippet = false
+        editingSnippet = nil
+        newSnippetTitle = ""
+        newSnippetContent = ""
+        snippetDraftImage = nil
+        snippetDraftImagePath = nil
+        isMacroDropdownOpen = false
+        showEmptyTitleWarning = false
+        showEmptySnippetContentError = false
+        resetInlineCategoryDraftState()
+        currentSelectedMacroToken = nil
+        pendingSnippetSourceItemId = nil
+    }
+
+    private func deleteCategoryConfirmed(_ category: SnippetCategoryRecord) {
+        categoryPendingDelete = nil
+        let targetCanonical = category.name.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.snippetsList.removeAll {
+            $0.category.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == targetCanonical
+        }
+        if let encoded = try? JSONEncoder().encode(self.snippetsList) {
+            AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+        }
+        if self.selectedSnippetCategory.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == targetCanonical {
+            self.selectedSnippetCategory = "Все"
+        }
+        if let editing = self.editingSnippet,
+           editing.category.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == targetCanonical {
+            self.closeSnippetEditorModalAndCleanup()
+        } else if (self.isAddingSnippet || self.editingSnippet != nil),
+                  self.newSnippetCategory.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == targetCanonical {
+            self.newSnippetCategory = self.snippetCategories.first(where: { $0.id != category.id })?.name ?? ""
+        }
+        self.activeSnippetIndex = 0
+        self.selectedSnippetId = self.snippetsFilteredList.first?.id
+
+        Task {
+            try? await DatabaseManager.shared.deleteSnippetCategoryAndSnippets(id: category.id)
+            await DatabaseManager.shared.cleanupOrphanedSnippets()
+            let cats = await DatabaseManager.shared.fetchSnippetCategories()
+            let freshSnippets = await DatabaseManager.shared.fetchSnippets()
+            await MainActor.run {
+                self.categoryPendingDelete = nil
+                self.snippetCategories = cats
+                self.snippetsList = freshSnippets
+                if let encoded = try? JSONEncoder().encode(freshSnippets) {
+                    AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+                }
+                if self.selectedSnippetCategory.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == targetCanonical {
+                    self.selectedSnippetCategory = "Все"
+                }
+                if self.isAddingSnippet && !cats.contains(where: { $0.name.caseInsensitiveCompare(self.newSnippetCategory) == .orderedSame }) {
+                    self.newSnippetCategory = cats.first?.name ?? ""
+                }
+                self.activeSnippetIndex = 0
+                self.selectedSnippetId = self.snippetsFilteredList.first?.id
+            }
+        }
+    }
+
+    private func deleteSingleSnippet(_ snippet: QuickSnippetItem) {
+        snippetsList.removeAll { $0.id == snippet.id }
+        saveSnippets()
+        refreshPinnedSortSnapshot()
+        if selectedSnippetId == snippet.id {
+            selectedSnippetId = snippetsList.first?.id
+        }
+        Task {
+            try? await DatabaseManager.shared.deleteSnippet(idString: snippet.id)
+        }
+    }
+
+    private func createSnippetFromClipboardItem(_ item: ClipboardItemRow) {
+        editingSnippet = nil
+        newSnippetTitle = ""
+        currentSelectedMacroToken = nil
+        showEmptyTitleWarning = false
+        showEmptySnippetContentError = false
+        isMacroDropdownOpen = false
+
+        snippetDraftImage = nil
+        snippetDraftImagePath = nil
+        if item.effectiveContentType == .image || item.contentType == .image {
+            // Картинка из карточки буфера сразу прикрепляется как макет (28×28), текстовое поле остаётся чистым
+            var sourceImage: NSImage? = nil
+            if let img = monitor.imagePreviews[item.id] {
+                sourceImage = img
+            } else if let rawData = item.rawImageData, let img = NSImage(data: rawData) {
+                sourceImage = img
+            } else if let path = item.fileURLPath, let img = NSImage(contentsOfFile: path) {
+                sourceImage = img
+            }
+            if let sourceImage, let savedPath = DatabaseManager.saveSnippetImage(sourceImage) {
+                snippetDraftImage = sourceImage
+                snippetDraftImagePath = savedPath
+            }
+            newSnippetContent = ""
+        } else {
+            newSnippetContent = item.textPreview
+        }
+
+        var categoryName = snippetCategories.first?.name ?? ""
+        if item.effectiveContentType == .code || item.contentType == .code {
+            if let devCat = snippetCategories.first(where: { $0.name == "Разработка" || $0.iconName == "chevron.left.forwardslash.chevron.right" }) {
+                categoryName = devCat.name
+            }
+        }
+
+        newSnippetCategory = categoryName
+        isAddingSnippet = true
+        isSnippetTitleFocused = true
+
+        Task {
+            let cats = await DatabaseManager.shared.fetchSnippetCategories()
+            await MainActor.run {
+                self.snippetCategories = cats
+                if cats.isEmpty {
+                    self.newSnippetCategory = ""
+                } else if !cats.contains(where: { $0.name == self.newSnippetCategory }) {
+                    self.newSnippetCategory = cats.first?.name ?? ""
+                }
+            }
+        }
+    }
+
+    /// Открывает системный NSOpenPanel для выбора фото с Mac и прикрепляет его к фрагменту (без runModal)
+    private func chooseSnippetPhotoFromMac() {
+        ClipboardMonitor.shared.isShowingFilePanel = true
+        isMacroDropdownOpen = false
+        NSApp.activate()
+
+        let openPanel = NSOpenPanel()
+        openPanel.title = tr("Выбрать фото", "Choose Photo")
+        openPanel.prompt = tr("Выбрать", "Choose")
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.allowedContentTypes = [.image, .png, .jpeg, .heic, .tiff, .gif, .webP]
+        openPanel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
+
+        let hostWindow = NSApp.windows.first(where: {
+            $0.isVisible && ($0.className.contains("FloatingPanel") || $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue)
+        })
+
+        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
+            ClipboardMonitor.shared.isShowingFilePanel = false
+            hostWindow?.makeKeyAndOrderFront(nil)
+            guard response == .OK, let url = openPanel.url else { return }
+            Task.detached(priority: .userInitiated) {
+                let image = NSImage(contentsOf: url)
+                let savedPath = image.flatMap { DatabaseManager.saveSnippetImage($0) }
+                await MainActor.run {
+                    if let image, let savedPath {
+                        self.snippetSessionCreatedImagePaths.append(savedPath)
+                        self.snippetDraftImage = image
+                        self.snippetDraftImagePath = savedPath
+                        self.showEmptySnippetContentError = false
+                    } else {
+                        NSSound.beep()
+                    }
+                }
+            }
+        }
+
+        if let hostWindow, hostWindow.attachedSheet == nil {
+            openPanel.beginSheetModal(for: hostWindow, completionHandler: handleResponse)
+        } else {
+            openPanel.begin(completionHandler: handleResponse)
+            openPanel.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -7685,6 +9521,10 @@ public struct MainPanelView: View {
         switch title {
         case "Рабочая подпись": return PasteVault.tr("Рабочая подпись", "Work Signature", lang: lang)
         case "Приветствие техподдержки": return PasteVault.tr("Приветствие техподдержки", "Support Greeting", lang: lang)
+        case "Ежедневный статус-отчёт": return PasteVault.tr("Ежедневный статус-отчёт", "Daily Standup Report", lang: lang)
+        case "Шаблон Pull Request": return PasteVault.tr("Шаблон Pull Request", "Pull Request Template", lang: lang)
+        case "Деловой ответ клиенту": return PasteVault.tr("Деловой ответ клиенту", "Client Business Reply", lang: lang)
+        case "Ревью кода и архитектуры": return PasteVault.tr("Ревью кода и архитектуры", "Code & Architecture Review", lang: lang)
         default: return title
         }
     }
@@ -7700,6 +9540,58 @@ public struct MainPanelView: View {
             return PasteVault.tr(
                 "Здравствуйте! Спасибо за обращение. Мы уже изучаем ваш вопрос и вернемся с ответом в ближайшее время.",
                 "Hello! Thank you for reaching out. We are reviewing your request and will get back to you shortly.",
+                lang: lang
+            )
+        } else if content.contains("Статус по задачам ({{date}}):") {
+            return PasteVault.tr(
+                content,
+                """
+                📋 Daily Status ({{date}}):
+                • Completed today:
+                • In progress:
+                • Blockers / questions:
+
+                Updated at {{time}}.
+                """,
+                lang: lang
+            )
+        } else if content.contains("## Что сделано ({{iso}})") {
+            return PasteVault.tr(
+                content,
+                """
+                ## What was done ({{iso}})
+                - Describe key changes
+
+                ## How it was tested
+                - [ ] `swift test` passed
+                - [ ] Verified locally in {{app}}
+                """,
+                lang: lang
+            )
+        } else if content.contains("Благодарим за обращение ({{date}}). Ваш запрос принят в работу") {
+            return PasteVault.tr(
+                content,
+                """
+                Hello!
+
+                Thank you for reaching out ({{date}}). Your request has been received and assigned to a specialist.
+                We will follow up with you shortly.
+
+                Best regards,
+                {{user}}
+                """,
+                lang: lang
+            )
+        } else if content.contains("Ты — ведущий инженер macOS / Swift.") {
+            return PasteVault.tr(
+                content,
+                """
+                You are a senior macOS / Swift engineer.
+                Review the snippet below ({{date}}):
+                1. Thread safety and memory management.
+                2. Edge cases and readability.
+                3. Concrete actionable improvements.
+                """,
                 lang: lang
             )
         }
@@ -7718,34 +9610,129 @@ public struct MainPanelView: View {
         Self.localizedSnippetContent(content, lang: currentLanguage)
     }
 
-    private func expandSnippetMacros(_ text: String) -> String {
-        guard text.contains("{{") else { return text }
-        let now = Date()
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "dd.MM.yyyy"
-        let dateStr = dateFormatter.string(from: now)
-
-        let timeFormatter = DateFormatter()
-        timeFormatter.dateFormat = "HH:mm"
-        let timeStr = timeFormatter.string(from: now)
-
-        let dateTimeFormatter = DateFormatter()
-        dateTimeFormatter.dateFormat = "dd.MM.yyyy HH:mm"
-        let dateTimeStr = dateTimeFormatter.string(from: now)
-
-        let clipboardStr = NSPasteboard.general.string(forType: .string) ?? ""
-
-        var expanded = text
-        expanded = expanded.replacingOccurrences(of: "{{date}}", with: dateStr)
-        expanded = expanded.replacingOccurrences(of: "{{time}}", with: timeStr)
-        expanded = expanded.replacingOccurrences(of: "{{datetime}}", with: dateTimeStr)
-        expanded = expanded.replacingOccurrences(of: "{{clipboard}}", with: clipboardStr)
-        return expanded
-    }
-
     private func prepareSnippetForAction(_ snippet: QuickSnippetItem) -> String {
         let localized = localizedSnippetContent(snippet.content)
-        return expandSnippetMacros(localized)
+        return SnippetMacroEngine.expand(localized, targetAppName: monitor.targetAppName)
+    }
+
+    private enum SnippetPasteStep {
+        case text(String)
+        case image(NSImage)
+    }
+
+    /// Раскрывает все макросы (где {{uuid}} — полный 36-символьный UUID), убирает любые маркеры [[img:...]]
+    /// и возвращает шаги для копирования/вставки текста и картинки фрагмента.
+    private func snippetPasteSteps(_ snippet: QuickSnippetItem) -> [SnippetPasteStep] {
+        let localized = localizedSnippetContent(snippet.content)
+        let cleanRaw = SnippetInlineContent.plainText(of: localized).trimmingCharacters(in: .whitespacesAndNewlines)
+        var steps: [SnippetPasteStep] = []
+        if !cleanRaw.isEmpty {
+            let expanded = SnippetMacroEngine.expand(cleanRaw, targetAppName: monitor.targetAppName)
+            steps.append(.text(expanded))
+        }
+        let resolvedImagePath = snippet.imagePath ?? SnippetInlineContent.imageNames(in: localized).first.flatMap { SnippetInlineContent.fullPath(forName: $0) }
+        if let path = resolvedImagePath, let img = SnippetInlineContent.image(forName: path) {
+            steps.append(.image(img))
+        }
+        return steps
+    }
+
+    private func incrementSnippetUseCount(_ snippet: QuickSnippetItem) {
+        if let idx = snippetsList.firstIndex(where: { $0.id == snippet.id }) {
+            snippetsList[idx].useCount += 1
+            if let encoded = try? JSONEncoder().encode(snippetsList) {
+                AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+            }
+        }
+        let snippetId = snippet.id
+        Task {
+            await DatabaseManager.shared.incrementSnippetUseCount(idString: snippetId)
+        }
+    }
+
+    private func writeSnippetImage(_ image: NSImage, to pb: NSPasteboard) {
+        guard let tiff = image.tiffRepresentation else { return }
+        pb.setData(tiff, forType: .tiff)
+        if let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            pb.setData(png, forType: .png)
+        }
+    }
+
+    private func copySnippetAction(_ snippet: QuickSnippetItem) {
+        incrementSnippetUseCount(snippet)
+        let steps = snippetPasteSteps(snippet)
+        let texts: [String] = steps.compactMap { if case .text(let t) = $0 { return t } else { return nil } }
+        let firstImage: NSImage? = steps.compactMap { if case .image(let i) = $0 { return i } else { return nil } }.first
+        let joinedText = texts.joined(separator: "\n")
+
+        if let firstImage {
+            let pb = monitor.pasteboard
+            pb.clearContents()
+            if !joinedText.isEmpty {
+                pb.setString(joinedText, forType: .string)
+            }
+            writeSnippetImage(firstImage, to: pb)
+            monitor.ignoreNextChange()
+        } else {
+            monitor.copyToPasteboardImmediately(text: joinedText)
+        }
+    }
+
+    private func pasteSnippetAction(_ snippet: QuickSnippetItem) {
+        dismissFocusAndPrepareForPaste()
+        guard monitor.checkAccessibilityPermission() else {
+            pastedSnippetToastId = nil
+            pasteFailedSnippetId = snippet.id
+            monitor.triggerAccessibilityAlertPulse()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                if self.pasteFailedSnippetId == snippet.id {
+                    self.pasteFailedSnippetId = nil
+                }
+            }
+            return
+        }
+
+        incrementSnippetUseCount(snippet)
+        let steps = snippetPasteSteps(snippet)
+        let hasImage = steps.contains { if case .image = $0 { return true } else { return false } }
+
+        if !hasImage {
+            // Только текст (все макросы раскрыты, маркеры удалены)
+            let joined = steps.compactMap { step -> String? in
+                if case .text(let t) = step { return t } else { return nil }
+            }.joined(separator: "\n")
+            instantCopyAndPaste(text: joined)
+        } else {
+            // Картинки и текст вставляются по очереди, строго в порядке из редактора
+            runSnippetPasteSteps(steps, index: 0)
+        }
+    }
+
+    private func runSnippetPasteSteps(_ steps: [SnippetPasteStep], index: Int) {
+        let monitor = self.monitor
+        guard index < steps.count else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                monitor.isPerformingAutoPaste = false
+            }
+            return
+        }
+        monitor.isPerformingAutoPaste = true
+        let pb = monitor.pasteboard
+        pb.clearContents()
+        var delay = 0.15
+        switch steps[index] {
+        case .text(let t):
+            pb.setString(t, forType: .string)
+        case .image(let img):
+            writeSnippetImage(img, to: pb)
+            delay = 0.25
+        }
+        monitor.ignoreNextChange()
+        monitor.postPasteEvent()
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            self.runSnippetPasteSteps(steps, index: index + 1)
+        }
     }
 
     private func dismissFocusAndPrepareForPaste() {
@@ -7758,24 +9745,31 @@ public struct MainPanelView: View {
         }
     }
 
-    private func instantCopyAndPaste(text: String, ttl: TimeInterval? = nil) {
+    private func instantCopyAndPaste(text: String, ttl: TimeInterval? = nil, destructKey: String? = nil) {
         dismissFocusAndPrepareForPaste()
-        if monitor.checkAccessibilityPermission() {
-            isPasteBlockedToastVisible = false
-        }
-        monitor.pasteIntoTargetApp(text: text, selfDestructAfterSeconds: ttl)
+        _ = monitor.checkAccessibilityPermission()
+        monitor.pasteIntoTargetApp(text: text, selfDestructAfterSeconds: ttl, destructKey: destructKey)
     }
 
     private func pasteItem(_ item: ClipboardItemRow) {
         dismissFocusAndPrepareForPaste()
         if monitor.checkAccessibilityPermission() {
-            isPasteBlockedToastVisible = false
-        }
-        lastPastedItemId = item.id
-        pastedItemToastId = item.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if self.pastedItemToastId == item.id {
-                self.pastedItemToastId = nil
+            lastPastedItemId = item.id
+            pasteFailedItemId = nil
+            pastedItemToastId = item.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if self.pastedItemToastId == item.id {
+                    self.pastedItemToastId = nil
+                }
+            }
+        } else {
+            pastedItemToastId = nil
+            pasteFailedItemId = item.id
+            monitor.triggerAccessibilityAlertPulse()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                if self.pasteFailedItemId == item.id {
+                    self.pasteFailedItemId = nil
+                }
             }
         }
         monitor.pasteIntoTargetApp(item)
@@ -7808,7 +9802,8 @@ public struct MainPanelView: View {
     }
 
     private func saveImageToDisk(img: NSImage, defaultName: String) {
-        NSApp.activate(ignoringOtherApps: true)
+        ClipboardMonitor.shared.isShowingFilePanel = true
+        NSApp.activate()
         let savePanel = NSSavePanel()
         if let pngType = UTType(filenameExtension: "png") {
             savePanel.allowedContentTypes = [pngType]
@@ -7818,23 +9813,29 @@ public struct MainPanelView: View {
         savePanel.prompt = tr("Сохранить", "Save")
         savePanel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 5)
 
-        let writePNG: (URL) -> Void = { url in
-            if let tiff = img.tiffRepresentation,
-               let bitmap = NSBitmapImageRep(data: tiff),
-               let pngData = bitmap.representation(using: .png, properties: [:]) {
-                try? pngData.write(to: url)
+        let tiffData = img.tiffRepresentation
+        let writePNG: @Sendable (URL) -> Void = { url in
+            guard let tiffData else { return }
+            Task.detached(priority: .userInitiated) {
+                if let bitmap = NSBitmapImageRep(data: tiffData),
+                   let pngData = bitmap.representation(using: .png, properties: [:]) {
+                    try? pngData.write(to: url, options: .atomic)
+                }
             }
         }
 
         let targetWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel && $0.className.contains("Popup")) }) ?? NSApp.keyWindow
         if let window = targetWindow {
             savePanel.beginSheetModal(for: window) { response in
+                ClipboardMonitor.shared.isShowingFilePanel = false
                 if response == .OK, let url = savePanel.url {
                     writePNG(url)
                 }
             }
         } else {
-            if savePanel.runModal() == .OK, let url = savePanel.url {
+            let response = savePanel.runModal()
+            ClipboardMonitor.shared.isShowingFilePanel = false
+            if response == .OK, let url = savePanel.url {
                 writePNG(url)
             }
         }
@@ -7846,7 +9847,7 @@ public struct MainPanelView: View {
         let theme: AppTheme
         let content: () -> Content
         @State private var isHovered: Bool = false
-        @AppStorage("selectedFontId") private var selectedFontId: String = AppFont.default.rawValue
+        @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
 
         private var currentFont: AppFont {
             AppFont(fromRaw: selectedFontId)
@@ -7983,18 +9984,16 @@ public struct MainPanelView: View {
         }
     }
 
-    // MARK: - Clear Unpinned Snippets Confirmation Modal Overlay
+    // MARK: - Delete Snippet Category Confirmation Modal Overlay
     @ViewBuilder
-    private var clearSnippetsModalOverlay: some View {
-        if showClearSnippetsConfirmation {
-            let unpinnedCount = snippetsList.filter { !$0.isPinned }.count
-            let pinnedCount = snippetsList.filter { $0.isPinned }.count
-
+    private var deleteCategoryConfirmationModalOverlay: some View {
+        if let cat = categoryPendingDelete {
+            let count = snippetsList.filter { $0.category.localizedCaseInsensitiveCompare(cat.name) == .orderedSame }.count
             ZStack {
                 Color.black.opacity(0.45)
                     .ignoresSafeArea()
                     .onTapGesture {
-                        showClearSnippetsConfirmation = false
+                        categoryPendingDelete = nil
                     }
 
                 VStack(spacing: 16) {
@@ -8009,37 +10008,43 @@ public struct MainPanelView: View {
                                 .foregroundStyle(Color.red)
                         }
 
-                        Text(tr("Удалить незакрепленные фрагменты?", "Clear unpinned snippets?"))
+                        Text(count > 0
+                             ? tr("Удалить категорию «\(cat.name)»?", "Delete category “\(cat.name)”?")
+                             : tr("Удалить пустую категорию «\(cat.name)»?", "Delete empty category “\(cat.name)”?"))
                             .font(currentFont.font(size: 15, weight: .bold))
                             .foregroundStyle(currentTheme.primaryText)
 
                         Spacer()
                     }
 
-                    Text(tr(
-                        "Все незакрепленные фрагменты (\(unpinnedCount) шт.) будут удалены. Закрепленные булавкой шаблоны (\(pinnedCount) шт.) останутся в сохранности.",
-                        "All unpinned snippets (\(unpinnedCount) items) will be deleted. Pinned templates (\(pinnedCount) items) will be kept safe."
-                    ))
-                    .font(currentFont.font(size: 12.5, weight: .regular))
-                    .foregroundStyle(currentTheme.secondaryText)
-                    .lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Text(count > 0
+                         ? tr(
+                            "Вместе с этой категорией будут безвозвратно удалены все её фрагменты (\(count) шт.). Это действие нельзя отменить.",
+                            "All snippets in this category (\(count) items) will be permanently deleted. This action cannot be undone."
+                         )
+                         : tr(
+                            "Категория «\(cat.name)» пуста и будет удалена из списка папок.",
+                            "Category “\(cat.name)” is empty and will be removed from folders."
+                         ))
+                        .font(currentFont.font(size: 12.5, weight: .regular))
+                        .foregroundStyle(currentTheme.secondaryText)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     HStack(spacing: 10) {
                         Button {
-                            showClearSnippetsConfirmation = false
+                            categoryPendingDelete = nil
                         } label: {
                             Text(tr("Отмена", "Cancel"))
                                 .frame(maxWidth: .infinity)
                         }
                         .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+                        .pointingHandCursor()
                         .keyboardShortcut(.cancelAction)
 
                         Button {
-                            showClearSnippetsConfirmation = false
-                            snippetsList.removeAll { !$0.isPinned }
-                            saveSnippets()
-                            TapticSoundAndHaptics.shared.performDialTick()
+                            categoryPendingDelete = nil
+                            deleteCategoryConfirmed(cat)
                         } label: {
                             HStack(spacing: 5) {
                                 Image(systemName: "trash")
@@ -8049,11 +10054,13 @@ public struct MainPanelView: View {
                             .frame(maxWidth: .infinity)
                         }
                         .pvButton(variant: .destructive, size: .small, theme: currentTheme)
+                        .pointingHandCursor()
+                        .keyboardShortcut(.defaultAction)
                     }
                     .padding(.top, 4)
                 }
                 .padding(20)
-                .frame(width: 380)
+                .frame(width: 420)
                 .background(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(currentTheme.cardColor)
@@ -8065,7 +10072,29 @@ public struct MainPanelView: View {
                 .shadow(color: Color.black.opacity(0.35), radius: 20, x: 0, y: 10)
             }
             .transition(.opacity)
-            .zIndex(501)
+            .zIndex(700)
+        }
+    }
+
+    // MARK: - Snippet Editor Modal Overlay
+    @ViewBuilder
+    private var snippetEditorModalOverlay: some View {
+        if isAddingSnippet || editingSnippet != nil {
+            ZStack {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        closeSnippetEditorModalAndCleanup()
+                    }
+
+                addSnippetSheetView
+                    .shadow(color: Color.black.opacity(0.40), radius: 24, x: 0, y: 12)
+                    .onDisappear {
+                        ClipboardMonitor.shared.isShowingFilePanel = false
+                    }
+            }
+            .transition(.opacity)
+            .zIndex(600)
         }
     }
 
@@ -8254,6 +10283,177 @@ public struct MainPanelView: View {
             }
             .transition(.opacity)
             .zIndex(502)
+        }
+    }
+
+    // MARK: - Import Password Modal Overlay (PVENC2)
+    @ViewBuilder
+    private var importPasswordModalOverlay: some View {
+        if showImportPasswordModal {
+            ZStack {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        closeImportPasswordModal()
+                    }
+
+                VStack(spacing: 16) {
+                    // Header
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(currentTheme.accentColor.opacity(0.15))
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "lock.shield.fill")
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(currentTheme.accentColor)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(tr("Введите пароль резервной копии", "Enter backup password"))
+                                .font(currentFont.font(size: 15, weight: .bold))
+                                .foregroundStyle(currentTheme.primaryText)
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc.text")
+                                    .font(.system(size: 10))
+                                Text(pendingImportFileName)
+                                    .font(currentFont.font(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .foregroundStyle(currentTheme.secondaryText)
+                        }
+
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(tr(
+                            "Файл зашифрован (PVENC2). Введите пароль для расшифровки:",
+                            "File is encrypted (PVENC2). Enter password to decrypt:"
+                        ))
+                        .font(currentFont.font(size: 12, weight: .regular))
+                        .foregroundStyle(currentTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 6) {
+                            Group {
+                                if isImportPasswordVisible {
+                                    TextField(
+                                        tr("Пароль", "Password"),
+                                        text: $importPasswordInput
+                                    )
+                                    .focused($focusedImportPasswordField, equals: .plain)
+                                } else {
+                                    SecureField(
+                                        tr("Пароль", "Password"),
+                                        text: $importPasswordInput
+                                    )
+                                    .focused($focusedImportPasswordField, equals: .secure)
+                                }
+                            }
+                            .textFieldStyle(.plain)
+                            .font(currentFont.font(size: 13, weight: .medium))
+                            .foregroundStyle(currentTheme.primaryText)
+                            .onSubmit {
+                                attemptDecryptPendingBackup()
+                            }
+
+                            Button {
+                                isImportPasswordVisible.toggle()
+                                let targetFocus: ImportPasswordFocusField = isImportPasswordVisible ? .plain : .secure
+                                DispatchQueue.main.async {
+                                    focusedImportPasswordField = targetFocus
+                                }
+                            } label: {
+                                Image(systemName: isImportPasswordVisible ? "eye.slash" : "eye")
+                                    .symbolRenderingMode(.monochrome)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(currentTheme.secondaryText)
+                                    .frame(width: 24, height: 24)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(tr(
+                                isImportPasswordVisible ? "Скрыть пароль" : "Показать пароль",
+                                isImportPasswordVisible ? "Hide password" : "Show password"
+                            ))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(currentTheme.isLight ? Color.black.opacity(0.04) : Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(
+                                    importPasswordError != nil ? Color.red.opacity(0.85) : currentTheme.accentColor.opacity(0.45),
+                                    lineWidth: 1
+                                )
+                        )
+                        .onChange(of: importPasswordInput) {
+                            if importPasswordError != nil {
+                                importPasswordError = nil
+                            }
+                        }
+
+                        if let errorMsg = importPasswordError {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .symbolRenderingMode(.monochrome)
+                                    .font(.system(size: 11))
+                                Text(errorMsg)
+                                    .font(currentFont.font(size: 11.5, weight: .medium))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .foregroundStyle(Color.red)
+                            .padding(.top, 2)
+                        }
+                    }
+
+                    // Bottom Buttons
+                    HStack(spacing: 10) {
+                        Button {
+                            closeImportPasswordModal()
+                        } label: {
+                            Text(tr("Отмена", "Cancel"))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+                        .keyboardShortcut(.cancelAction)
+
+                        Button {
+                            attemptDecryptPendingBackup()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "lock.open.fill")
+                                    .symbolRenderingMode(.monochrome)
+                                Text(tr("Расшифровать", "Decrypt"))
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .pvButton(variant: .primary, size: .small, theme: currentTheme)
+                        .disabled(importPasswordInput.isEmpty)
+                        .opacity(importPasswordInput.isEmpty ? 0.5 : 1.0)
+                    }
+                    .padding(.top, 4)
+                }
+                .padding(20)
+                .frame(width: 420)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(currentTheme.cardColor)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(currentTheme.borderColor, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.35), radius: 20, x: 0, y: 10)
+            }
+            .transition(.opacity)
+            .zIndex(503)
         }
     }
 
@@ -8522,26 +10722,136 @@ public struct MainPanelView: View {
         }
     }
 
+    private func buildBackupPasswordAccessoryView() -> BackupPasswordAccessoryController {
+        BackupPasswordAccessoryController(
+            title: tr("Пароль шифрования (необязательно):", "Encryption password (optional):"),
+            placeholder: tr("Оставьте пустым для открытого JSON", "Leave empty for unencrypted JSON"),
+            warning: tr(
+                "Без пароля бэкап сохранится в открытом виде (небезопасно).",
+                "Without a password, the backup will be saved unencrypted (not secure)."
+            )
+        )
+    }
+
+    public static func decryptBackupArchiveForImport(from url: URL, password: String?) -> Result<PasteVaultBackupArchive, Error> {
+        do {
+            let archive = try BackupManager.loadArchiveFromFile(from: url, password: password)
+            return .success(archive)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func closeImportPasswordModal() {
+        showImportPasswordModal = false
+        pendingImportFileURL = nil
+        pendingImportFileName = ""
+        importPasswordInput = ""
+        importPasswordError = nil
+        isImportPasswordVisible = false
+        focusedImportPasswordField = nil
+        ClipboardMonitor.shared.isModalOverlayActive = false
+    }
+
+    private func attemptDecryptPendingBackup() {
+        guard let fileURL = pendingImportFileURL else {
+            closeImportPasswordModal()
+            return
+        }
+        let entered = importPasswordInput
+        guard !entered.isEmpty else {
+            importPasswordError = tr(
+                "Неверный пароль или повреждённый файл бэкапа",
+                "Incorrect password or corrupted backup file"
+            )
+            return
+        }
+
+        switch Self.decryptBackupArchiveForImport(from: fileURL, password: entered) {
+        case .success(let archive):
+            let fileName = pendingImportFileName
+            showImportPasswordModal = false
+            pendingImportFileURL = nil
+            pendingImportFileName = ""
+            importPasswordInput = ""
+            importPasswordError = nil
+            isImportPasswordVisible = false
+            focusedImportPasswordField = nil
+            presentImportConfirmation(for: archive, fileName: fileName)
+        case .failure:
+            importPasswordError = tr(
+                "Неверный пароль или повреждённый файл бэкапа",
+                "Incorrect password or corrupted backup file"
+            )
+            let focusTarget: ImportPasswordFocusField = isImportPasswordVisible ? .plain : .secure
+            DispatchQueue.main.async {
+                self.focusedImportPasswordField = focusTarget
+            }
+        }
+    }
+
+    private func presentImportConfirmation(for archive: PasteVaultBackupArchive, fileName: String) {
+        self.importArchive = archive
+        self.importFileName = fileName
+
+        let hasClipboard = (archive.clipboardItems?.count ?? 0) > 0
+        let hasSnippets = (archive.snippets?.count ?? 0) > 0
+        let hasSettings = archive.settings != nil
+
+        self.importRestoreClipboard = hasClipboard
+        self.importRestoreSnippets = hasSnippets
+        self.importRestoreSettings = hasSettings
+        self.importMergeMode = true
+
+        self.showImportConfirmationModal = true
+        ClipboardMonitor.shared.isModalOverlayActive = true
+    }
+
+    private func loadAndPresentBackupImportConfirmation(from fileURL: URL, password: String?, hostWindow: NSWindow) {
+        switch Self.decryptBackupArchiveForImport(from: fileURL, password: password) {
+        case .success(let archive):
+            self.presentImportConfirmation(for: archive, fileName: fileURL.lastPathComponent)
+            hostWindow.makeKeyAndOrderFront(nil)
+        case .failure(let error):
+            ClipboardMonitor.shared.isModalOverlayActive = false
+            hostWindow.makeKeyAndOrderFront(nil)
+            if let backupError = error as? BackupManager.BackupArchiveError {
+                self.showBackupToast(backupError.localizedDescription, isError: true)
+            } else {
+                self.showBackupToast(self.tr("Не удалось прочитать файл резервной копии", "Failed to parse backup archive"), isError: true)
+            }
+        }
+    }
+
+    private static let exportBackupDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
     private func performExportSavePanel() {
         guard let hostWindow = NSApp.windows.first(where: { $0.isVisible && ($0 is NSPanel || $0.className.contains("FloatingPanel")) }) ?? NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) else { return }
 
         showExportModal = false
         ClipboardMonitor.shared.isModalOverlayActive = true
-        NSApp.activate(ignoringOtherApps: true)
+        ClipboardMonitor.shared.isShowingFilePanel = true
+        NSApp.activate()
 
         let panel = NSSavePanel()
         panel.title = tr("Сохранить резервную копию", "Save Backup Archive")
         panel.prompt = tr("Сохранить", "Save")
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        panel.nameFieldStringValue = "PasteVault_Backup_\(formatter.string(from: Date())).json"
+        panel.nameFieldStringValue = "PasteVault_Backup_\(Self.exportBackupDateFormatter.string(from: Date())).json"
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
+
+        let accessory = buildBackupPasswordAccessoryView()
+        panel.accessoryView = accessory.container
 
         let targetLevel = NSWindow.Level(rawValue: max(Int(CGWindowLevelForKey(.popUpMenuWindow)), hostWindow.level.rawValue) + 2)
         panel.level = targetLevel
 
         let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
+            ClipboardMonitor.shared.isShowingFilePanel = false
             ClipboardMonitor.shared.isModalOverlayActive = false
             hostWindow.makeKeyAndOrderFront(nil)
 
@@ -8550,6 +10860,7 @@ public struct MainPanelView: View {
                     items: self.monitor.items,
                     monitor: self.monitor,
                     snippets: self.snippetsList,
+                    snippetCategories: self.snippetCategories,
                     includeClipboard: self.exportIncludeClipboard,
                     clipboardPinnedOnly: self.exportClipboardPinnedOnly,
                     includeSnippets: self.exportIncludeSnippets,
@@ -8559,8 +10870,13 @@ public struct MainPanelView: View {
                     includeAppearance: self.exportIncludeSettings && self.exportIncludeAppearance
                 )
 
+                let password = accessory.currentPassword
                 do {
-                    try BackupManager.exportArchiveToFile(archive: archive, to: targetURL)
+                    try BackupManager.exportArchiveToFile(
+                        archive: archive,
+                        to: targetURL,
+                        password: password.isEmpty ? nil : password
+                    )
                     self.showExportModal = false
                     self.showBackupToast(self.tr("Резервная копия успешно сохранена", "Backup successfully saved"))
                 } catch {
@@ -8581,6 +10897,7 @@ public struct MainPanelView: View {
         guard let hostWindow = NSApp.windows.first(where: { $0.isVisible && ($0 is NSPanel || $0.className.contains("FloatingPanel")) }) ?? NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) else { return }
 
         ClipboardMonitor.shared.isModalOverlayActive = true
+        ClipboardMonitor.shared.isShowingFilePanel = true
         NSApp.activate(ignoringOtherApps: true)
 
         let panel = NSOpenPanel()
@@ -8595,32 +10912,30 @@ public struct MainPanelView: View {
         panel.level = targetLevel
 
         let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            if response == .OK, let fileURL = panel.url {
-                do {
-                    let archive = try BackupManager.loadArchiveFromFile(from: fileURL)
-                    self.importArchive = archive
-                    self.importFileName = fileURL.lastPathComponent
-
-                    let hasClipboard = (archive.clipboardItems?.count ?? 0) > 0
-                    let hasSnippets = (archive.snippets?.count ?? 0) > 0
-                    let hasSettings = archive.settings != nil
-
-                    self.importRestoreClipboard = hasClipboard
-                    self.importRestoreSnippets = hasSnippets
-                    self.importRestoreSettings = hasSettings
-                    self.importMergeMode = true
-
-                    self.showImportConfirmationModal = true
-                    ClipboardMonitor.shared.isModalOverlayActive = true
-                    hostWindow.makeKeyAndOrderFront(nil)
-                } catch {
-                    ClipboardMonitor.shared.isModalOverlayActive = false
-                    hostWindow.makeKeyAndOrderFront(nil)
-                    self.showBackupToast(self.tr("Не удалось прочитать файл резервной копии", "Failed to parse backup archive"), isError: true)
-                }
-            } else {
+            ClipboardMonitor.shared.isShowingFilePanel = false
+            panel.orderOut(nil)
+            guard response == .OK, let fileURL = panel.url else {
                 ClipboardMonitor.shared.isModalOverlayActive = false
                 hostWindow.makeKeyAndOrderFront(nil)
+                return
+            }
+
+            DispatchQueue.main.async {
+                hostWindow.makeKeyAndOrderFront(nil)
+                if BackupManager.fileRequiresPassword(at: fileURL) {
+                    self.pendingImportFileURL = fileURL
+                    self.pendingImportFileName = fileURL.lastPathComponent
+                    self.importPasswordInput = ""
+                    self.importPasswordError = nil
+                    self.isImportPasswordVisible = false
+                    self.showImportPasswordModal = true
+                    ClipboardMonitor.shared.isModalOverlayActive = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        self.focusedImportPasswordField = .secure
+                    }
+                } else {
+                    self.loadAndPresentBackupImportConfirmation(from: fileURL, password: nil, hostWindow: hostWindow)
+                }
             }
         }
 
@@ -8651,7 +10966,10 @@ public struct MainPanelView: View {
                         self.snippetsList = updated
                     }
                 )
+                let restoredCats = await DatabaseManager.shared.fetchSnippetCategories()
                 await MainActor.run {
+                    self.snippetCategories = restoredCats
+                    self.refreshPinnedSortSnapshot()
                     showBackupToast(tr("Данные успешно восстановлены", "Data successfully restored"))
                 }
             } catch {
@@ -8701,7 +11019,6 @@ public struct MainPanelView: View {
 
                     // 3. Широкая акцентная кнопка «ОК»
                     Button {
-                        TapticSoundAndHaptics.shared.performDialTick()
                         updateService.dismissUpToDateModal()
                     } label: {
                         Text(tr("ОК", "OK"))
@@ -8709,7 +11026,6 @@ public struct MainPanelView: View {
                     }
                     .pvButton(variant: .primary, size: .regular, theme: currentTheme)
                     .keyboardShortcut(.defaultAction)
-                    .keyboardShortcut(.cancelAction)
                     .padding(.top, 4)
                 }
                 .padding(22)
@@ -8937,13 +11253,46 @@ public struct MainPanelView: View {
     }
 
     private func closeImageLightbox() {
+        lockedSearchQuerySnapshot = searchQuery
+        lockedSnippetsSearchSnapshot = snippetsSearch
+        isSearchInputLocked = true
+        isSearchFocused = false
+        isSnippetsSearchFocused = false
+
         screenshotEditorEngine.commitActiveTextEditing()
+        screenshotEditorEngine.selectedAnnotationId = nil
+        NSTextInputContext.current?.discardMarkedText()
+        NSApp.keyWindow?.makeFirstResponder(nil)
+
         isScreenshotEditingMode = false
         isImageLightboxPresented = false
         zoomedImage = nil
         zoomedItem = nil
         monitor.isModalOverlayActive = false
         monitor.isEditingScreenshotText = false
+
+        DispatchQueue.main.async {
+            isSearchFocused = false
+            isSnippetsSearchFocused = false
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            if searchQuery != lockedSearchQuerySnapshot {
+                searchQuery = lockedSearchQuerySnapshot
+            }
+            if snippetsSearch != lockedSnippetsSearchSnapshot {
+                snippetsSearch = lockedSnippetsSearchSnapshot
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            isSearchFocused = false
+            isSnippetsSearchFocused = false
+            if searchQuery != lockedSearchQuerySnapshot {
+                searchQuery = lockedSearchQuerySnapshot
+            }
+            if snippetsSearch != lockedSnippetsSearchSnapshot {
+                snippetsSearch = lockedSnippetsSearchSnapshot
+            }
+            isSearchInputLocked = false
+        }
     }
 
     private func imageLightboxOverlay(for item: ClipboardItemRow, image: NSImage) -> some View {
@@ -9309,39 +11658,354 @@ public struct MainPanelView: View {
         }
     }
 
+    private var effectivePassTTLSeconds: TimeInterval? {
+        guard passAutoPurgeEnabled else { return nil }
+        let sec = monitor.autoPurgeSecretsSeconds > 0 ? monitor.autoPurgeSecretsSeconds : 60
+        return TimeInterval(sec)
+    }
+
     private func generatePass() {
         TapticSoundAndHaptics.shared.performDialTick()
         if passIsMnemonic {
-            let words = ["anchor", "arctic", "beacon", "binary", "cipher", "cosmos", "delta", "falcon", "granite", "kepler", "monolith", "nebula", "obsidian", "plasma", "quantum", "sapphire", "trident", "zenith"]
-            let selected = (0..<4).map { _ in words.randomElement() ?? "vault" }
-            self.passGeneratedSecret = selected.joined(separator: "-")
-            self.passEntropyBits = 52
+            let generated = PassGenerator.generateMnemonic(wordCount: 5)
+            self.passGeneratedSecret = generated.secret
+            self.passEntropyBits = generated.entropyBits
         } else {
-            var chars = "abcdefghijklmnopqrstuvwxyz"
-            if passIncludeUppercase { chars += "ABCDEFGHIJKLMNOPQRSTUVWXYZ" }
-            if passIncludeDigits { chars += "0123456789" }
-            if passIncludeSymbols { chars += "!@#$%^&*()-_=+" }
-
-            let length = Int(passLength)
-            let result = String((0..<length).map { _ in chars.randomElement() ?? "x" })
-            self.passGeneratedSecret = result
-            self.passEntropyBits = Int(Double(length) * log2(Double(chars.count)))
+            let generated = PassGenerator.generatePassword(
+                length: Int(passLength),
+                includeUppercase: passIncludeUppercase,
+                includeDigits: passIncludeDigits,
+                includeSymbols: passIncludeSymbols
+            )
+            self.passGeneratedSecret = generated.secret
+            self.passEntropyBits = generated.entropyBits
         }
     }
 
     private func loadDefaultSnippetsIfNeeded() {
-        if let data = UserDefaults.standard.data(forKey: "pasteVaultQuickSnippets"),
-           let saved = try? JSONDecoder().decode([QuickSnippetItem].self, from: data) {
-            self.snippetsList = saved
-        } else {
-            self.snippetsList = []
+        Task {
+            await DatabaseManager.shared.cleanupOrphanedSnippets()
+            let fromDb = await DatabaseManager.shared.fetchSnippets()
+            await MainActor.run {
+                self.snippetsList = fromDb
+                if let encoded = try? JSONEncoder().encode(fromDb) {
+                    AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+                }
+            }
         }
     }
 
-    private func saveSnippets() {
+    private func saveSnippets(changedSnippet: QuickSnippetItem? = nil) {
         if let encoded = try? JSONEncoder().encode(snippetsList) {
-            UserDefaults.standard.set(encoded, forKey: "pasteVaultQuickSnippets")
+            AppDefaults.shared.set(encoded, forKey: "pasteVaultQuickSnippets")
+        }
+        let itemsToPersist: [QuickSnippetItem] = changedSnippet.map { [$0] } ?? snippetsList
+        Task {
+            for item in itemsToPersist {
+                _ = await DatabaseManager.shared.insertSnippet(
+                    id: item.id,
+                    title: item.title,
+                    content: item.content,
+                    category: item.category,
+                    isPinned: item.isPinned,
+                    imagePath: item.imagePath,
+                    useCount: item.useCount,
+                    createdAt: item.createdAt
+                )
+            }
         }
     }
 }
+
+public enum PassGenerator {
+    public struct SystemCSPRNG: RandomNumberGenerator {
+        public init() {}
+        public mutating func next() -> UInt64 {
+            var value: UInt64 = 0
+            let status = SecRandomCopyBytes(kSecRandomDefault, MemoryLayout<UInt64>.size, &value)
+            if status == errSecSuccess {
+                return value
+            }
+            return UInt64.random(in: UInt64.min...UInt64.max)
+        }
+    }
+
+    public static let mnemonicWordList: [String] = [
+        "anchor", "arctic", "beacon", "binary", "cipher", "cosmos", "delta", "falcon", "granite", "kepler", "monolith", "nebula", "obsidian", "plasma", "quantum", "sapphire",
+        "trident", "zenith", "abacus", "acorn", "admiral", "agate", "albatross", "alder", "alligator", "almond", "alpaca", "amber", "amethyst", "anchovy", "anemone", "antler",
+        "anvil", "apricot", "archway", "armada", "arrow", "aspen", "asteroid", "atlas", "aurora", "avocado", "azalea", "badger", "bamboo", "banjo", "banyan", "barley",
+        "basalt", "basket", "bastion", "bauxite", "bayonet", "beaver", "beech", "beehive", "belfry", "beryl", "bison", "blizzard", "blossom", "bluebird", "bobcat", "boulder",
+        "bramble", "bronze", "brook", "buffalo", "bulwark", "bunker", "burrow", "buttercup", "cactus", "cadence", "caldera", "camel", "camellia", "canary", "canyon", "caramel",
+        "caravan", "carbon", "cardinal", "caribou", "cascade", "cashew", "castle", "catalyst", "cavern", "cedar", "chalice", "chameleon", "chariot", "cheetah", "cherry", "chestnut",
+        "chimera", "chisel", "cinder", "cinnamon", "citadel", "citron", "clover", "cobalt", "cobra", "coconut", "comet", "compass", "condor", "conifer", "copper", "coral",
+        "cormorant", "cornet", "corridor", "coyote", "cradle", "cranberry", "crater", "crescent", "cricket", "crimson", "crocus", "crowbar", "crystal", "cuckoo", "currant", "cypress",
+        "daffodil", "dagger", "dahlia", "daisy", "dandelion", "daybreak", "dolphin", "domino", "dragon", "driftwood", "drizzle", "dromedary", "droplet", "dune", "dungeon", "dynamo",
+        "eagle", "eclipse", "eddy", "edelweiss", "egret", "elderberry", "elephant", "emerald", "emperor", "enclave", "engine", "equinox", "ermine", "esker", "estuary", "ether",
+        "evergreen", "ferret", "fiddle", "figment", "filament", "finch", "firefly", "fjord", "flamingo", "flint", "flounder", "flute", "foothill", "forest", "fortress", "fossil",
+        "fountain", "foxglove", "fresco", "frigate", "frostbite", "fusion", "galaxy", "galleon", "galley", "gardenia", "garnet", "gauntlet", "gazelle", "geyser", "gibbon", "ginger",
+        "glacier", "glade", "glider", "glowworm", "goldfinch", "gondola", "gooseberry", "gopher", "goshawk", "gourd", "graphite", "gravel", "griffin", "grizzly", "grotto", "grove",
+        "guinea", "gull", "gypsy", "halcyon", "hammer", "hammock", "harbor", "harebell", "harpoon", "harrier", "harvest", "hawthorn", "hazel", "hearth", "heather", "hedgehog",
+        "helix", "hemlock", "herald", "heron", "hibiscus", "hickory", "highland", "hilltop", "hoarfrost", "hollow", "holly", "honeycomb", "horizon", "hornet", "hummingbird", "hyacinth",
+        "hydrant", "iceberg", "icicle", "iguana", "indigo", "inkwell", "iris", "ironwood", "island", "ivory", "ivy", "jackal", "jade", "jaguar", "jasmine", "jasper",
+        "javelin", "juniper", "kale", "kangaroo", "kayak", "kestrel", "kettle", "keystone", "kingfisher", "krypton", "labyrinth", "lagoon", "lantern", "larch", "larkspur", "lattice",
+        "laurel", "lava", "lavender", "leopard", "lichen", "lighthouse", "lilac", "limestone", "linden", "linnet", "lion", "lizard", "lobster", "locust", "lodestar", "lotus",
+        "lynx", "macaw", "magnet", "magnolia", "mahogany", "mallard", "mammoth", "mandolin", "mango", "mangrove", "manor", "mantis", "maple", "marigold", "marlin", "marmot",
+        "marsh", "marten", "mastodon", "meadow", "medallion", "mercury", "meridian", "merlin", "mesa", "meteor", "mica", "millstone", "mimosa", "minnow", "mirage", "mistletoe",
+        "mockingbird", "monarch", "mongoose", "moonbeam", "moonstone", "moose", "morning", "mosaic", "moss", "moth", "mountain", "mulberry", "muskrat", "mustang", "myrtle", "narwhal",
+        "nautilus", "nectar", "needle", "newt", "nightfall", "nightjar", "nimble", "nimbus", "nitrogen", "nomad", "nook", "northern", "nougat", "nova", "nutmeg", "oakwood",
+        "oasis", "obelisk", "ocean", "ocelot", "ochre", "octopus", "odyssey", "oleander", "olive", "omega", "onyx", "opal", "oracle", "orchard", "orchid", "oriole",
+        "orion", "osprey", "ostrich", "otter", "outpost", "owl", "oxbow", "oxygen", "oyster", "padlock", "pagoda", "palace", "palisade", "palm", "panther", "papaya",
+        "papyrus", "paradox", "parapet", "parcel", "parrot", "parsley", "partridge", "pavement", "pavilion", "peacock", "peanut", "pebble", "pecan", "pelican", "pendulum", "penguin",
+        "peony", "pepper", "peregrine", "peridot", "petal", "petrel", "pewter", "phantom", "pheasant", "phoenix", "phosphor", "piano", "piccolo", "pigeon", "pillar", "pinecone",
+        "pinnacle", "pioneer", "pistachio", "pixel", "planet", "platan", "plateau", "platinum", "plover", "plum", "plume", "polar", "polaris", "pomegranate", "ponderosa", "poplar",
+        "poppy", "porcelain", "porcupine", "porpoise", "portal", "possum", "prairie", "prism", "procyon", "pronghorn", "prospect", "proton", "ptarmigan", "puffin", "pulsar", "puma",
+        "pumpkin", "pyramid", "python", "quail", "quarry", "quartz", "quasar", "quetzal", "quicksand", "quill", "quince", "quiver", "rabbit", "raccoon", "radar", "radish",
+        "raindrop", "rambler", "rampart", "raptor", "raspberry", "raven", "ravine", "redwood", "reef", "reindeer", "relic", "reservoir", "rhododendron", "ribbon", "ridge", "ripple",
+        "river", "roadrunner", "robin", "rocket", "rosemary", "rowan", "ruby", "runway", "russet", "saffron", "sage", "sailfish", "salamander", "salmon", "saltbush", "sandstone",
+        "sanctuary", "sandpiper", "sardine", "sassafras", "satellite", "saturn", "savanna", "sawmill", "scarab", "scepter", "schooner", "scorpion", "scribble", "scroll", "sculpin", "scythe"
+    ]
+
+    public static func generateMnemonic(wordCount: Int = 5) -> (secret: String, entropyBits: Int) {
+        var rng = SystemCSPRNG()
+        let count = max(1, wordCount)
+        let words = mnemonicWordList
+        let selected = (0..<count).map { _ in words.randomElement(using: &rng) ?? "vault" }
+        let entropyBits = Int((Double(count) * log2(Double(words.count))).rounded())
+        return (selected.joined(separator: "-"), entropyBits)
+    }
+
+    public static func generatePassword(
+        length: Int,
+        includeUppercase: Bool,
+        includeDigits: Bool,
+        includeSymbols: Bool
+    ) -> (secret: String, entropyBits: Int) {
+        let lowerChars = Array("abcdefghijklmnopqrstuvwxyz")
+        let upperChars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        let digitChars = Array("0123456789")
+        let symbolChars = Array("!@#$%^&*()-_=+")
+
+        var enabledClasses: [[Character]] = [lowerChars]
+        if includeUppercase { enabledClasses.append(upperChars) }
+        if includeDigits { enabledClasses.append(digitChars) }
+        if includeSymbols { enabledClasses.append(symbolChars) }
+
+        let targetLength = max(1, length)
+        let combinedPool = enabledClasses.flatMap { $0 }
+
+        var rng = SystemCSPRNG()
+        let selectedClasses = Array(enabledClasses.shuffled(using: &rng).prefix(targetLength))
+        var resultChars: [Character] = selectedClasses.compactMap { $0.randomElement(using: &rng) }
+        while resultChars.count < targetLength {
+            if let ch = combinedPool.randomElement(using: &rng) {
+                resultChars.append(ch)
+            }
+        }
+        resultChars.shuffle(using: &rng)
+
+        let entropyBits = Int((Double(targetLength) * log2(Double(combinedPool.count))).rounded())
+        return (String(resultChars), entropyBits)
+    }
+}
+
+public enum ClipboardTextMetricsFormatter {
+    private static let spaceGroupedFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = " "
+        return formatter
+    }()
+
+    public struct Metrics: Equatable, Sendable {
+        public let charCount: Int
+        public let wordCount: Int
+        public let lineCount: Int
+    }
+
+    public static func compute(for content: String) -> Metrics {
+        let chars = content.count
+        let words = content.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+        let lines = max(1, content.components(separatedBy: .newlines).count)
+        return Metrics(charCount: chars, wordCount: words, lineCount: lines)
+    }
+
+    public static func formatCompact(_ value: Int) -> String {
+        if value < 10_000 {
+            return spaceGroupedFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+        }
+        if value >= 100_000 {
+            let k = Int((Double(value) / 1000.0).rounded())
+            return "\(k)K"
+        }
+        let tenths = Int((Double(value) / 100.0).rounded())
+        if tenths % 10 == 0 {
+            return "\(tenths / 10)K"
+        }
+        return String(format: "%.1fK", Double(tenths) / 10.0)
+    }
+
+    public static func badgeText(for kind: ContentKind, metrics: Metrics, isEnglish: Bool) -> String {
+        if kind == .code {
+            let linesStr = formatCompact(metrics.lineCount)
+            let charsStr = formatCompact(metrics.charCount)
+            return isEnglish
+                ? "\(linesStr) ln · \(charsStr) ch"
+                : "\(linesStr) стр. · \(charsStr) зн."
+        } else {
+            let charsStr = formatCompact(metrics.charCount)
+            let wordsStr = formatCompact(metrics.wordCount)
+            return isEnglish
+                ? "\(charsStr) ch · \(wordsStr) w"
+                : "\(charsStr) зн. · \(wordsStr) сл."
+        }
+    }
+
+    public static func exactTooltip(for metrics: Metrics, isEnglish: Bool) -> String {
+        let c = formatCompactUnderTenThousand(metrics.charCount)
+        let w = formatCompactUnderTenThousand(metrics.wordCount)
+        let l = formatCompactUnderTenThousand(metrics.lineCount)
+        return isEnglish
+            ? "Characters: \(c) • Words: \(w) • Lines: \(l)"
+            : "Символов: \(c) • Слов: \(w) • Строк: \(l)"
+    }
+
+    private static func formatCompactUnderTenThousand(_ value: Int) -> String {
+        return spaceGroupedFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+}
+
+@MainActor
+public final class BackupPasswordAccessoryController: NSObject, NSTextFieldDelegate {
+    private static var associatedControllerKey: UInt8 = 0
+
+    public let container: NSView
+    public let secureField: NSSecureTextField
+    public let plainField: NSTextField
+    public let eyeButton: NSButton
+    public let warningLabel: NSTextField
+    public private(set) var isPasswordVisible: Bool = false
+
+    public var currentPassword: String {
+        isPasswordVisible ? plainField.stringValue : secureField.stringValue
+    }
+
+    public init(title: String, placeholder: String, warning: String) {
+        let width: CGFloat = 412
+        let height: CGFloat = 86
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.frame = NSRect(x: 12, y: 60, width: width - 24, height: 18)
+
+        let fieldFrame = NSRect(x: 12, y: 32, width: width - 56, height: 22)
+
+        let secure = NSSecureTextField(frame: fieldFrame)
+        secure.placeholderString = placeholder
+        secure.font = .systemFont(ofSize: 13)
+        secure.isBezeled = true
+        secure.bezelStyle = .roundedBezel
+        secure.isEditable = true
+        secure.isSelectable = true
+        secure.usesSingleLineMode = true
+
+        let plain = NSTextField(frame: fieldFrame)
+        plain.placeholderString = placeholder
+        plain.font = .systemFont(ofSize: 13)
+        plain.isBezeled = true
+        plain.bezelStyle = .roundedBezel
+        plain.isEditable = true
+        plain.isSelectable = true
+        plain.usesSingleLineMode = true
+        plain.isHidden = true
+
+        let button = NSButton(frame: NSRect(x: width - 38, y: 31, width: 26, height: 24))
+        button.setButtonType(.momentaryPushIn)
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Toggle password visibility")
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = "Show / Hide password"
+
+        let warn = NSTextField(wrappingLabelWithString: warning)
+        warn.font = .systemFont(ofSize: 11)
+        warn.textColor = .systemOrange
+        warn.lineBreakMode = .byWordWrapping
+        warn.maximumNumberOfLines = 2
+        warn.frame = NSRect(x: 12, y: 4, width: width - 24, height: 24)
+
+        self.container = containerView
+        self.secureField = secure
+        self.plainField = plain
+        self.eyeButton = button
+        self.warningLabel = warn
+
+        super.init()
+
+        secure.delegate = self
+        plain.delegate = self
+        button.target = self
+        button.action = #selector(togglePasswordVisibility)
+
+        containerView.addSubview(titleLabel)
+        containerView.addSubview(secure)
+        containerView.addSubview(plain)
+        containerView.addSubview(button)
+        containerView.addSubview(warn)
+
+        objc_setAssociatedObject(
+            containerView,
+            &Self.associatedControllerKey,
+            self,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+    }
+
+    public func setPasswordText(_ text: String) {
+        secureField.stringValue = text
+        plainField.stringValue = text
+    }
+
+    @objc public func togglePasswordVisibility() {
+        let oldField: NSTextField = isPasswordVisible ? plainField : secureField
+        let currentText = oldField.stringValue
+        let window = container.window
+        let wasFocused = (oldField.currentEditor() != nil) || (window?.firstResponder === oldField)
+        let savedRange = oldField.currentEditor()?.selectedRange
+
+        isPasswordVisible.toggle()
+
+        let newField: NSTextField = isPasswordVisible ? plainField : secureField
+        secureField.stringValue = currentText
+        plainField.stringValue = currentText
+
+        secureField.isHidden = isPasswordVisible
+        plainField.isHidden = !isPasswordVisible
+
+        eyeButton.image = NSImage(
+            systemSymbolName: isPasswordVisible ? "eye.slash" : "eye",
+            accessibilityDescription: "Toggle password visibility"
+        )
+
+        if wasFocused, let window {
+            window.makeFirstResponder(newField)
+            if let range = savedRange, let editor = newField.currentEditor() {
+                let len = (currentText as NSString).length
+                let safeLocation = min(range.location, len)
+                let safeLength = min(range.length, len - safeLocation)
+                editor.selectedRange = NSRange(location: safeLocation, length: safeLength)
+            }
+        }
+    }
+
+    public func controlTextDidChange(_ obj: Notification) {
+        guard let sender = obj.object as? NSTextField else { return }
+        if sender === secureField {
+            plainField.stringValue = secureField.stringValue
+        } else if sender === plainField {
+            secureField.stringValue = plainField.stringValue
+        }
+    }
+}
+
 

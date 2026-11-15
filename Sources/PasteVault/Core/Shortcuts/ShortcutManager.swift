@@ -42,7 +42,7 @@ public final class ShortcutManager: ObservableObject {
     }
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: Self.userDefaultsKey),
+        if let data = AppDefaults.shared.data(forKey: Self.userDefaultsKey),
            let decoded = try? JSONDecoder().decode(ShortcutConfig.self, from: data) {
             self.config = decoded
         } else {
@@ -52,7 +52,7 @@ public final class ShortcutManager: ObservableObject {
 
     private func saveConfig() {
         if let data = try? JSONEncoder().encode(config) {
-            UserDefaults.standard.set(data, forKey: Self.userDefaultsKey)
+            AppDefaults.shared.set(data, forKey: Self.userDefaultsKey)
         }
     }
 
@@ -67,7 +67,13 @@ public final class ShortcutManager: ObservableObject {
         let flags = combo.modifierFlags
 
         // 1. Системные базовые комбинации macOS (⌘C, ⌘V, ⌘X, ⌘A, ⌘Z, ⌘Q, ⌘Space)
-        if flags == .command {
+        let cleanedFlags = flags.subtracting([.numericPad, .function, .capsLock])
+        let isAllowedEnterForPaste = (command == .pasteSelected) && (combo.keyCode == 36 || combo.keyCode == 76)
+        if !isAllowedEnterForPaste && cleanedFlags.intersection([.command, .option, .control]).isEmpty {
+            return .systemReserved(lang == .en ? "Modifier Required (⌘/⌥/⌃)" : "Нужен модификатор (⌘/⌥/⌃)")
+        }
+
+        if cleanedFlags == .command {
             switch combo.keyCode {
             case 8: return .systemReserved("⌘C")
             case 9: return .systemReserved("⌘V")
@@ -81,15 +87,18 @@ public final class ShortcutManager: ObservableObject {
         }
 
         // 2. Внутренний конфликт внутри Paste Vault
+        let normalizedComboMods = cleanedFlags.rawValue
         for otherCmd in ShortcutCommand.allCases where otherCmd != command {
             let otherCombo = config[otherCmd]
+            let normalizedOtherMods = otherCombo.modifierFlags.subtracting([.numericPad, .function, .capsLock]).rawValue
 
             if command == .quickPasteModifier || otherCmd == .quickPasteModifier {
-                // Модификатор быстрой вставки сравнивается по модификаторам
-                if combo.modifiers == otherCombo.modifiers && (otherCombo.keyCode >= 18 && otherCombo.keyCode <= 28) {
+                // Проверяем конкретную клавишу НЕ-quickPaste команды на совпадение с цифрами 1..9
+                let specificKeyCode = (command == .quickPasteModifier) ? otherCombo.keyCode : combo.keyCode
+                if normalizedComboMods == normalizedOtherMods && KeyCombo.digitKeyCodeMap[specificKeyCode] != nil {
                     return .internalConflict(command: otherCmd, commandName: otherCmd.title(in: lang))
                 }
-            } else if combo.keyCode == otherCombo.keyCode && combo.modifiers == otherCombo.modifiers {
+            } else if combo.keyCode == otherCombo.keyCode && normalizedComboMods == normalizedOtherMods {
                 return .internalConflict(command: otherCmd, commandName: otherCmd.title(in: lang))
             }
         }
@@ -97,12 +106,15 @@ public final class ShortcutManager: ObservableObject {
         return .valid
     }
 
+    private var pendingQuickPasteModifiers: NSEvent.ModifierFlags = []
+
     // MARK: - Key Recording
     public func startRecording(for command: ShortcutCommand) {
         stopRecording()
         recordingCommand = command
         isRecordingShortcut = true
         validationFeedback = nil
+        pendingQuickPasteModifiers = []
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self = self else { return event }
@@ -113,20 +125,30 @@ public final class ShortcutManager: ObservableObject {
                 return nil
             }
 
-            // 2. Для quickPasteModifier — при нажатии любой комбинации с ⌘, ⌥ или ⌃
+            // 2. Для quickPasteModifier — поддерживаем 1 или 2+ модификатора (например ⌥ или ⌥⇧):
+            //    накапливаем модификаторы при удержании и фиксируем при отпускании всех модификаторов или при нажатии цифры 1..9
             if command == .quickPasteModifier {
                 let rawFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                     .subtracting([.numericPad, .function, .capsLock])
                 let modFlags = rawFlags.intersection([.command, .option, .control, .shift])
-                if !modFlags.isEmpty {
-                    let modPrefix = self.displayModifierPrefix(flags: modFlags)
-                    let combo = KeyCombo(keyCode: 0, modifiers: modFlags.rawValue, displayString: "\(modPrefix)1..\(modPrefix)9")
-                    self.config.quickPasteModifier = combo
-                    self.validationFeedback = (command, .valid)
-                    self.stopRecording()
+
+                if event.type == .flagsChanged {
+                    if !modFlags.isEmpty {
+                        self.pendingQuickPasteModifiers.formUnion(modFlags)
+                    } else if !self.pendingQuickPasteModifiers.isEmpty {
+                        let chosen = self.pendingQuickPasteModifiers
+                        self.pendingQuickPasteModifiers = []
+                        let modPrefix = self.displayModifierPrefix(flags: chosen)
+                        let combo = KeyCombo(keyCode: 0, modifiers: chosen.rawValue, displayString: "\(modPrefix)1..\(modPrefix)9")
+                        let valResult = self.validate(combo: combo, for: .quickPasteModifier, in: AppLanguage.current)
+                        self.validationFeedback = (.quickPasteModifier, valResult)
+                        if case .valid = valResult {
+                            self.config.quickPasteModifier = combo
+                            self.stopRecording()
+                        }
+                    }
                     return nil
                 }
-                return nil
             }
 
             // 3. Для остальных команд — flagsChanged поглощаем и ждем реальный keyDown
@@ -145,6 +167,7 @@ public final class ShortcutManager: ObservableObject {
             NSEvent.removeMonitor(monitor)
             localMonitor = nil
         }
+        pendingQuickPasteModifiers = []
         recordingCommand = nil
         isRecordingShortcut = false
     }
@@ -159,13 +182,18 @@ public final class ShortcutManager: ObservableObject {
             return
         }
 
-        // Для quickPasteModifier разрешаем нажать модификатор + любую цифру 1-9
+        // Для quickPasteModifier разрешаем нажать модификатор(ы) + любую цифру 1-9
         if command == .quickPasteModifier {
-            let modPrefix = displayModifierPrefix(flags: rawFlags)
-            let combo = KeyCombo(keyCode: 0, modifiers: rawFlags.rawValue, displayString: "\(modPrefix)1..\(modPrefix)9")
-            self.config.quickPasteModifier = combo
-            self.validationFeedback = (command, .valid)
-            self.stopRecording()
+            let modFlags = rawFlags.intersection([.command, .option, .control, .shift])
+            guard !modFlags.isEmpty else { return }
+            let modPrefix = displayModifierPrefix(flags: modFlags)
+            let combo = KeyCombo(keyCode: 0, modifiers: modFlags.rawValue, displayString: "\(modPrefix)1..\(modPrefix)9")
+            let valResult = validate(combo: combo, for: .quickPasteModifier, in: AppLanguage.current)
+            self.validationFeedback = (command, valResult)
+            if case .valid = valResult {
+                self.config.quickPasteModifier = combo
+                self.stopRecording()
+            }
             return
         }
 

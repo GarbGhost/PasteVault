@@ -63,6 +63,12 @@ public enum CardExportFormat: String, CaseIterable, Identifiable, Sendable {
 public struct CardFileExporter {
     private static let forbiddenChars = CharacterSet(charactersIn: ":/\\?%*|\"<>")
 
+    private static func sanitizeFileName(_ raw: String) -> String {
+        let cleaned = raw.components(separatedBy: forbiddenChars).joined(separator: "_")
+        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "_ "))
+        return trimmed.isEmpty ? "PasteVault_Export" : trimmed
+    }
+
     /// Проверяет, является ли строка валидным латинским программным идентификатором:
     /// Длина 2...40 символов, начинается с буквы (A-Z, a-z), содержит только латинские буквы, цифры и "_"
     public static func isValidAsciiIdentifier(_ s: String) -> Bool {
@@ -155,25 +161,33 @@ public struct CardFileExporter {
                 if trimmed.hasPrefix("#") || trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*") {
                     continue
                 }
-                if let quoteStart = trimmed.firstIndex(of: "\"") {
+                var searchStart = trimmed.startIndex
+                while let quoteStart = trimmed[searchStart...].firstIndex(of: "\"") {
                     let afterFirst = trimmed.index(after: quoteStart)
-                    if let quoteEnd = trimmed[afterFirst...].firstIndex(of: "\"") {
-                        let keyCandidate = String(trimmed[afterFirst..<quoteEnd]).trimmingCharacters(in: .whitespaces)
-                        let rest = trimmed[trimmed.index(after: quoteEnd)...].trimmingCharacters(in: .whitespaces)
-                        if rest.hasPrefix(":") {
-                            let isAsciiKey = keyCandidate.allSatisfy { ($0 >= "A" && $0 <= "Z") || ($0 >= "a" && $0 <= "z") || ($0 >= "0" && $0 <= "9") || $0 == "_" || $0 == "-" }
-                            if let firstChar = keyCandidate.first, (firstChar >= "A" && firstChar <= "Z") || (firstChar >= "a" && firstChar <= "z"), isAsciiKey {
-                                let lower = keyCandidate.lowercased()
-                                if keyCandidate.count >= 3 && lower != "type" && lower != "id" {
-                                    jsonName = keyCandidate
-                                    break
-                                }
+                    guard afterFirst < trimmed.endIndex,
+                          let quoteEnd = trimmed[afterFirst...].firstIndex(of: "\"") else {
+                        break
+                    }
+                    let keyCandidate = String(trimmed[afterFirst..<quoteEnd]).trimmingCharacters(in: .whitespaces)
+                    let afterQuote = trimmed.index(after: quoteEnd)
+                    let rest = trimmed[afterQuote...].trimmingCharacters(in: .whitespaces)
+                    if rest.hasPrefix(":") {
+                        let isAsciiKey = keyCandidate.allSatisfy { ($0 >= "A" && $0 <= "Z") || ($0 >= "a" && $0 <= "z") || ($0 >= "0" && $0 <= "9") || $0 == "_" || $0 == "-" }
+                        if let firstChar = keyCandidate.first, (firstChar >= "A" && firstChar <= "Z") || (firstChar >= "a" && firstChar <= "z"), isAsciiKey {
+                            let lower = keyCandidate.lowercased()
+                            if keyCandidate.count >= 3 && lower != "type" && lower != "id" {
+                                jsonName = keyCandidate
+                                break
                             }
                         }
                     }
+                    searchStart = afterQuote
+                }
+                if jsonName != "config" {
+                    break
                 }
             }
-            return "\(jsonName).json"
+            return "\(sanitizeFileName(jsonName)).json"
 
         case .swift:
             let swiftKeywords = ["struct ", "class ", "enum ", "actor ", "protocol ", "func "]
@@ -247,9 +261,8 @@ public struct CardFileExporter {
                         break
                     }
                 }
-                break
             }
-            return "\(shName).sh"
+            return "\(sanitizeFileName(shName)).sh"
 
         case .js:
             let jsKeywords = ["function ", "class ", "const ", "let ", "var "]
@@ -328,7 +341,8 @@ public struct CardFileExporter {
             if base.count > 30 {
                 base = String(base.prefix(30)).trimmingCharacters(in: CharacterSet(charactersIn: "_- "))
             }
-            return "\(base).\(format.extensionName)"
+            let safeBase = sanitizeFileName(base)
+            return "\(safeBase).\(format.extensionName)"
         }
     }
 
@@ -408,7 +422,7 @@ public struct CardFileExporter {
                 : NSFont.systemFont(ofSize: 12)
             let attr = NSAttributedString(
                 string: text,
-                attributes: [.font: font, .foregroundColor: NSColor.textColor]
+                attributes: [.font: font, .foregroundColor: NSColor.black]
             )
             return try attr.data(
                 from: NSRange(location: 0, length: attr.length),
@@ -427,7 +441,8 @@ public struct CardFileExporter {
         isCode: Bool = false,
         language: AppLanguage = .current
     ) {
-        NSApp.activate(ignoringOtherApps: true)
+        ClipboardMonitor.shared.isShowingFilePanel = true
+        NSApp.activate()
         let savePanel = NSSavePanel()
         if let utType = UTType(filenameExtension: format.extensionName) {
             savePanel.allowedContentTypes = [utType]
@@ -450,12 +465,15 @@ public struct CardFileExporter {
         let hostWindow = NSApp.windows.first(where: { $0.className.contains("FloatingPanel") && $0.isVisible }) ?? NSApp.keyWindow
         if let host = hostWindow {
             savePanel.beginSheetModal(for: host) { response in
+                ClipboardMonitor.shared.isShowingFilePanel = false
                 if response == .OK, let url = savePanel.url {
                     writeAction(url)
                 }
             }
         } else {
-            if savePanel.runModal() == .OK, let url = savePanel.url {
+            let response = savePanel.runModal()
+            ClipboardMonitor.shared.isShowingFilePanel = false
+            if response == .OK, let url = savePanel.url {
                 writeAction(url)
             }
         }

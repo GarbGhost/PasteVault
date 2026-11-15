@@ -5,11 +5,12 @@ import CoreGraphics
 
 @MainActor
 public final class FloatingPanel<Content: View>: NSPanel {
-    private var localKeyDownMonitor: Any?
-    private var globalMouseDownMonitor: Any?
-    private var globalKeyDownMonitor: Any?
-    private var workspaceAppObserver: NSObjectProtocol?
-    private var workspaceSpaceObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var localKeyDownMonitor: Any?
+    private nonisolated(unsafe) var globalMouseDownMonitor: Any?
+    private nonisolated(unsafe) var globalKeyDownMonitor: Any?
+    private nonisolated(unsafe) var workspaceAppObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var workspaceSpaceObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var dismissObserver: NSObjectProtocol?
     private weak var previousApp: NSRunningApplication?
     public private(set) var lastPresentTimestamp: TimeInterval = 0
     public private(set) var lastDismissTimestamp: TimeInterval = 0
@@ -28,6 +29,9 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
         // Окно открывается на текущем рабочем столе и автоматически скрывается при перелистывании Spaces
         self.isReleasedWhenClosed = false
+        if self.attachedSheet == nil && NSApp.modalWindow == nil {
+            ClipboardMonitor.shared.isShowingFilePanel = false
+        }
         self.hidesOnDeactivate = false
         self.becomesKeyOnlyIfNeeded = false
 
@@ -44,8 +48,8 @@ public final class FloatingPanel<Content: View>: NSPanel {
         self.backgroundColor = .clear
         self.hasShadow = true
 
-        let savedTheme = UserDefaults.standard.string(forKey: "selectedThemeId")
-            ?? UserDefaults.standard.string(forKey: "pasteVaultTheme")
+        let savedTheme = AppDefaults.shared.string(forKey: "selectedThemeId")
+            ?? AppDefaults.shared.string(forKey: "pasteVaultTheme")
             ?? "obsidian"
         let isLight = (savedTheme == "frost" || savedTheme == "solarizedPaper")
         self.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
@@ -124,51 +128,13 @@ public final class FloatingPanel<Content: View>: NSPanel {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self, self.isVisible else { return }
+                self.removeEventMonitors()
                 self.lastDismissTimestamp = ProcessInfo.processInfo.systemUptime
                 self.orderOut(nil)
             }
         }
 
-        // Глобальный мониторинг кликов мыши вне окна Paste Vault: мгновенно скрывает панель при клике мимо
-        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            Task { @MainActor in
-                guard let self = self, self.isVisible else { return }
-                if ClipboardMonitor.shared.isModalOverlayActive { return }
-                if self.attachedSheet != nil { return }
-                let hasActiveSaveOrOpenPanel = NSApp.windows.contains { $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel")) }
-                if hasActiveSaveOrOpenPanel { return }
-
-                let mouseLocation = NSEvent.mouseLocation
-                if self.frame.contains(mouseLocation) { return }
-
-                // Исключаем клики внутри дочерних окон и окон поповеров приложения Paste Vault (NSPopover)
-                let isInsideAnyAppWindow = NSApp.windows.contains { w in
-                    guard w.isVisible else { return false }
-                    let isPopover = w.className.contains("Popover") || (w.parent == self)
-                    return isPopover && w.frame.contains(mouseLocation)
-                }
-                if isInsideAnyAppWindow { return }
-
-                self.dismissPanel(restorePreviousApp: false)
-            }
-        }
-
-        // Глобальный мониторинг клавиши Esc, когда окно Paste Vault открыто поверх других приложений
-        globalKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self, self.isVisible else { return }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if event.keyCode == 53 && flags.isEmpty {
-                Task { @MainActor in
-                    if ClipboardMonitor.shared.isModalOverlayActive {
-                        NotificationCenter.default.post(name: Notification.Name("pasteVaultModalEscape"), object: nil)
-                    } else {
-                        self.dismissPanel(restorePreviousApp: false)
-                    }
-                }
-            }
-        }
-
-        NotificationCenter.default.addObserver(
+        dismissObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name("pasteVaultDismissPanel"),
             object: nil,
             queue: .main
@@ -176,6 +142,27 @@ public final class FloatingPanel<Content: View>: NSPanel {
             Task { @MainActor in
                 self?.dismissPanel(restorePreviousApp: true)
             }
+        }
+    }
+
+    deinit {
+        if let monitor = localKeyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        if let monitor = globalMouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        if let monitor = globalKeyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        if let observer = workspaceAppObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let observer = workspaceSpaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let observer = dismissObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -198,17 +185,13 @@ public final class FloatingPanel<Content: View>: NSPanel {
         if ShortcutManager.shared.isRecordingShortcut {
             return
         }
-        if self.attachedSheet != nil {
+        let hasActiveSaveOrOpenPanel = NSApp.windows.contains {
+            $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel"))
+        }
+        if self.attachedSheet != nil || NSApp.modalWindow != nil || hasActiveSaveOrOpenPanel || ClipboardMonitor.shared.isShowingFilePanel {
             return
         }
-        let hasActiveSaveOrOpenPanel = NSApp.windows.contains { $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel")) }
-        if hasActiveSaveOrOpenPanel {
-            return
-        }
-        if let monitor = localKeyDownMonitor {
-            NSEvent.removeMonitor(monitor)
-            localKeyDownMonitor = nil
-        }
+        removeEventMonitors()
 
         guard self.isVisible else { return }
         self.lastDismissTimestamp = ProcessInfo.processInfo.systemUptime
@@ -348,6 +331,9 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
     public func presentPanel() {
         self.isReleasedWhenClosed = false
+        if self.attachedSheet == nil && NSApp.modalWindow == nil {
+            ClipboardMonitor.shared.isShowingFilePanel = false
+        }
         let now = ProcessInfo.processInfo.systemUptime
         self.lastPresentTimestamp = now
 
@@ -366,8 +352,8 @@ public final class FloatingPanel<Content: View>: NSPanel {
             }
         }
 
-        let savedTheme = UserDefaults.standard.string(forKey: "selectedThemeId")
-            ?? UserDefaults.standard.string(forKey: "pasteVaultTheme")
+        let savedTheme = AppDefaults.shared.string(forKey: "selectedThemeId")
+            ?? AppDefaults.shared.string(forKey: "pasteVaultTheme")
             ?? "obsidian"
         let isLight = (savedTheme == "frost" || savedTheme == "solarizedPaper")
         self.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
@@ -400,25 +386,6 @@ public final class FloatingPanel<Content: View>: NSPanel {
         }
     }
 
-    // MARK: - Smart Multi-Monitor & Target App Positioning
-    private func calculateSmartPanelFrame(for targetApp: NSRunningApplication?) -> NSRect {
-        let width = max(self.frame.width, 900)
-        let height = max(self.frame.height, 600)
-        let mouseLocation = NSEvent.mouseLocation
-        let mouseScreen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) })
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
-
-        if let screen = mouseScreen {
-            let visible = screen.visibleFrame
-            let rawX = visible.midX - width / 2
-            let rawY = visible.midY - height / 2
-            return clampedFrame(x: rawX, y: rawY, width: width, height: height, in: visible)
-        }
-
-        return NSRect(x: 200, y: 200, width: width, height: height)
-    }
-
     private func clampedFrame(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, in visible: NSRect) -> NSRect {
         let margin: CGFloat = 14
         let finalWidth = min(width, visible.width - margin * 2)
@@ -433,93 +400,100 @@ public final class FloatingPanel<Content: View>: NSPanel {
         return NSRect(x: round(clampedX), y: round(clampedY), width: round(finalWidth), height: round(finalHeight))
     }
 
-    private func screenContaining(point: NSPoint) -> NSScreen? {
-        return NSScreen.screens.first(where: { NSMouseInRect(point, $0.frame, false) })
-    }
-
-    /// Определяет координаты сфокусированного поля ввода (например, поисковой строки Safari) через AXUIElement
-    private func queryFocusedElementAppKitRect(for app: NSRunningApplication) -> NSRect? {
-        guard AccessibilityService.isAccessibilityTrusted() else { return nil }
-
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        var focusedValue: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedValue)
-        guard status == .success, let focusedObj = focusedValue else { return nil }
-        let focusedElement = focusedObj as! AXUIElement
-
-        var posValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(focusedElement, kAXPositionAttribute as CFString, &posValue) == .success,
-              AXUIElementCopyAttributeValue(focusedElement, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let posRef = posValue,
-              let sizeRef = sizeValue else {
-            return nil
+    private func removeEventMonitors() {
+        if let monitor = localKeyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyDownMonitor = nil
         }
-
-        var cgPoint = CGPoint.zero
-        var cgSize = CGSize.zero
-        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &cgPoint),
-              AXValueGetValue(sizeRef as! AXValue, .cgSize, &cgSize),
-              cgSize.width > 16, cgSize.height > 8, cgSize.height < 500 else {
-            return nil
+        if let monitor = globalMouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseDownMonitor = nil
         }
-
-        return convertQuartzRectToAppKit(cgX: cgPoint.x, cgY: cgPoint.y, width: cgSize.width, height: cgSize.height)
-    }
-
-    /// Определяет координаты активного окна целевого приложения (например, Safari) на любом из мониторов
-    private func queryFrontmostWindowAppKitRect(for app: NSRunningApplication, preferredScreen: NSScreen?) -> NSRect? {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+        if let monitor = globalKeyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyDownMonitor = nil
         }
-
-        let targetPID = app.processIdentifier
-        var candidateRects: [NSRect] = []
-
-        for entry in windowList {
-            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? pid_t,
-                  ownerPID == targetPID,
-                  let layer = entry[kCGWindowLayer as String] as? Int,
-                  layer == 0,
-                  let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
-                  let x = bounds["X"],
-                  let y = bounds["Y"],
-                  let w = bounds["Width"],
-                  let h = bounds["Height"],
-                  w >= 200, h >= 150 else {
-                continue
-            }
-
-            let appKitRect = convertQuartzRectToAppKit(cgX: x, cgY: y, width: w, height: h)
-            candidateRects.append(appKitRect)
-        }
-
-        guard !candidateRects.isEmpty else { return nil }
-
-        // Если у приложения (например, Safari) открыто несколько окон на разных мониторах, предпочитаем окно на экране с курсором
-        if let preferredScreen {
-            if let matchOnMouseScreen = candidateRects.first(where: {
-                NSMouseInRect(NSPoint(x: $0.midX, y: $0.midY), preferredScreen.frame, false)
-            }) {
-                return matchOnMouseScreen
-            }
-        }
-
-        return candidateRects.first
-    }
-
-    /// Конвертирует глобальные координаты Quartz (0,0 в верхнем левом углу главного экрана) в координаты AppKit (0,0 в нижнем левом углу)
-    private func convertQuartzRectToAppKit(cgX: CGFloat, cgY: CGFloat, width: CGFloat, height: CGFloat) -> NSRect {
-        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height ?? 1080
-        let appKitY = primaryScreenHeight - cgY - height
-        return NSRect(x: cgX, y: appKitY, width: width, height: height)
     }
 
     private func installEventMonitors() {
+        if globalMouseDownMonitor == nil {
+            globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self = self, self.isVisible else { return }
+                    let hasActiveSaveOrOpenPanel = NSApp.windows.contains {
+                        $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel"))
+                    }
+                    if self.attachedSheet != nil || NSApp.modalWindow != nil || hasActiveSaveOrOpenPanel || ClipboardMonitor.shared.isShowingFilePanel { return }
+
+                    let mouseLocation = NSEvent.mouseLocation
+                    if self.frame.contains(mouseLocation) { return }
+
+                    let isInsideAnyAppWindow = NSApp.windows.contains { w in
+                        guard w.isVisible else { return false }
+                        let isPopover = w.className.contains("Popover") || (w.parent == self)
+                        return isPopover && w.frame.contains(mouseLocation)
+                    }
+                    if isInsideAnyAppWindow { return }
+
+                    if ClipboardMonitor.shared.isModalOverlayActive {
+                        NotificationCenter.default.post(name: Notification.Name("pasteVaultForceCloseLightbox"), object: nil)
+                    }
+                    self.dismissPanel(restorePreviousApp: false)
+                }
+            }
+        }
+
+        if globalKeyDownMonitor == nil {
+            globalKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self = self, self.isVisible else { return }
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                if event.keyCode == 53 && flags.isEmpty {
+                    Task { @MainActor in
+                        let hasActiveSaveOrOpenPanel = NSApp.windows.contains {
+                            $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel"))
+                        }
+                        if self.attachedSheet != nil || NSApp.modalWindow != nil || hasActiveSaveOrOpenPanel || ClipboardMonitor.shared.isShowingFilePanel {
+                            return
+                        }
+                        if ClipboardMonitor.shared.isModalOverlayActive {
+                            NotificationCenter.default.post(name: Notification.Name("pasteVaultModalEscape"), object: nil)
+                        } else {
+                            self.dismissPanel(restorePreviousApp: false)
+                        }
+                    }
+                }
+            }
+        }
+
         guard localKeyDownMonitor == nil else { return }
-        localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self = self else { return event }
+
+            let hasActiveSaveOrOpenPanel = NSApp.windows.contains {
+                $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel"))
+            }
+            let isFilePanelActive = ClipboardMonitor.shared.isShowingFilePanel || hasActiveSaveOrOpenPanel
+            let responder = event.window?.firstResponder ?? NSApp.keyWindow?.firstResponder
+
+            guard Self.shouldInterceptKeyEvent(
+                eventWindow: event.window,
+                panel: self,
+                isShowingFilePanel: isFilePanelActive,
+                hasModalWindow: NSApp.modalWindow != nil,
+                hasAttachedSheet: self.attachedSheet != nil,
+                firstResponder: responder,
+                keyCode: event.keyCode,
+                modifierFlags: event.modifierFlags
+            ) else {
+                return event
+            }
+
+            if event.type == .keyUp {
+                if event.keyCode == 125 || event.keyCode == 126 {
+                    NotificationCenter.default.post(name: Notification.Name("pasteVaultMoveSelectionStop"), object: nil)
+                }
+                return event
+            }
 
             // Если прямо сейчас идёт запись горячей клавиши в Настройках — поглощаем событие, чтобы окно не закрывалось
             if ShortcutManager.shared.isRecordingShortcut {
@@ -538,15 +512,16 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
             // Если открыто модальное окно просмотра/редактора скриншотов — обрабатываем его горячие клавиши в приоритете
             if ClipboardMonitor.shared.isModalOverlayActive {
-                let isTextInput = ClipboardMonitor.shared.isEditingScreenshotText
+                let isActiveTextResponder = (responder is NSTextView) || (responder is NSTextField) || (responder is NSText)
+                let isTextInput = ClipboardMonitor.shared.isEditingScreenshotText || isActiveTextResponder
 
                 // Esc (53) без модификаторов — закрыть редактор (или завершить ввод текста), не закрывая главное окно
                 if event.keyCode == 53 && flags.isEmpty {
                     NotificationCenter.default.post(name: Notification.Name("pasteVaultModalEscape"), object: nil)
                     return nil
                 }
-                // Return / Enter (36 / 76) без модификаторов — завершить ввод текста или сохранить копию скриншота
-                if (event.keyCode == 36 || event.keyCode == 76) && flags.subtracting([.numericPad, .function]).isEmpty {
+                // Return / Enter (36 / 76) без модификаторов — сохранить копию скриншота (если не вводится текст)
+                if (event.keyCode == 36 || event.keyCode == 76) && flags.subtracting([.numericPad, .function]).isEmpty && !isTextInput {
                     NotificationCenter.default.post(name: Notification.Name("pasteVaultPasteSelected"), object: nil)
                     return nil
                 }
@@ -593,6 +568,33 @@ public final class FloatingPanel<Content: View>: NSPanel {
                 return event
             }
 
+            // ⌘Q (keyCode 12) — всегда разрешаем экстренный выход из приложения
+            if flags == .command && (event.keyCode == 12 || event.charactersIgnoringModifiers?.lowercased() == "q") {
+                NSApplication.shared.terminate(nil)
+                return nil
+            }
+
+            // Если фокус находится в отдельном дочернем окне/поповере (например, выпадающий список «Новая категория»)
+            if let keyWin = NSApp.keyWindow, keyWin !== self {
+                return event
+            }
+
+            // Если фокус ввода находится в текстовом поле (NSTextView / NSTextField / NSText)
+            let isTextInput = (NSApp.keyWindow?.firstResponder is NSTextView) ||
+                              (NSApp.keyWindow?.firstResponder is NSTextField) ||
+                              (NSApp.keyWindow?.firstResponder is NSText)
+            let isMultilineTextView = (NSApp.keyWindow?.firstResponder as? NSTextView)?.isFieldEditor == false
+
+            // Если пользователь печатает текст (без Command/Control/Option модификаторов) — не перехватываем нажатия букв и символов;
+            // в многострочном редакторе (isFieldEditor == false, например «Текст фрагмента») также пропускаем Return/Enter для переноса строки.
+            if isTextInput && flags.intersection([.command, .control, .option]).isEmpty {
+                let isArrow = (event.keyCode == 125 || event.keyCode == 126)
+                let isEnter = (event.keyCode == 36 || event.keyCode == 76)
+                if !isArrow && (!isEnter || isMultilineTextView) {
+                    return event
+                }
+            }
+
             // 1. Esc (53) без модификаторов — закрыть окно
             if event.keyCode == 53 && flags.isEmpty {
                 self.dismissPanel(restorePreviousApp: true)
@@ -607,13 +609,21 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
             // 3. Стрелка вниз (125) — следующий элемент списка
             if event.keyCode == 125 && flags.subtracting([.numericPad, .function]).isEmpty {
-                NotificationCenter.default.post(name: Notification.Name("pasteVaultMoveSelectionDown"), object: nil)
+                NotificationCenter.default.post(
+                    name: Notification.Name("pasteVaultMoveSelectionDown"),
+                    object: nil,
+                    userInfo: ["isRepeat": event.isARepeat]
+                )
                 return nil
             }
 
             // 4. Стрелка вверх (126) — предыдущий элемент списка
             if event.keyCode == 126 && flags.subtracting([.numericPad, .function]).isEmpty {
-                NotificationCenter.default.post(name: Notification.Name("pasteVaultMoveSelectionUp"), object: nil)
+                NotificationCenter.default.post(
+                    name: Notification.Name("pasteVaultMoveSelectionUp"),
+                    object: nil,
+                    userInfo: ["isRepeat": event.isARepeat]
+                )
                 return nil
             }
 
@@ -677,14 +687,43 @@ public final class FloatingPanel<Content: View>: NSPanel {
                 return nil
             }
 
-            // ⌘Q (keyCode 12) — полный выход из приложения
-            if flags == .command && (event.keyCode == 12 || event.charactersIgnoringModifiers?.lowercased() == "q") {
-                NSApplication.shared.terminate(nil)
-                return nil
-            }
-
             return event
         }
+    }
+
+    /// Проверяет, имеет ли право `FloatingPanel` перехватывать клавиатурное событие в текущем контексте.
+    /// Не перехватывает события чужих/модальных окон (`NSSavePanel`, `NSOpenPanel`, `NSAlert`, поповеры, листы)
+    /// и стандартные клавиши редактирования текста внутри `NSTextView` / `NSText`.
+    public static func shouldInterceptKeyEvent(
+        eventWindow: NSWindow?,
+        panel: NSWindow,
+        isShowingFilePanel: Bool,
+        hasModalWindow: Bool,
+        hasAttachedSheet: Bool,
+        firstResponder: NSResponder?,
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        guard eventWindow === panel else { return false }
+        guard !isShowingFilePanel, !hasModalWindow, !hasAttachedSheet else { return false }
+
+        if firstResponder is NSTextView || firstResponder is NSText {
+            let cleanFlags = modifierFlags
+                .intersection(.deviceIndependentFlagsMask)
+                .subtracting([.numericPad, .function, .capsLock])
+            let isEditingKey = (keyCode == 51 || keyCode == 117) // Backspace / Forward Delete
+                || (123...126).contains(keyCode) // Arrow keys
+            if isEditingKey && cleanFlags.intersection([.command, .control, .option]).isEmpty {
+                return false
+            }
+            // ⌘A (0), ⌘C (8), ⌘V (9), ⌘X (7), ⌘Z (6)
+            if cleanFlags.contains(.command) && cleanFlags.intersection([.control, .option]).isEmpty {
+                if keyCode == 0 || keyCode == 8 || keyCode == 9 || keyCode == 7 || keyCode == 6 {
+                    return false
+                }
+            }
+        }
+        return true
     }
 }
 
