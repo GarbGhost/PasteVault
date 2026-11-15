@@ -13,6 +13,9 @@ let package = Package(
         .executableTarget(
             name: "PasteVault",
             path: "Sources/PasteVault",
+            resources: [
+                .copy("Resources/Fonts")
+            ],
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
                 .linkedFramework("AppKit"),

@@ -80,25 +80,35 @@ public enum AccessibilityService {
         )
     }
 
-    /// Сбрасывает старую запись TCC для приложения через tccutil
-    public static func resetTCCRecord() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        task.arguments = ["reset", "Accessibility", "com.pastevault.app"]
-        try? task.run()
-        task.waitUntilExit()
+    /// Асинхронно сбрасывает старую запись TCC для приложения через tccutil (только если прав ещё нет)
+    public static func resetTCCRecord(completion: (@Sendable () -> Void)? = nil) {
+        guard !AXIsProcessTrusted() else {
+            DispatchQueue.main.async { completion?() }
+            return
+        }
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.pastevault.app"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", "Accessibility", bundleId]
+            try? task.run()
+            task.waitUntilExit()
+            DispatchQueue.main.async {
+                completion?()
+            }
+        }
     }
 
     /// Вызывает ТОЛЬКО нативный системный вызов macOS для регистрации и показа окна запроса Apple
     public static func requestAccessPrompt() {
-        resetTCCRecord()
+        resetTCCRecord {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(options)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.UniversalAccessAuthWarn").first?.activate(options: [.activateAllWindows])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.UniversalAccessAuthWarn").first?.activate(options: [.activateAllWindows])
+                }
             }
         }
     }
