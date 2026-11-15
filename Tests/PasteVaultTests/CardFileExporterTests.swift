@@ -169,12 +169,12 @@ final class CardFileExporterTests: XCTestCase {
         XCTAssertEqual(rec, .conf, "Для конфигурационного файла рекомендуемым форматом должен быть .conf")
     }
 
-    // MARK: - 4. Тест защиты от двойного щелчка в TapticSoundAndHaptics (debounce 250 мс и One-Click-Per-MouseDown Gate)
+    // MARK: - 4. Тест защиты от двойного щелчка в TapticSoundAndHaptics (debounce 350 мс и One-Click-Per-MouseDown Gate)
     func testTapticSingleClickDebounceWindow() {
         XCTAssertEqual(
             TapticSoundAndHaptics.clickDebounceInterval,
-            0.25,
-            "clickDebounceInterval должен быть равен 250 мс (0.25 с)"
+            0.35,
+            "clickDebounceInterval должен быть равен 350 мс (0.35 с)"
         )
         XCTAssertEqual(
             TapticSoundAndHaptics.wheelTickInterval,
@@ -188,19 +188,21 @@ final class CardFileExporterTests: XCTestCase {
         )
 
         TapticSoundAndHaptics.shared.resetMouseCycle()
+        Thread.sleep(forTimeInterval: 0.36)
 
         // Первый вызов
         let first = TapticSoundAndHaptics.shared.playClick()
-        // Немедленный повторный вызов (интервал ~0 мс < 250 мс) должен быть подавлен
+        // Немедленный повторный вызов (интервал ~0 мс < 350 мс) должен быть подавлен
         let secondImmediate = TapticSoundAndHaptics.shared.playClick()
 
         XCTAssertTrue(first, "Первый вызов playClick() должен успешно выполниться")
-        XCTAssertFalse(secondImmediate, "Второй вызов playClick() в окне < 250 мс должен быть подавлен")
+        XCTAssertFalse(secondImmediate, "Второй вызов playClick() в окне < 350 мс должен быть подавлен")
     }
 
     // MARK: - 5. Тест физической мыши с задержкой 200 мс между mouseDown и mouseUp (One-Click-Per-MouseDown Gate)
     func testPhysicalMouseHold200msProducesStrictlySingleClick() {
         TapticSoundAndHaptics.shared.resetMouseCycle()
+        Thread.sleep(forTimeInterval: 0.36)
 
         // 1. Симулируем физическое нажатие кнопки мыши (mouseDown)
         TapticSoundAndHaptics.shared.simulateMouseDown()
@@ -261,10 +263,18 @@ final class CardFileExporterTests: XCTestCase {
             UpdateService.isVersion("1.0.0", newerThan: "1.0.1"),
             "Версия 1.0.0 не должна определяться как более новая, чем 1.0.1"
         )
+        XCTAssertTrue(
+            UpdateService.isVersion("1.1.0", newerThan: "1.0.1"),
+            "Версия 1.1.0 должна определяться как более новая, чем 1.0.1"
+        )
+        XCTAssertFalse(
+            UpdateService.isVersion("1.0.1", newerThan: "1.1.0"),
+            "Версия 1.0.1 не должна определяться как более новая, чем 1.1.0"
+        )
         XCTAssertEqual(
             UpdateService.shared.currentVersion,
-            "1.0.1",
-            "Текущая версия приложения в UpdateService должна быть 1.0.1"
+            "1.1.0",
+            "Текущая версия приложения в UpdateService должна быть 1.1.0"
         )
     }
 
@@ -488,5 +498,40 @@ final class CardFileExporterTests: XCTestCase {
         XCTAssertEqual(item.textPreview.count, largeRoadmap.count, "Длина сохранённого контента должна в точности совпадать")
         XCTAssertTrue(item.textPreview.contains("### 19. Раздел номер 19"), "Документ должен содержать пункт 19 без усечения")
         XCTAssertTrue(item.textPreview.contains("### 20. Раздел номер 20"), "Документ должен содержать пункт 20 без усечения")
+    }
+
+    // MARK: - 16. Stage 3: Single-line multi-key JSON, multi-line .sh scan & DOCX black foreground
+    func testStage3ExporterSingleLineJsonMultiLineShAndDocxForegroundColor() throws {
+        let oneLineJson = #"{"id":"123","type":"event","service":"billing-api"}"#
+        XCTAssertEqual(
+            CardFileExporter.defaultFileName(for: oneLineJson, format: .json),
+            "service.json",
+            "Single-line multi-key JSON must skip 'id'/'type' and inspect later keys on the same line"
+        )
+
+        let multiLineShell = """
+        #!/usr/bin/env bash
+        echo "starting helper()"
+        deploy_release() {
+          echo "ok"
+        }
+        """
+        XCTAssertEqual(
+            CardFileExporter.defaultFileName(for: multiLineShell, format: .sh),
+            "deploy_release.sh",
+            "Shell exporter must scan subsequent lines after non-function calls"
+        )
+
+        let docxData = try CardFileExporter.generateExportData(from: "Dark mode test", format: .docx, isCode: false)
+        let decoded = try NSAttributedString(
+            data: docxData,
+            options: [.documentType: NSAttributedString.DocumentType.officeOpenXML],
+            documentAttributes: nil
+        )
+        let color = decoded.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        let srgb = try XCTUnwrap(color?.usingColorSpace(.sRGB))
+        XCTAssertLessThan(srgb.redComponent, 0.1)
+        XCTAssertLessThan(srgb.greenComponent, 0.1)
+        XCTAssertLessThan(srgb.blueComponent, 0.1)
     }
 }

@@ -1,5 +1,8 @@
 import XCTest
 import Foundation
+import AppKit
+import SwiftUI
+import CryptoKit
 @testable import PasteVault
 
 final class BackupManagerTests: XCTestCase {
@@ -211,7 +214,7 @@ final class BackupManagerTests: XCTestCase {
         ]
 
         let backupSnippets = [
-            QuickSnippetItem(id: "new-1", title: "Новый 1", content: "N1", category: "New", isPinned: true)
+            QuickSnippetItem(id: "new-1", title: "Новый 1", content: "N1", category: "__TestCategory_Temp__", isPinned: true)
         ]
 
         let archive = PasteVaultBackupArchive(
@@ -288,5 +291,654 @@ final class BackupManagerTests: XCTestCase {
         XCTAssertEqual(loadedArchive.snippets?.first?.id, "file-test-snip")
         XCTAssertEqual(loadedArchive.snippets?.first?.isPinned, true)
         XCTAssertEqual(loadedArchive.settings?.blacklistedBundleIDs, ["com.apple.finder"])
+    }
+
+    // MARK: - 6. Парольное шифрование PVENC2 (PBKDF2 + AES-GCM) и синхронизация фрагментов в SQLite
+    @MainActor
+    func testEncryptedArchiveAndSQLiteSnippetPersistence() async throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_enc_backup_\(UUID().uuidString).pvault")
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        let secretText = "SuperSecretPassword_XYZ_98765"
+        let snippetId = "__test_restore_sqlite_\(UUID().uuidString)"
+        let password = "StrongBackupPass!2026"
+        let archive = PasteVaultBackupArchive(
+            version: 2,
+            createdAt: Date(),
+            appVersion: "1.0.1",
+            clipboardItems: [
+                BackupClipboardItem(
+                    id: "enc-clip-1",
+                    contentType: 4,
+                    textPreview: secretText,
+                    contentHash: "hash-enc-1",
+                    sourceBundleId: nil,
+                    sourceAppName: "PassGen",
+                    isSensitive: true,
+                    secretKind: "Пароль",
+                    isPinned: false,
+                    createdAt: 1730002000,
+                    expiresAt: nil,
+                    ocrText: nil,
+                    fileURLPath: nil,
+                    useCount: 0
+                )
+            ],
+            snippets: [
+                QuickSnippetItem(id: snippetId, title: "Восстановленный SQLite", content: "Тест", category: "Работа", isPinned: true)
+            ],
+            settings: nil
+        )
+
+        try BackupManager.exportArchiveToFile(archive: archive, to: tempURL, password: password)
+        let rawBytes = try Data(contentsOf: tempURL)
+        XCTAssertTrue(rawBytes.starts(with: Data("PVENC2:".utf8)), "Парольный бэкап должен иметь заголовок PVENC2:")
+        XCTAssertTrue(BackupManager.fileRequiresPassword(at: tempURL))
+        XCTAssertNil(rawBytes.range(of: Data(secretText.utf8)), "Секреты не должны храниться в файле бэкапа в открытом виде")
+
+        XCTAssertThrowsError(try BackupManager.loadArchiveFromFile(from: tempURL, password: nil)) { error in
+            guard case BackupManager.BackupArchiveError.passwordRequired = error else {
+                XCTFail("Ожидалась ошибка .passwordRequired, получено: \(error)")
+                return
+            }
+        }
+        XCTAssertThrowsError(try BackupManager.loadArchiveFromFile(from: tempURL, password: "WrongPassword")) { error in
+            guard case BackupManager.BackupArchiveError.incorrectPasswordOrCorrupted = error else {
+                XCTFail("Ожидалась ошибка .incorrectPasswordOrCorrupted, получено: \(error)")
+                return
+            }
+        }
+
+        let decoded = try BackupManager.loadArchiveFromFile(from: tempURL, password: password)
+        XCTAssertEqual(decoded.clipboardItems?.first?.textPreview, secretText)
+
+        let existingSnippets = await DatabaseManager.shared.fetchSnippets()
+        try await BackupManager.restoreArchive(
+            decoded,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: true,
+            monitor: ClipboardMonitor.shared,
+            currentSnippets: existingSnippets,
+            onUpdateSnippets: { _ in }
+        )
+
+        let dbSnippets = await DatabaseManager.shared.fetchSnippets()
+        XCTAssertTrue(dbSnippets.contains(where: { $0.id == snippetId }), "Восстановленный фрагмент должен быть сохранён в SQLite")
+        try? await DatabaseManager.shared.deleteSnippet(idString: snippetId)
+    }
+
+    // MARK: - 7. Экспорт без пароля (открытый JSON v2) и обратная совместимость с PVENC1 + v1 JSON
+    func testPasswordlessExportAndLegacyV1Compatibility() throws {
+        let tempPlainURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_plain_v2_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempPlainURL) }
+
+        let archiveV2 = PasteVaultBackupArchive(
+            version: 2,
+            createdAt: Date(timeIntervalSince1970: 1730005000),
+            appVersion: "1.0.1",
+            clipboardItems: [
+                BackupClipboardItem(
+                    id: "plain-clip-1",
+                    contentType: 0,
+                    textPreview: "Plaintext item without password",
+                    contentHash: "hash-plain-1",
+                    sourceBundleId: nil,
+                    sourceAppName: nil,
+                    isSensitive: false,
+                    secretKind: nil,
+                    isPinned: false,
+                    createdAt: 1730005000,
+                    expiresAt: nil,
+                    ocrText: nil,
+                    fileURLPath: nil,
+                    useCount: 1
+                )
+            ],
+            snippets: nil,
+            settings: nil
+        )
+
+        try BackupManager.exportArchiveToFile(archive: archiveV2, to: tempPlainURL, password: "")
+        let plainBytes = try Data(contentsOf: tempPlainURL)
+        XCTAssertFalse(plainBytes.starts(with: Data("PVENC2:".utf8)))
+        XCTAssertFalse(BackupManager.fileRequiresPassword(at: tempPlainURL))
+        let plainLoaded = try BackupManager.loadArchiveFromFile(from: tempPlainURL)
+        XCTAssertEqual(plainLoaded.clipboardItems?.first?.id, "plain-clip-1")
+
+        // Обратная совместимость: устаревший PVENC1: + числовые timestamp v1
+        let legacyEncoder = JSONEncoder()
+        legacyEncoder.dateEncodingStrategy = .secondsSince1970
+        let numericJSON = try legacyEncoder.encode(archiveV2)
+        let numericDecoded = try BackupManager.decodeArchiveData(numericJSON)
+        XCTAssertEqual(Int(numericDecoded.createdAt.timeIntervalSince1970), 1730005000)
+
+        let legacyMaterial = Data("com.pastevault.app.backup.aesgcm.v1".utf8)
+        let legacyKey = SymmetricKey(data: SHA256.hash(data: legacyMaterial))
+        let legacySealed = try AES.GCM.seal(numericJSON, using: legacyKey)
+        let legacyCombined = try XCTUnwrap(legacySealed.combined)
+        var pvenc1Data = Data("PVENC1:".utf8)
+        pvenc1Data.append(legacyCombined.base64EncodedData())
+
+        let decodedPVENC1 = try BackupManager.decodeArchiveData(pvenc1Data)
+        XCTAssertEqual(decodedPVENC1.clipboardItems?.first?.id, "plain-clip-1")
+    }
+
+    // MARK: - 8. Санитизация path traversal в именах файлов и синхронная очистка при Replace
+    @MainActor
+    func testReplaceModeCleanupAndTraversalSanitization() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        try await DatabaseManager.shared.restoreItem(
+            id: "old-item-before-replace",
+            contentType: .text,
+            textPreview: "Old text to be replaced",
+            contentHash: "hash-old-replace",
+            sourceBundleId: nil,
+            sourceAppName: nil,
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: false,
+            createdAt: 1730000100,
+            expiresAt: nil,
+            fileURLPath: nil,
+            useCount: 0
+        )
+
+        let maliciousId = "../../evil_backup_escape"
+        let tinyPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")!
+        let archive = PasteVaultBackupArchive(
+            version: 2,
+            createdAt: Date(),
+            appVersion: "1.0.1",
+            clipboardItems: [
+                BackupClipboardItem(
+                    id: maliciousId,
+                    contentType: ContentKind.image.rawValue,
+                    textPreview: "[Screenshot]",
+                    contentHash: "hash-safe-sanitized",
+                    sourceBundleId: nil,
+                    sourceAppName: nil,
+                    isSensitive: false,
+                    secretKind: nil,
+                    isPinned: false,
+                    createdAt: 1730000200,
+                    expiresAt: nil,
+                    ocrText: nil,
+                    fileURLPath: "/tmp/../../../etc/passwd",
+                    useCount: 0,
+                    imagePNGDataBase64: tinyPNG.base64EncodedString()
+                )
+            ],
+            snippets: nil,
+            settings: nil
+        )
+
+        try await BackupManager.restoreArchive(
+            archive,
+            restoreClipboard: true,
+            restoreSnippets: false,
+            restoreSettings: false,
+            mergeMode: false,
+            monitor: ClipboardMonitor.shared,
+            currentSnippets: [],
+            onUpdateSnippets: { _ in }
+        )
+
+        let items = try await DatabaseManager.shared.queryItems(searchQuery: "", limit: 50)
+        XCTAssertFalse(items.contains(where: { $0.id == "old-item-before-replace" }), "В режиме полной замены старая запись должна быть удалена")
+        XCTAssertEqual(items.count, 1)
+        let restored = try XCTUnwrap(items.first)
+        XCTAssertFalse(restored.id.contains(".."))
+        XCTAssertFalse(restored.id.contains("/"))
+        let screenshotsDir = try DatabaseManager.pasteVaultSupportDirectory().appendingPathComponent("Screenshots").path
+        if let path = restored.fileURLPath {
+            XCTAssertTrue(path.hasPrefix(screenshotsDir), "Восстановленный скриншот не должен покидать каталог Screenshots")
+        }
+
+        try? await DatabaseManager.shared.clearAllHistory()
+        ClipboardMonitor.shared.clearAllHistoryInMemory()
+    }
+
+    // MARK: - 10. Итерация 30.37: Защита клавиш в NSSavePanel / NSTextView, глазик пароля и декодер импорта PVENC2
+    @MainActor
+    func testFloatingPanelKeyEventInterceptionAllowsFilePanelsAndTextEditing() {
+        let panel = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let otherWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 220),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 30))
+
+        // 1) События чужого окна (NSSavePanel / NSOpenPanel / стороннее окно) не перехватываются
+        XCTAssertFalse(
+            FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                eventWindow: otherWindow,
+                panel: panel,
+                isShowingFilePanel: false,
+                hasModalWindow: false,
+                hasAttachedSheet: false,
+                firstResponder: nil,
+                keyCode: 51,
+                modifierFlags: []
+            )
+        )
+
+        // 2) Активный файловый диалог / модальное окно / sheet полностью отключают перехват
+        XCTAssertFalse(
+            FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                eventWindow: panel,
+                panel: panel,
+                isShowingFilePanel: true,
+                hasModalWindow: false,
+                hasAttachedSheet: false,
+                firstResponder: nil,
+                keyCode: 51,
+                modifierFlags: []
+            )
+        )
+        XCTAssertFalse(
+            FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                eventWindow: panel,
+                panel: panel,
+                isShowingFilePanel: false,
+                hasModalWindow: true,
+                hasAttachedSheet: false,
+                firstResponder: nil,
+                keyCode: 51,
+                modifierFlags: []
+            )
+        )
+        XCTAssertFalse(
+            FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                eventWindow: panel,
+                panel: panel,
+                isShowingFilePanel: false,
+                hasModalWindow: false,
+                hasAttachedSheet: true,
+                firstResponder: nil,
+                keyCode: 51,
+                modifierFlags: []
+            )
+        )
+
+        // 3) Внутри NSTextView не перехватываются Backspace (51), Delete (117), стрелки (123..126) и Cmd+A/C/V/X/Z
+        let editingKeyCodes: [UInt16] = [51, 117, 123, 124, 125, 126]
+        for code in editingKeyCodes {
+            XCTAssertFalse(
+                FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                    eventWindow: panel,
+                    panel: panel,
+                    isShowingFilePanel: false,
+                    hasModalWindow: false,
+                    hasAttachedSheet: false,
+                    firstResponder: textView,
+                    keyCode: code,
+                    modifierFlags: []
+                ),
+                "KeyCode \(code) не должен перехватываться в NSTextView"
+            )
+        }
+        let commandEditCodes: [UInt16] = [0, 8, 9, 7, 6]
+        for code in commandEditCodes {
+            XCTAssertFalse(
+                FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                    eventWindow: panel,
+                    panel: panel,
+                    isShowingFilePanel: false,
+                    hasModalWindow: false,
+                    hasAttachedSheet: false,
+                    firstResponder: textView,
+                    keyCode: code,
+                    modifierFlags: .command
+                ),
+                "Cmd + keyCode \(code) не должен перехватываться в NSTextView"
+            )
+        }
+
+        // 4) Обычное нажатие в самой панели без диалогов и текстового поля перехватывается штатно
+        XCTAssertTrue(
+            FloatingPanel<EmptyView>.shouldInterceptKeyEvent(
+                eventWindow: panel,
+                panel: panel,
+                isShowingFilePanel: false,
+                hasModalWindow: false,
+                hasAttachedSheet: false,
+                firstResponder: nil,
+                keyCode: 53,
+                modifierFlags: []
+            )
+        )
+    }
+
+    @MainActor
+    func testBackupPasswordAccessoryControllerToggleAndWidth() {
+        let controller = BackupPasswordAccessoryController(
+            title: "Пароль шифрования (необязательно):",
+            placeholder: "Оставьте пустым для открытого JSON",
+            warning: "Без пароля бэкап сохранится в открытом виде (небезопасно)."
+        )
+
+        XCTAssertGreaterThanOrEqual(controller.container.frame.width, 380)
+        XCTAssertTrue(controller.eyeButton.target === controller)
+        XCTAssertEqual(controller.eyeButton.action, #selector(BackupPasswordAccessoryController.togglePasswordVisibility))
+        XCTAssertFalse(controller.isPasswordVisible)
+        XCTAssertFalse(controller.secureField.isHidden)
+        XCTAssertTrue(controller.plainField.isHidden)
+
+        controller.setPasswordText("My$ecret123")
+        XCTAssertEqual(controller.currentPassword, "My$ecret123")
+
+        controller.togglePasswordVisibility()
+        XCTAssertTrue(controller.isPasswordVisible)
+        XCTAssertTrue(controller.secureField.isHidden)
+        XCTAssertFalse(controller.plainField.isHidden)
+        XCTAssertEqual(controller.plainField.stringValue, "My$ecret123")
+        XCTAssertEqual(controller.currentPassword, "My$ecret123")
+
+        controller.plainField.stringValue = "EditedPwd!"
+        controller.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: controller.plainField))
+        XCTAssertEqual(controller.secureField.stringValue, "EditedPwd!")
+        XCTAssertEqual(controller.currentPassword, "EditedPwd!")
+
+        controller.togglePasswordVisibility()
+        XCTAssertFalse(controller.isPasswordVisible)
+        XCTAssertFalse(controller.secureField.isHidden)
+        XCTAssertTrue(controller.plainField.isHidden)
+        XCTAssertEqual(controller.currentPassword, "EditedPwd!")
+    }
+
+    @MainActor
+    func testImportPasswordDecryptionHelperForWrongAndCorrectPassword() throws {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PasteVault_ImportTest_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let archive = PasteVaultBackupArchive(
+            version: 2,
+            createdAt: Date(),
+            appVersion: "1.0.2",
+            clipboardItems: [
+                BackupClipboardItem(
+                    id: "import-enc-1",
+                    contentType: ContentKind.text.rawValue,
+                    textPreview: "Encrypted backup check",
+                    contentHash: "hash-enc-1",
+                    sourceBundleId: nil,
+                    sourceAppName: nil,
+                    isSensitive: false,
+                    secretKind: nil,
+                    isPinned: true,
+                    createdAt: 1730000300,
+                    expiresAt: nil,
+                    ocrText: nil,
+                    fileURLPath: nil,
+                    useCount: 1,
+                    imagePNGDataBase64: nil
+                )
+            ],
+            snippets: nil,
+            settings: nil
+        )
+
+        try BackupManager.exportArchiveToFile(archive: archive, to: tempURL, password: "RightPass#2026")
+        XCTAssertTrue(BackupManager.fileRequiresPassword(at: tempURL))
+
+        let wrongResult = MainPanelView.decryptBackupArchiveForImport(from: tempURL, password: "WrongPassword")
+        if case .success = wrongResult {
+            XCTFail("Неверный пароль не должен успешно расшифровывать PVENC2-файл")
+        }
+
+        let correctResult = MainPanelView.decryptBackupArchiveForImport(from: tempURL, password: "RightPass#2026")
+        switch correctResult {
+        case .success(let decoded):
+            XCTAssertEqual(decoded.clipboardItems?.count, 1)
+            XCTAssertEqual(decoded.clipboardItems?.first?.textPreview, "Encrypted backup check")
+        case .failure(let error):
+            XCTFail("Правильный пароль должен расшифровывать архив: \(error)")
+        }
+    }
+
+    // MARK: - 11. Диагностика: Экспорт и Импорт (Merge/Replace) 2 категорий фрагментов (вкл. пустую и переименованную)
+    @MainActor
+    func testDiagnosticCategoryBackupExportImportMergeAndReplace() async throws {
+        let monitor = ClipboardMonitor.shared
+        let tempDir = FileManager.default.temporaryDirectory
+        let encURL1 = tempDir.appendingPathComponent("diag_cats_both_\(UUID().uuidString).json")
+        let encURL2 = tempDir.appendingPathComponent("diag_cats_one_empty_\(UUID().uuidString).json")
+        let encURL3 = tempDir.appendingPathComponent("diag_cats_renamed_\(UUID().uuidString).json")
+        defer {
+            try? FileManager.default.removeItem(at: encURL1)
+            try? FileManager.default.removeItem(at: encURL2)
+            try? FileManager.default.removeItem(at: encURL3)
+        }
+
+        let cleanDBAndSeedDefaults: () async -> Void = {
+            await DatabaseManager.shared.deleteAllSnippets()
+            let allCats = await DatabaseManager.shared.fetchSnippetCategories()
+            for cat in allCats {
+                _ = try? await DatabaseManager.shared.deleteSnippetCategoryAndSnippets(id: cat.id)
+            }
+            await DatabaseManager.shared.resetSnippetCategoriesSeededFlagForTesting()
+        }
+
+        let deleteAllCategories: () async -> Void = {
+            await DatabaseManager.shared.deleteAllSnippets()
+            let allCats = await DatabaseManager.shared.fetchSnippetCategories()
+            for cat in allCats {
+                _ = try? await DatabaseManager.shared.deleteSnippetCategoryAndSnippets(id: cat.id)
+            }
+        }
+
+        let password = "DiagCatsPass!2026"
+
+        // --- Сценарий А: 2 пользовательские категории, обе с фрагментами ---
+        await deleteAllCategories()
+        let catA1 = await DatabaseManager.shared.createSnippetCategory(name: "Альфа Коды", iconName: "chevron.left.forwardslash.chevron.right")
+        let catA2 = await DatabaseManager.shared.createSnippetCategory(name: "Бета Промпты", iconName: "sparkles")
+        XCTAssertNotNil(catA1)
+        XCTAssertNotNil(catA2)
+
+        let snipA1 = QuickSnippetItem(id: "diag-a1", title: "Сниппет 1", content: "echo 1", category: "Альфа Коды", isPinned: false)
+        let snipA2 = QuickSnippetItem(id: "diag-a2", title: "Сниппет 2", content: "Prompt 2", category: "Бета Промпты", isPinned: true)
+        _ = await DatabaseManager.shared.insertSnippet(id: snipA1.id, title: snipA1.title, content: snipA1.content, category: snipA1.category, isPinned: snipA1.isPinned)
+        _ = await DatabaseManager.shared.insertSnippet(id: snipA2.id, title: snipA2.title, content: snipA2.content, category: snipA2.category, isPinned: snipA2.isPinned)
+
+        let exportedCatsA = await DatabaseManager.shared.fetchSnippetCategories()
+        let exportedSnipsA = await DatabaseManager.shared.fetchSnippets()
+        XCTAssertEqual(exportedCatsA.count, 2)
+
+        let archiveA = BackupManager.buildArchive(
+            items: [],
+            monitor: monitor,
+            snippets: exportedSnipsA,
+            snippetCategories: exportedCatsA,
+            includeClipboard: false,
+            clipboardPinnedOnly: false,
+            includeSnippets: true,
+            snippetsPinnedOnly: false,
+            includeBlacklist: false,
+            includeShortcuts: false,
+            includeAppearance: false
+        )
+        XCTAssertEqual(archiveA.snippetCategories?.count, 2)
+        try BackupManager.exportArchiveToFile(archive: archiveA, to: encURL1, password: password)
+
+        // Сброс в чистую базу (симулируем чистый старт с 4 дефолтными категориями) -> Replace
+        await cleanDBAndSeedDefaults()
+        let decodedA = try BackupManager.loadArchiveFromFile(from: encURL1, password: password)
+        var uiSnippetsA: [QuickSnippetItem] = []
+        try await BackupManager.restoreArchive(
+            decodedA,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: false,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { uiSnippetsA = $0 }
+        )
+        let catsAfterAReplace = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterAReplace.count, 2, "Сценарий А (Replace): в БД должно быть ровно 2 категории")
+        XCTAssertEqual(Set(catsAfterAReplace.map(\.name)), ["Альфа Коды", "Бета Промпты"])
+        XCTAssertEqual(uiSnippetsA.count, 2)
+
+        // Проверка повторного сидинга (имитация перезапуска)
+        await DatabaseManager.shared.seedDefaultSnippetCategoriesIfNeeded()
+        let catsAfterARestart = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterARestart.count, 2, "После перезапуска 4 базовые категории не должны пересидиться")
+
+        // Сброс в чистую базу -> Merge
+        await cleanDBAndSeedDefaults()
+        try await BackupManager.restoreArchive(
+            decodedA,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: true,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { uiSnippetsA = $0 }
+        )
+        let catsAfterAMerge = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterAMerge.count, 6, "Сценарий А (Merge поверх чистой БД с 4 дефолтными): ожидается 4 + 2 = 6 категорий")
+
+        // --- Сценарий Б: 2 категории, 1-я с фрагментом, 2-я пустая (0 фрагментов) ---
+        await deleteAllCategories()
+        _ = await DatabaseManager.shared.createSnippetCategory(name: "С Фрагментом", iconName: "folder.fill")
+        _ = await DatabaseManager.shared.createSnippetCategory(name: "Пустая Категория", iconName: "tray.fill")
+        _ = await DatabaseManager.shared.insertSnippet(id: "diag-b1", title: "Единственный", content: "Body", category: "С Фрагментом", isPinned: false)
+
+        let exportedCatsB = await DatabaseManager.shared.fetchSnippetCategories()
+        let exportedSnipsB = await DatabaseManager.shared.fetchSnippets()
+        XCTAssertEqual(exportedCatsB.count, 2)
+
+        let archiveB = BackupManager.buildArchive(
+            items: [],
+            monitor: monitor,
+            snippets: exportedSnipsB,
+            snippetCategories: exportedCatsB,
+            includeClipboard: false,
+            clipboardPinnedOnly: false,
+            includeSnippets: true,
+            snippetsPinnedOnly: false,
+            includeBlacklist: false,
+            includeShortcuts: false,
+            includeAppearance: false
+        )
+        XCTAssertEqual(archiveB.snippetCategories?.count, 2, "buildArchive обязан сохранить и пустую категорию тоже")
+        try BackupManager.exportArchiveToFile(archive: archiveB, to: encURL2, password: password)
+
+        // Чистая база -> Replace
+        await cleanDBAndSeedDefaults()
+        let decodedB = try BackupManager.loadArchiveFromFile(from: encURL2, password: password)
+        var uiSnippetsB: [QuickSnippetItem] = []
+        try await BackupManager.restoreArchive(
+            decodedB,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: false,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { uiSnippetsB = $0 }
+        )
+        let catsAfterBReplace = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterBReplace.count, 2, "Сценарий Б (Replace): пустая категория должна сохраниться")
+        XCTAssertEqual(Set(catsAfterBReplace.map(\.name)), ["С Фрагментом", "Пустая Категория"])
+        XCTAssertEqual(uiSnippetsB.count, 1)
+
+        // Чистая база -> Merge
+        await cleanDBAndSeedDefaults()
+        try await BackupManager.restoreArchive(
+            decodedB,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: true,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { uiSnippetsB = $0 }
+        )
+        let catsAfterBMerge = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterBMerge.count, 6, "Сценарий Б (Merge): 4 дефолтные + 2 из архива (вкл. пустую) = 6")
+
+        // --- Сценарий В: Стандартная переименованная категория + удаление остальных дефолтных ---
+        await cleanDBAndSeedDefaults() // старт с 4 дефолтными
+        let initialDefaults = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(initialDefaults.count, 4)
+        // Оставляем «Работа», переименовываем «Разработка» -> «Мои Скрипты», удаляем «Шаблоны» и «Промпты»
+        if let devCat = initialDefaults.first(where: { $0.name == "Разработка" }) {
+            try await DatabaseManager.shared.updateSnippetCategory(id: devCat.id, newName: "Мои Скрипты", newIconName: "terminal.fill")
+        }
+        for cat in initialDefaults where cat.name == "Шаблоны" || cat.name == "Промпты" {
+            try await DatabaseManager.shared.deleteSnippetCategoryAndSnippets(id: cat.id)
+        }
+        _ = await DatabaseManager.shared.insertSnippet(id: "diag-v1", title: "Скрипт", content: "ls -la", category: "Мои Скрипты", isPinned: false)
+
+        let exportedCatsV = await DatabaseManager.shared.fetchSnippetCategories()
+        let exportedSnipsV = await DatabaseManager.shared.fetchSnippets()
+        XCTAssertEqual(exportedCatsV.count, 2)
+        let archiveV = BackupManager.buildArchive(
+            items: [],
+            monitor: monitor,
+            snippets: exportedSnipsV,
+            snippetCategories: exportedCatsV,
+            includeClipboard: false,
+            clipboardPinnedOnly: false,
+            includeSnippets: true,
+            snippetsPinnedOnly: false,
+            includeBlacklist: false,
+            includeShortcuts: false,
+            includeAppearance: false
+        )
+        try BackupManager.exportArchiveToFile(archive: archiveV, to: encURL3, password: password)
+
+        // Чистая база -> Replace
+        await cleanDBAndSeedDefaults()
+        let decodedV = try BackupManager.loadArchiveFromFile(from: encURL3, password: password)
+        var uiSnippetsV: [QuickSnippetItem] = []
+        try await BackupManager.restoreArchive(
+            decodedV,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: false,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { uiSnippetsV = $0 }
+        )
+        let catsAfterVReplace = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterVReplace.count, 2, "Сценарий В (Replace): ровно 2 категории без удалённых дефолтных")
+        XCTAssertEqual(Set(catsAfterVReplace.map(\.name)), ["Работа", "Мои Скрипты"])
+        XCTAssertEqual(uiSnippetsV.count, 1)
+
+        // Чистая база -> Merge (в UI выбран по умолчанию!)
+        await cleanDBAndSeedDefaults()
+        try await BackupManager.restoreArchive(
+            decodedV,
+            restoreClipboard: false,
+            restoreSnippets: true,
+            restoreSettings: false,
+            mergeMode: true,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { uiSnippetsV = $0 }
+        )
+        let catsAfterVMerge = await DatabaseManager.shared.fetchSnippetCategories()
+        XCTAssertEqual(catsAfterVMerge.count, 5, "Сценарий В (Merge): 4 дефолтные + «Мои Скрипты» (Работа совпала) = 5 категорий")
+        XCTAssertEqual(uiSnippetsV.count, 1)
+
+        // Финальная уборка тестовой БД
+        await cleanDBAndSeedDefaults()
     }
 }

@@ -51,7 +51,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         XCTAssertEqual(engine.annotations.count, 2)
         engine.moveAnnotation(id: textId, to: CGPoint(x: 90, y: 95))
         engine.updateText(id: textId, newText: "Secret Key")
-        if case .text(let pos, let updatedText, let font, let size, _, _, _) = engine.annotations[1].payload {
+        if case .text(let pos, let updatedText, let font, let size, _, _, _, _) = engine.annotations[1].payload {
             XCTAssertEqual(pos, CGPoint(x: 90, y: 95))
             XCTAssertEqual(updatedText, "Secret Key")
             XCTAssertEqual(font, .jetBrainsMono)
@@ -225,13 +225,17 @@ final class ScreenshotAnnotationTests: XCTestCase {
         XCTAssertEqual(Int(zoomedImage.size.height), 90)
 
         // 2. Проверяем по пикселю в углу сохранённого кадра, что внешняя красная рамка отрезана, и внутри именно центральный зелёный фрагмент
-        if let cgCropped = zoomedImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            let rep = NSBitmapImageRep(cgImage: cgCropped)
-            if let cornerColor = rep.colorAt(x: 10, y: 10)?.usingColorSpace(.sRGB) {
-                XCTAssertGreaterThan(cornerColor.greenComponent, 0.7, "Cropped image corner must be the green central region, not the red outer border")
-                XCTAssertLessThan(cornerColor.redComponent, 0.3, "Red outer border must be cropped out at 200% zoom")
-            }
+        guard let cgCropped = zoomedImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Expected CGImage from zoomed annotated image")
+            return
         }
+        let rep = NSBitmapImageRep(cgImage: cgCropped)
+        guard let cornerColor = rep.colorAt(x: 10, y: 10)?.usingColorSpace(.sRGB) else {
+            XCTFail("Expected sRGB pixel color at (10, 10)")
+            return
+        }
+        XCTAssertGreaterThan(cornerColor.greenComponent, 0.7, "Cropped image corner must be the green central region, not the red outer border")
+        XCTAssertLessThan(cornerColor.redComponent, 0.3, "Red outer border must be cropped out at 200% zoom")
 
         // 3. В подписи новой карточки в буфере обмена указаны новые пиксельные размеры 160×90
         let savedCopy = monitor.saveAnnotatedCopy(from: originalItem, annotatedImage: zoomedImage)
@@ -312,7 +316,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         // Перемещаем тело стрелки на delta (+15, -10)
         engine.translateAnnotation(id: arrowId, by: CGPoint(x: 15, y: -10))
-        if case .arrow(let start, let end, _, _) = engine.annotations[0].payload {
+        if case .arrow(let start, let end, _, _, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(start, CGPoint(x: 25, y: 10))
             XCTAssertEqual(end, CGPoint(x: 95, y: 90))
         } else {
@@ -321,7 +325,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         // Изменяем ручку .end до (130, 140)
         engine.updateAnnotationHandle(id: arrowId, handle: .end, to: CGPoint(x: 130, y: 140), isShiftPressed: false)
-        if case .arrow(let start, let end, _, _) = engine.annotations[0].payload {
+        if case .arrow(let start, let end, _, _, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(start, CGPoint(x: 25, y: 10))
             XCTAssertEqual(end, CGPoint(x: 130, y: 140))
         } else {
@@ -380,6 +384,8 @@ final class ScreenshotAnnotationTests: XCTestCase {
         engine.undo()
         if case .step(_, _, _, let revertedAngle) = engine.annotations[0].payload {
             XCTAssertEqual(revertedAngle, Double.pi / 4.0, accuracy: 0.001)
+        } else {
+            XCTFail("Expected step pin payload after undo")
         }
     }
 
@@ -415,7 +421,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         // Меняем цвет на лету на Emerald
         engine.updateSelectedAnnotationColor(.emerald)
-        if case .arrow(_, _, let color, let width) = engine.annotations[0].payload {
+        if case .arrow(_, _, let color, let width, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(color, .emerald)
             XCTAssertEqual(width, 4)
         } else {
@@ -424,7 +430,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         // Меняем толщину линии на лету на 12 pt
         engine.updateSelectedAnnotationStrokeWidth(12)
-        if case .arrow(_, _, let color, let width) = engine.annotations[0].payload {
+        if case .arrow(_, _, let color, let width, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(color, .emerald)
             XCTAssertEqual(width, 12)
         } else {
@@ -433,12 +439,16 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         // Проверяем отмену изменений через Undo
         engine.undo() // отменяет толщину 12 -> 4
-        if case .arrow(_, _, _, let width) = engine.annotations[0].payload {
+        if case .arrow(_, _, _, let width, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(width, 4)
+        } else {
+            XCTFail("Expected arrow payload after width undo")
         }
         engine.undo() // отменяет цвет Emerald -> Crimson
-        if case .arrow(_, _, let color, _) = engine.annotations[0].payload {
+        if case .arrow(_, _, let color, _, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(color, .crimson)
+        } else {
+            XCTFail("Expected arrow payload after color undo")
         }
     }
 
@@ -548,7 +558,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         engine.updateSelectedAnnotationColor(.emerald)
 
         // Первая стрелка обязана сохранить свою исходную толщину 4 pt и цвет Crimson!
-        if case .arrow(_, _, let firstColor, let firstWidth) = engine.annotations[0].payload {
+        if case .arrow(_, _, let firstColor, let firstWidth, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(firstColor, .crimson, "Previously drawn arrow color must not mutate when changing tool color")
             XCTAssertEqual(firstWidth, 4, "Previously drawn arrow stroke width must not mutate when changing tool stroke width")
         } else {
@@ -557,7 +567,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         // 3. Рисуем вторую стрелку — она создаётся уже с новыми настройками (12 pt, Emerald)
         _ = engine.addArrow(from: CGPoint(x: 20, y: 80), to: CGPoint(x: 140, y: 120))
-        if case .arrow(_, _, let secondColor, let secondWidth) = engine.annotations[1].payload {
+        if case .arrow(_, _, let secondColor, let secondWidth, _, _) = engine.annotations[1].payload {
             XCTAssertEqual(secondColor, .emerald)
             XCTAssertEqual(secondWidth, 12)
         } else {
@@ -567,7 +577,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         // 4. Только если явно выделить первую стрелку инструментом «✋ Рука» — смена цвета изменит её
         engine.selectedAnnotationId = firstArrowId
         engine.updateSelectedAnnotationColor(.sky)
-        if case .arrow(_, _, let updatedFirstColor, _) = engine.annotations[0].payload {
+        if case .arrow(_, _, let updatedFirstColor, _, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(updatedFirstColor, .sky)
         }
 
@@ -595,7 +605,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         engine.updateSelectedAnnotationColor(.sky)
 
         // Первая надпись НЕ должна измениться!
-        if case .text(_, let t1, let f1, let s1, let c1, _, _) = engine.annotations[0].payload {
+        if case .text(_, let t1, let f1, let s1, let c1, _, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(t1, "First Note")
             XCTAssertEqual(f1, .jetBrainsMono, "First text font must remain JetBrains Mono after changing tool font for next text")
             XCTAssertEqual(s1, 18, "First text font size must remain 18pt")
@@ -620,7 +630,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         engine.updateText(id: text1Id, newText: "Edited First Note")
         engine.commitActiveTextEditing()
 
-        if case .text(_, let updatedText1, let font1After, let size1After, let color1After, _, _) = engine.annotations[0].payload {
+        if case .text(_, let updatedText1, let font1After, let size1After, let color1After, _, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(updatedText1, "Edited First Note")
             XCTAssertEqual(font1After, .jetBrainsMono)
             XCTAssertEqual(size1After, 18)
@@ -630,7 +640,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         }
 
         // Вторая надпись по-прежнему осталась Tektur 24pt Sky
-        if case .text(_, let text2After, let font2After, let size2After, let color2After, _, _) = engine.annotations[1].payload {
+        if case .text(_, let text2After, let font2After, let size2After, let color2After, _, _, _) = engine.annotations[1].payload {
             XCTAssertEqual(text2After, "Second Note")
             XCTAssertEqual(font2After, .tektur)
             XCTAssertEqual(size2After, 24)
@@ -674,7 +684,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         let textId = engine.addText("Target Here", at: CGPoint(x: 100, y: 200), fontSize: 16, color: .sky)
         engine.updateAnnotationHandle(id: textId, handle: .textCalloutPull, to: pinnedTarget, isShiftPressed: false)
 
-        if case .text(let posBefore, let text, _, let fontSize, _, let targetBefore, let maxWBefore) = engine.annotations[0].payload {
+        if case .text(let posBefore, let text, _, let fontSize, _, let targetBefore, _, let maxWBefore) = engine.annotations[0].payload {
             XCTAssertEqual(posBefore, CGPoint(x: 100, y: 200))
             XCTAssertEqual(targetBefore, pinnedTarget)
 
@@ -689,7 +699,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         // Перемещаем текст вправо за целевую точку: на (450, 200) через translateAnnotation
         engine.translateAnnotation(id: textId, by: CGPoint(x: 350, y: 0))
 
-        if case .text(let posAfter, let text, _, let fontSize, _, let targetAfter, let maxWAfter) = engine.annotations[0].payload {
+        if case .text(let posAfter, let text, _, let fontSize, _, let targetAfter, _, let maxWAfter) = engine.annotations[0].payload {
             XCTAssertEqual(posAfter, CGPoint(x: 450, y: 200), "Text position must move to (450, 200)")
             XCTAssertEqual(targetAfter, pinnedTarget, "calloutTarget must remain pinned at (300, 200) when text moves")
 
@@ -710,7 +720,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         // 1. Вытягиваем стрелку наружу к (360, 260)
         engine.updateAnnotationHandle(id: textId, handle: .textCalloutPull, to: CGPoint(x: 360, y: 260), isShiftPressed: false)
         engine.finalizeTextCalloutDrag(id: textId)
-        if case .text(_, _, _, _, _, let activeTarget, _) = engine.annotations[0].payload {
+        if case .text(_, _, _, _, _, let activeTarget, _, _) = engine.annotations[0].payload {
             XCTAssertEqual(activeTarget, CGPoint(x: 360, y: 260))
         } else {
             XCTFail("Expected active calloutTarget")
@@ -719,7 +729,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         // 2. Перетаскиваем остриё стрелки обратно внутрь рамки текста (205, 202) и завершаем жест
         engine.updateAnnotationHandle(id: textId, handle: .textCalloutTip, to: CGPoint(x: 205, y: 202), isShiftPressed: false)
         engine.finalizeTextCalloutDrag(id: textId)
-        if case .text(_, _, _, _, _, let retractedTarget, _) = engine.annotations[0].payload {
+        if case .text(_, _, _, _, _, let retractedTarget, _, _) = engine.annotations[0].payload {
             XCTAssertNil(retractedTarget, "Dragging callout tip inside text bounding rect must retract calloutTarget to nil")
         } else {
             XCTFail("Expected text payload")
@@ -892,7 +902,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
             isShiftPressed: false
         )
 
-        if case .text(let posAfterRight, let updatedText, let font, let fontSize, _, _, let narrowedMaxW) = engine.annotations[0].payload {
+        if case .text(let posAfterRight, let updatedText, let font, let fontSize, _, _, _, let narrowedMaxW) = engine.annotations[0].payload {
             XCTAssertEqual(narrowedMaxW ?? 0, 150, accuracy: 0.5)
 
             let narrowRect = ScreenshotEditorEngine.textBoundingRect(
@@ -978,7 +988,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         let startPos = CGPoint(x: 240, y: 160)
         let canvasSize = CGSize(width: 800, height: 600)
 
-        // 1. Короткое слово «Текст» на 16 пт и 24 пт обязано иметь ширину >= 110 пт (minBoxWidth) и оставаться строго в 1 строку
+        // 1. Короткое слово «Текст» на 16 пт и 24 пт обязано иметь компактную ширину >= minTextBoxWidth и оставаться строго в 1 строку
         for fontSize in [CGFloat(16), CGFloat(24)] {
             let shortRect = ScreenshotEditorEngine.textBoundingRect(
                 position: startPos,
@@ -988,7 +998,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
                 maxWidth: nil,
                 canvasSize: canvasSize
             )
-            XCTAssertGreaterThanOrEqual(shortRect.width, 110.0, "Short label 'Текст' at \(Int(fontSize))pt must have at least minBoxWidth = 110pt")
+            XCTAssertGreaterThanOrEqual(shortRect.width, ScreenshotEditorEngine.minTextBoxWidth, "Short label 'Текст' at \(Int(fontSize))pt must have at least minTextBoxWidth")
             let nsFont = NSFont.systemFont(ofSize: fontSize, weight: .bold)
             let oneLineMaxHeight = ceil(nsFont.ascender - nsFont.descender + nsFont.leading) + ScreenshotEditorEngine.textVerticalPadding * 2 + 12.0
             XCTAssertLessThanOrEqual(shortRect.height, oneLineMaxHeight, "'Текст' at \(Int(fontSize))pt must never wrap into two lines ('Текс' + 'т')")
@@ -1067,7 +1077,7 @@ final class ScreenshotAnnotationTests: XCTestCase {
         engine.updateText(id: textId, newText: longParagraph, canvasSize: canvasSize)
 
         guard let item = engine.annotations.first(where: { $0.id == textId }),
-              case .text(let clampedPos, let text, let font, let fontSize, _, _, let maxWidth) = item.payload else {
+              case .text(let clampedPos, let text, let font, let fontSize, _, _, _, let maxWidth) = item.payload else {
             XCTFail("Expected clamped text payload")
             return
         }
@@ -1126,5 +1136,619 @@ final class ScreenshotAnnotationTests: XCTestCase {
 
         let hitFarAway = engine.hitTest(point: CGPoint(x: 600, y: 600))
         XCTAssertNil(hitFarAway, "Hit test must fail far away from pin")
+    }
+
+    // MARK: - Iteration 30.17 Tests (Curved Arrows, Dual Text Callout, Smart Eraser)
+
+    func testCurvedArrowBezierGeometryAndApexHandle() {
+        XCTAssertEqual(ArrowCurveStyle.allCases, [.straight, .curved])
+        let start = CGPoint(x: 100, y: 300)
+        let end = CGPoint(x: 100, y: 100) // upward vector (0, -200), L = 200 -> bend = 48
+
+        let straightCtrl = ScreenshotEditorEngine.arrowControlPoint(start: start, end: end, style: .straight)
+        let curvedCtrl = ScreenshotEditorEngine.arrowControlPoint(start: start, end: end, style: .curved)
+        let curvedNegCtrl = ScreenshotEditorEngine.arrowControlPoint(start: start, end: end, style: .curved, customOffset: -48)
+
+        let mid = CGPoint(x: 100, y: 200)
+        XCTAssertEqual(straightCtrl.x, mid.x, accuracy: 0.001)
+        XCTAssertEqual(straightCtrl.y, mid.y, accuracy: 0.001)
+
+        // Default curved and negative customOffset bend to opposite sides relative to midpoint
+        XCTAssertGreaterThan(curvedCtrl.x, mid.x)
+        XCTAssertLessThan(curvedNegCtrl.x, mid.x)
+
+        let rightApex = ScreenshotEditorEngine.arrowApexPoint(start: start, end: end, style: .curved)
+        XCTAssertEqual(rightApex.x, 148.0, accuracy: 0.001, "Apex at t=0.5 should be offset by 200 * 0.24 = 48pt")
+
+        let engine = ScreenshotEditorEngine()
+        engine.selectedArrowStyle = .curved
+        let arrowId = engine.addArrow(from: start, to: end, color: .crimson, lineWidth: 4)
+
+        // Hit-test along the curved arc (not on straight chord)
+        XCTAssertEqual(engine.hitTest(point: rightApex), arrowId, "hitTestBody must hit curved arrow along its Bezier arc")
+
+        // Dragging apex handle to the left bends curve to the opposite side while keeping .curved style
+        engine.updateAnnotationHandle(id: arrowId, handle: .arrowCurveApex, to: CGPoint(x: 60, y: 200), isShiftPressed: false)
+        if case .arrow(_, _, _, _, let updatedStyle, let customOffset) = engine.annotations[0].payload {
+            XCTAssertEqual(updatedStyle, .curved)
+            XCTAssertEqual(customOffset ?? 0, -40.0, accuracy: 0.001)
+        } else {
+            XCTFail("Expected updated curved arrow payload")
+        }
+    }
+
+    func testDualTextCalloutCrossingAndMinimumSeparation() {
+        let engine = ScreenshotEditorEngine()
+        let textPos = CGPoint(x: 400, y: 300)
+        let textId = engine.addText("Dual Callout", at: textPos, fontSize: 16, color: .sky)
+
+        // Pull right callout to the left, and left callout to the right (crossing arrows)
+        let rightTarget = CGPoint(x: 240, y: 420)
+        let leftTarget = CGPoint(x: 560, y: 420)
+        engine.updateTextCalloutTarget(id: textId, to: rightTarget, isSecondary: false)
+        engine.updateTextCalloutTarget(id: textId, to: leftTarget, isSecondary: true)
+
+        guard case .text(let pos, let text, let font, let fontSize, _, let primary, let secondary, let maxW) = engine.annotations[0].payload else {
+            XCTFail("Expected text payload")
+            return
+        }
+        XCTAssertEqual(primary, rightTarget)
+        XCTAssertEqual(secondary, leftTarget)
+
+        let rect = ScreenshotEditorEngine.textBoundingRect(position: pos, text: text, font: font, fontSize: fontSize, maxWidth: maxW)
+        let combinedPath = ScreenshotEditorEngine.unifiedTextCalloutPath(
+            pillRect: rect,
+            calloutTarget: primary,
+            secondaryCalloutTarget: secondary
+        )
+        XCTAssertFalse(combinedPath.isEmpty)
+        XCTAssertTrue(combinedPath.boundingRect.contains(CGPoint(x: rightTarget.x + 1, y: rightTarget.y - 1)) || combinedPath.boundingRect.width > rect.width)
+
+        // Dragging secondary tip closer than 18pt to primary tip enforces >= 18pt separation
+        engine.updateAnnotationHandle(
+            id: textId,
+            handle: .textSecondaryCalloutTip,
+            to: CGPoint(x: rightTarget.x + 4, y: rightTarget.y + 3),
+            isShiftPressed: false
+        )
+        if case .text(_, _, _, _, _, let pAfter, let sAfter, _) = engine.annotations[0].payload,
+           let p = pAfter, let s = sAfter {
+            let dist = hypot(s.x - p.x, s.y - p.y)
+            XCTAssertGreaterThanOrEqual(dist, 17.99, "Dual callout tips must stay at least 18pt apart")
+        } else {
+            XCTFail("Expected both callout targets to remain active")
+        }
+
+        // Translating text keeps both callout tips pinned to their target coordinates
+        let beforeP = engine.annotations[0].payload
+        engine.translateAnnotation(id: textId, by: CGPoint(x: 20, y: -15))
+        if case .text(let pos1, _, _, _, _, let p1, let s1, _) = beforeP,
+           case .text(let pos2, _, _, _, _, let p2, let s2, _) = engine.annotations[0].payload {
+            XCTAssertNotEqual(pos1, pos2)
+            XCTAssertEqual(p1, p2, "Primary callout tip must remain pinned when text moves")
+            XCTAssertEqual(s1, s2, "Secondary callout tip must remain pinned when text moves")
+        } else {
+            XCTFail("Expected both callout targets to remain preserved on translation")
+        }
+    }
+
+    func testSmartEraserSamplingUndoAndOptionDelete() {
+        XCTAssertTrue(ScreenshotTool.eraser.hasSubmenu, "Eraser tool must have size submenu")
+
+        // Create a 100x100 solid sky-blue image with a 1px black line across y = 50
+        let size = NSSize(width: 100, height: 100)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor(srgbRed: 0.2, green: 0.6, blue: 0.9, alpha: 1.0).setFill()
+        NSRect(origin: .zero, size: size).fill()
+        NSColor.black.setFill()
+        NSRect(x: 0, y: 49, width: 100, height: 1).fill()
+        image.unlockFocus()
+
+        let cleanBackground = ScreenshotEditorEngine.sampleBackgroundColor(
+            in: image,
+            at: CGPoint(x: 15, y: 15),
+            canvasSize: CGSize(width: 100, height: 100)
+        )
+
+        // Exact center-pixel sampling at (50, 50) must return the exact pixel under crosshair (black line), without blending neighbors
+        let onLine = ScreenshotEditorEngine.sampleBackgroundColor(
+            in: image,
+            at: CGPoint(x: 50, y: 50),
+            canvasSize: CGSize(width: 100, height: 100)
+        )
+        XCTAssertEqual(onLine.red, 0.0, accuracy: 0.02)
+        XCTAssertEqual(onLine.green, 0.0, accuracy: 0.02)
+        XCTAssertEqual(onLine.blue, 0.0, accuracy: 0.02)
+
+        // Exact pixel sampling on the blue background at (50, 40) must return exact clean background
+        let sampled = ScreenshotEditorEngine.sampleBackgroundColor(
+            in: image,
+            at: CGPoint(x: 50, y: 40),
+            canvasSize: CGSize(width: 100, height: 100)
+        )
+        XCTAssertEqual(sampled.red, cleanBackground.red, accuracy: 0.02)
+        XCTAssertEqual(sampled.green, cleanBackground.green, accuracy: 0.02)
+        XCTAssertEqual(sampled.blue, cleanBackground.blue, accuracy: 0.02)
+
+        let engine = ScreenshotEditorEngine()
+        let arrowId = engine.addArrow(from: CGPoint(x: 10, y: 10), to: CGPoint(x: 80, y: 10))
+        _ = engine.addEraserStroke(
+            points: [CGPoint(x: 20, y: 40), CGPoint(x: 60, y: 40)],
+            strokeWidth: 22,
+            red: sampled.red,
+            green: sampled.green,
+            blue: sampled.blue,
+            alpha: sampled.alpha
+        )
+        XCTAssertEqual(engine.annotations.count, 2)
+
+        engine.undo()
+        XCTAssertEqual(engine.annotations.count, 1, "Undo must remove eraser stroke")
+        XCTAssertEqual(engine.annotations.first?.id, arrowId)
+    }
+
+    func testMultilineShortTextDoesNotInflateBoxWidth() {
+        let singleRect = ScreenshotEditorEngine.textBoundingRect(
+            position: CGPoint(x: 300, y: 200),
+            text: "Текст тест",
+            font: .inter,
+            fontSize: 16,
+            maxWidth: nil,
+            canvasSize: CGSize(width: 800, height: 600)
+        )
+        let multiRect = ScreenshotEditorEngine.textBoundingRect(
+            position: CGPoint(x: 300, y: 200),
+            text: "Текст тест\nтест",
+            font: .inter,
+            fontSize: 16,
+            maxWidth: nil,
+            canvasSize: CGSize(width: 800, height: 600)
+        )
+        XCTAssertEqual(multiRect.width, singleRect.width, accuracy: 2.0, "Короткий многострочный текст не должен раздувать ширину плашки до 340 pt")
+        XCTAssertGreaterThan(multiRect.height, singleRect.height, "Перенос строки должен увеличивать высоту плашки")
+    }
+
+    func testHighlighterAnnotationsPreserveIndividualOpacity() {
+        let engine = ScreenshotEditorEngine()
+        XCTAssertEqual(engine.highlighterOpacity, 0.35, accuracy: 0.001, "Default highlighter opacity must stay 35%")
+
+        engine.highlighterOpacity = 0.0
+        let zeroBoxId = engine.addBoxHighlighter(rect: CGRect(x: 5, y: 5, width: 40, height: 20))
+
+        engine.highlighterOpacity = 0.25
+        let boxId = engine.addBoxHighlighter(rect: CGRect(x: 10, y: 10, width: 100, height: 40))
+
+        engine.highlighterOpacity = 1.0
+        let freehandId = engine.addFreehandHighlighter(points: [CGPoint(x: 20, y: 20), CGPoint(x: 80, y: 20)])
+
+        let zeroItem = engine.annotations.first(where: { $0.id == zeroBoxId })
+        let boxItem = engine.annotations.first(where: { $0.id == boxId })
+        let freehandItem = engine.annotations.first(where: { $0.id == freehandId })
+
+        if case .highlighterBox(_, _, let op0)? = zeroItem?.payload {
+            XCTAssertEqual(op0, 0.0, accuracy: 0.001)
+        } else {
+            XCTFail("Expected highlighterBox 0% payload")
+        }
+
+        if case .highlighterBox(_, _, let op1)? = boxItem?.payload {
+            XCTAssertEqual(op1, 0.25, accuracy: 0.001)
+        } else {
+            XCTFail("Expected highlighterBox 25% payload")
+        }
+
+        if case .highlighterFreehand(_, _, _, let op2)? = freehandItem?.payload {
+            XCTAssertEqual(op2, 1.0, accuracy: 0.001)
+        } else {
+            XCTFail("Expected highlighterFreehand 100% payload")
+        }
+    }
+
+    func testRetouchPipetteSRGBAccuracyOnDisplayP3TwoColorImage() throws {
+        let width = 100
+        let height = 100
+        let p3Space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        let ctx = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: p3Space,
+                bitmapInfo: bitmapInfo.rawValue
+            )
+        )
+
+        // В CoreGraphics (origin bottom-left): верх картинки = y 50...100 (#1E222A), низ = y 0...50 (#FFFFFF)
+        let darkTopComponents: [CGFloat] = [30.0 / 255.0, 34.0 / 255.0, 42.0 / 255.0, 1.0]
+        let whiteBottomComponents: [CGFloat] = [1.0, 1.0, 1.0, 1.0]
+        let darkTopP3 = try XCTUnwrap(CGColor(colorSpace: p3Space, components: darkTopComponents))
+        let whiteBottomP3 = try XCTUnwrap(CGColor(colorSpace: p3Space, components: whiteBottomComponents))
+
+        ctx.setFillColor(darkTopP3)
+        ctx.fill(CGRect(x: 0, y: 50, width: 100, height: 50))
+        ctx.setFillColor(whiteBottomP3)
+        ctx.fill(CGRect(x: 0, y: 0, width: 100, height: 50))
+
+        let cgImg = try XCTUnwrap(ctx.makeImage())
+        let nsImg = NSImage(cgImage: cgImg, size: NSSize(width: 100, height: 100))
+        let canvasSize = CGSize(width: 100, height: 100)
+
+        let expectedDarkSRGB = try XCTUnwrap(
+            NSColor(colorSpace: .displayP3, components: darkTopComponents, count: 4).usingColorSpace(.sRGB)
+        )
+
+        // Верхняя точка (y = 15 в системе SwiftUI top-left) -> должна вернуть конвертированный sRGB #1E222A
+        let sampledTop = ScreenshotEditorEngine.sampleBackgroundColor(
+            in: nsImg,
+            at: CGPoint(x: 50, y: 15),
+            canvasSize: canvasSize
+        )
+        XCTAssertEqual(sampledTop.red, expectedDarkSRGB.redComponent, accuracy: 0.015)
+        XCTAssertEqual(sampledTop.green, expectedDarkSRGB.greenComponent, accuracy: 0.015)
+        XCTAssertEqual(sampledTop.blue, expectedDarkSRGB.blueComponent, accuracy: 0.015)
+
+        // Нижняя точка (y = 85 в системе SwiftUI top-left) -> должна вернуть чистый белый (1, 1, 1)
+        let sampledBottom = ScreenshotEditorEngine.sampleBackgroundColor(
+            in: nsImg,
+            at: CGPoint(x: 50, y: 85),
+            canvasSize: canvasSize
+        )
+        XCTAssertEqual(sampledBottom.red, 1.0, accuracy: 0.01)
+        XCTAssertEqual(sampledBottom.green, 1.0, accuracy: 0.01)
+        XCTAssertEqual(sampledBottom.blue, 1.0, accuracy: 0.01)
+
+        // Рисуем мазок ретуши на тёмной верхней половине и проверяем sRGB-совпадение после renderAnnotatedImage
+        let engine = ScreenshotEditorEngine()
+        engine.addEraserStroke(
+            points: [CGPoint(x: 50, y: 25)],
+            strokeWidth: 14,
+            red: sampledTop.red,
+            green: sampledTop.green,
+            blue: sampledTop.blue,
+            alpha: sampledTop.alpha
+        )
+        let rendered = try XCTUnwrap(engine.renderAnnotatedImage(baseImage: nsImg, canvasSize: canvasSize))
+        let renderedSample = ScreenshotEditorEngine.sampleBackgroundColor(
+            in: rendered,
+            at: CGPoint(x: 50, y: 25),
+            canvasSize: canvasSize
+        )
+        XCTAssertEqual(renderedSample.red, sampledTop.red, accuracy: 0.015)
+        XCTAssertEqual(renderedSample.green, sampledTop.green, accuracy: 0.015)
+        XCTAssertEqual(renderedSample.blue, sampledTop.blue, accuracy: 0.015)
+    }
+
+    func testCompactTextBoxWidthTightToShortAndMultilineText() {
+        let shortRect = ScreenshotEditorEngine.textBoundingRect(
+            position: CGPoint(x: 200, y: 200),
+            text: "а\nб",
+            font: .inter,
+            fontSize: 16,
+            maxWidth: nil,
+            canvasSize: CGSize(width: 800, height: 600)
+        )
+        XCTAssertGreaterThanOrEqual(shortRect.width, ScreenshotEditorEngine.minTextBoxWidth)
+        XCTAssertLessThan(shortRect.width, 110.0, "Short multiline text 'а\\nб' must stay compact under 110pt")
+
+        let hiRect = ScreenshotEditorEngine.textBoundingRect(
+            position: CGPoint(x: 200, y: 200),
+            text: "Hi",
+            font: .inter,
+            fontSize: 16,
+            maxWidth: nil,
+            canvasSize: CGSize(width: 800, height: 600)
+        )
+        XCTAssertLessThan(hiRect.width, 110.0, "Short word 'Hi' must hug text tightly under 110pt")
+    }
+
+    // MARK: - Stage 2 Tests (Iteration 30.31)
+
+    func testUndoRedoStackAndExistingTextEditSession() {
+        let engine = ScreenshotEditorEngine()
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertFalse(engine.canRedo)
+
+        let textId = engine.addText("Initial", at: CGPoint(x: 200, y: 200))
+        XCTAssertEqual(engine.annotations.count, 1)
+        XCTAssertTrue(engine.canUndo)
+        XCTAssertFalse(engine.canRedo)
+
+        // Undo adds item -> empty canvas, canRedo = true
+        engine.undo()
+        XCTAssertTrue(engine.annotations.isEmpty)
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertTrue(engine.canRedo)
+
+        // Redo restores it cleanly
+        engine.redo()
+        XCTAssertEqual(engine.annotations.count, 1)
+        XCTAssertEqual(engine.annotations.first?.id, textId)
+        XCTAssertFalse(engine.canRedo)
+
+        // Undo + new edit clears redoStack
+        engine.undo()
+        XCTAssertTrue(engine.canRedo)
+        _ = engine.addArrow(from: CGPoint(x: 10, y: 10), to: CGPoint(x: 100, y: 10))
+        XCTAssertFalse(engine.canRedo, "Performing a new action must clear redoStack")
+
+        // Existing-text edit session must record a single undo step and preserve old text on Undo
+        let editableId = engine.addText("Old label", at: CGPoint(x: 220, y: 180))
+        engine.beginEditingTextAnnotation(id: editableId)
+        engine.updateText(id: editableId, newText: "Updated label")
+        engine.commitActiveTextEditing()
+        if case .text(_, let updatedText, _, _, _, _, _, _) = engine.annotations.last?.payload {
+            XCTAssertEqual(updatedText, "Updated label")
+        } else {
+            XCTFail("Expected text annotation")
+        }
+
+        engine.undo()
+        if case .text(_, let revertedText, _, _, _, _, _, _) = engine.annotations.last?.payload {
+            XCTAssertEqual(revertedText, "Old label", "Undo after editing existing text must restore previous text")
+        } else {
+            XCTFail("Expected reverted text annotation")
+        }
+
+        engine.redo()
+        if case .text(_, let redoneText, _, _, _, _, _, _) = engine.annotations.last?.payload {
+            XCTAssertEqual(redoneText, "Updated label", "Redo after undoing text edit must restore updated text")
+        } else {
+            XCTFail("Expected redone text annotation")
+        }
+    }
+
+    func testLivePropertyEditsAndToolSelectionPreservation() {
+        let engine = ScreenshotEditorEngine()
+        let hlId = engine.addBoxHighlighter(rect: CGRect(x: 40, y: 40, width: 120, height: 32))
+        engine.selectedAnnotationId = hlId
+
+        // Drag highlighter opacity live updates without inflating undoStack when recordUndo == false
+        let undoCountBefore = engine.canUndo
+        XCTAssertTrue(undoCountBefore)
+        engine.updateSelectedAnnotationHighlighterOpacity(0.65, recordUndo: true)
+        engine.updateSelectedAnnotationHighlighterOpacity(0.75, recordUndo: false)
+        if case .highlighterBox(_, _, let op) = engine.annotations.first?.payload {
+            XCTAssertEqual(op, 0.75, accuracy: 0.001)
+        } else {
+            XCTFail("Expected highlighterBox payload")
+        }
+        engine.undo()
+        if case .highlighterBox(_, _, let revertedOp) = engine.annotations.first?.payload {
+            XCTAssertEqual(revertedOp, 0.35, accuracy: 0.001, "Single undo must revert whole slider drag")
+        } else {
+            XCTFail("Expected highlighterBox payload after undo")
+        }
+
+        // Tool switching preserves selection for matching tool or .hand, clears for mismatch
+        engine.selectedAnnotationId = hlId
+        engine.selectTool(.highlighter)
+        XCTAssertEqual(engine.selectedAnnotationId, hlId, "Selecting matching tool must preserve selection")
+        engine.selectTool(.hand)
+        XCTAssertEqual(engine.selectedAnnotationId, hlId, "Selecting hand tool must preserve selection")
+        engine.selectTool(.arrow)
+        XCTAssertNil(engine.selectedAnnotationId, "Selecting incompatible tool must clear selection")
+    }
+
+    func testRenderPreservesAlphaAndNativeOneXResolution() throws {
+        let size = NSSize(width: 240, height: 120)
+        // Build an explicit 1x sRGB RGBA bitmap with transparent background (alpha = 0) and a red center rect
+        guard let bitmapRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 240,
+            pixelsHigh: 120,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 240 * 4,
+            bitsPerPixel: 32
+        ) else {
+            XCTFail("Failed to allocate 1x RGBA bitmap")
+            return
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
+        NSColor.clear.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        NSColor(srgbRed: 0.9, green: 0.2, blue: 0.2, alpha: 1.0).setFill()
+        NSRect(x: 80, y: 40, width: 80, height: 40).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let baseImage = NSImage(size: size)
+        baseImage.addRepresentation(bitmapRep)
+
+        let engine = ScreenshotEditorEngine()
+        let rendered = try XCTUnwrap(
+            engine.renderAnnotatedImage(baseImage: baseImage, canvasSize: size, zoomScale: 1.0)
+        )
+        let outCG = try XCTUnwrap(rendered.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertEqual(outCG.width, 240, "1x image must stay 240px wide without forced 2x upscale")
+        XCTAssertEqual(outCG.height, 120, "1x image must stay 120px tall without forced 2x upscale")
+
+        let outRep = NSBitmapImageRep(cgImage: outCG)
+        let cornerColor = try XCTUnwrap(outRep.colorAt(x: 4, y: 4))
+        XCTAssertEqual(cornerColor.alphaComponent, 0.0, accuracy: 0.02, "Transparent PNG corner must preserve alpha == 0")
+    }
+
+    func testNarrowCanvasTextCalloutShortTailAndClampedStepPin() {
+        let narrowCanvas = CGSize(width: 320, height: 600)
+        let longText = "This is a deliberately long single-line annotation text for a narrow viewport test"
+        let rect = ScreenshotEditorEngine.textBoundingRect(
+            position: CGPoint(x: 160, y: 120),
+            text: longText,
+            font: .inter,
+            fontSize: 16,
+            maxWidth: nil,
+            canvasSize: narrowCanvas
+        )
+        XCTAssertLessThanOrEqual(rect.width, narrowCanvas.width - 16.0 + 0.5, "Text box must never exceed narrow canvas width")
+
+        // Pull handles near canvas edge must stay clamped inside canvasSize
+        let rightPull = ScreenshotEditorEngine.textCalloutPullHandlePosition(
+            position: CGPoint(x: 310, y: 100),
+            text: "Edge",
+            fontSize: 16,
+            canvasSize: narrowCanvas
+        )
+        XCTAssertLessThanOrEqual(rightPull.x, narrowCanvas.width - 12.0 + 0.01)
+        let leftPull = ScreenshotEditorEngine.textSecondaryCalloutPullHandlePosition(
+            position: CGPoint(x: 10, y: 100),
+            text: "Edge",
+            fontSize: 16,
+            canvasSize: narrowCanvas
+        )
+        XCTAssertGreaterThanOrEqual(leftPull.x, 12.0 - 0.01)
+
+        // Short tail (4.0 - 6.2 pt beyond pillRect edge) must build clean path with no NaN
+        let pillRect = CGRect(x: 100, y: 100, width: 90, height: 34)
+        for offset in [4.2, 5.2, 6.2] as [CGFloat] {
+            let shortTarget = CGPoint(x: pillRect.maxX + offset, y: pillRect.midY)
+            let path = ScreenshotEditorEngine.unifiedTextCalloutPath(
+                pillRect: pillRect,
+                cornerRadius: 7.0,
+                calloutTarget: shortTarget
+            )
+            let bounds = path.boundingRect
+            XCTAssertFalse(bounds.isNull || bounds.isEmpty)
+            XCTAssertFalse(bounds.width.isNaN || bounds.height.isNaN)
+            XCTAssertGreaterThanOrEqual(bounds.maxX, shortTarget.x - 0.5)
+        }
+
+        // Step pin clamped inside canvas corners so badge does not clip off-canvas
+        let topLeftPinCenter = ScreenshotEditorEngine.clampedStepPinCenter(
+            forTipPoint: CGPoint(x: 2, y: 2),
+            canvasSize: narrowCanvas
+        )
+        XCTAssertGreaterThanOrEqual(topLeftPinCenter.x, 16.0)
+        XCTAssertGreaterThanOrEqual(topLeftPinCenter.y, 16.0)
+    }
+
+    func testSteppedEscapeAndModalKeyEventGuard() {
+        let engine = ScreenshotEditorEngine()
+        let textId = engine.addText("Label", at: CGPoint(x: 120, y: 120))
+        engine.beginEditingTextAnnotation(id: textId)
+        engine.activeSubmenu = .color
+        engine.selectedAnnotationId = textId
+
+        // 1. Editing text -> commit text
+        XCTAssertEqual(engine.handleEscape(), .committedText)
+        XCTAssertNil(engine.editingTextAnnotationId)
+
+        // 2. Open submenu -> close submenu (first re-select annotation for step 3 check)
+        engine.selectedAnnotationId = textId
+        XCTAssertEqual(engine.handleEscape(), .closedSubmenu)
+        XCTAssertNil(engine.activeSubmenu)
+
+        // 3. Selected annotation -> clear selection
+        XCTAssertEqual(engine.handleEscape(), .clearedSelection)
+        XCTAssertNil(engine.selectedAnnotationId)
+
+        // 4. Clean state -> close editor
+        XCTAssertEqual(engine.handleEscape(), .closeEditor)
+
+        // Key-event guard blocks when modal window (NSSavePanel/NSAlert) or unrelated NSTextView is active
+        let hostWin = NSWindow()
+        let otherWin = NSWindow()
+        XCTAssertFalse(
+            ScreenshotEditorEngine.shouldProcessKeyEvent(
+                eventWindow: hostWin,
+                hostWindow: hostWin,
+                hasModalWindow: true,
+                isRecordingShortcut: false,
+                isHostFirstResponderTextView: false,
+                isEditingAnnotationText: false
+            )
+        )
+        XCTAssertFalse(
+            ScreenshotEditorEngine.shouldProcessKeyEvent(
+                eventWindow: otherWin,
+                hostWindow: hostWin,
+                hasModalWindow: false,
+                isRecordingShortcut: false,
+                isHostFirstResponderTextView: false,
+                isEditingAnnotationText: false
+            )
+        )
+        XCTAssertFalse(
+            ScreenshotEditorEngine.shouldProcessKeyEvent(
+                eventWindow: hostWin,
+                hostWindow: hostWin,
+                hasModalWindow: false,
+                isRecordingShortcut: false,
+                isHostFirstResponderTextView: true,
+                isEditingAnnotationText: false
+            )
+        )
+        XCTAssertTrue(
+            ScreenshotEditorEngine.shouldProcessKeyEvent(
+                eventWindow: hostWin,
+                hostWindow: hostWin,
+                hasModalWindow: false,
+                isRecordingShortcut: false,
+                isHostFirstResponderTextView: false,
+                isEditingAnnotationText: false
+            )
+        )
+    }
+
+    func testUndoRedoKeyRecognitionAcrossLayoutsAndShiftPriority() {
+        // 1. Все варианты Z / Я + физический ANSI keyCode 6 распознаются в любой раскладке
+        XCTAssertTrue(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "z", keyCode: 0))
+        XCTAssertTrue(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "Z", keyCode: 0))
+        XCTAssertTrue(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "я", keyCode: 0))
+        XCTAssertTrue(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "Я", keyCode: 0))
+        XCTAssertTrue(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: nil, keyCode: 6))
+        XCTAssertTrue(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "я", keyCode: 6))
+
+        // Посторонние клавиши не срабатывают
+        XCTAssertFalse(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "a", keyCode: 0))
+        XCTAssertFalse(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "ф", keyCode: 0))
+        XCTAssertFalse(ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: "x", keyCode: 7))
+
+        // 2. Приоритет Cmd+Shift+Z (Redo) над Cmd+Z (Undo), включая CapsLock
+        let engine = ScreenshotEditorEngine()
+        let firstId = engine.addArrow(from: CGPoint(x: 10, y: 10), to: CGPoint(x: 50, y: 50))
+        let secondId = engine.addArrow(from: CGPoint(x: 60, y: 10), to: CGPoint(x: 100, y: 50))
+        XCTAssertEqual(engine.annotations.count, 2)
+
+        // Вспомогательная проверка маршрутизации как в keyDownMonitor
+        func simulateShortcut(flags: NSEvent.ModifierFlags, chars: String?, keyCode: UInt16) -> String? {
+            let relevant = flags.intersection([.command, .shift, .option, .control])
+            guard relevant.contains(.command),
+                  relevant.intersection([.option, .control]).isEmpty,
+                  ScreenshotEditorEngine.matchesUndoRedoKey(charactersIgnoringModifiers: chars, keyCode: keyCode) else {
+                return nil
+            }
+            if relevant.contains(.shift) {
+                engine.redo()
+                return "redo"
+            } else {
+                engine.undo()
+                return "undo"
+            }
+        }
+
+        // Cmd+Z в русской раскладке ("я") -> undo (остаётся 1 стрелка)
+        XCTAssertEqual(simulateShortcut(flags: [.command, .capsLock], chars: "я", keyCode: 6), "undo")
+        XCTAssertEqual(engine.annotations.map(\.id), [firstId])
+
+        // Cmd+Shift+Z в русской раскладке ("Я") -> приоритет Redo (возвращается вторая стрелка)
+        XCTAssertEqual(simulateShortcut(flags: [.command, .shift], chars: "Я", keyCode: 6), "redo")
+        XCTAssertEqual(engine.annotations.map(\.id), [firstId, secondId])
+    }
+
+    func testPureShiftModifierIgnoresCommandOptionControl() {
+        XCTAssertTrue(ScreenshotEditorEngine.isPureShiftModifier([.shift]))
+        XCTAssertTrue(ScreenshotEditorEngine.isPureShiftModifier([.shift, .capsLock]))
+        XCTAssertFalse(ScreenshotEditorEngine.isPureShiftModifier([.command, .shift]))
+        XCTAssertFalse(ScreenshotEditorEngine.isPureShiftModifier([.option, .shift]))
+        XCTAssertFalse(ScreenshotEditorEngine.isPureShiftModifier([.control, .shift]))
+        XCTAssertFalse(ScreenshotEditorEngine.isPureShiftModifier([.command]))
+        XCTAssertFalse(ScreenshotEditorEngine.isPureShiftModifier([]))
     }
 }
