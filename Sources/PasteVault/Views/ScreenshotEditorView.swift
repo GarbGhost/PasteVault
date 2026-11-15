@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Carbon
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
@@ -8,6 +9,7 @@ import CoreImage.CIFilterBuiltins
 public enum HandlePosition: String, Hashable, Sendable {
     case start
     case end
+    case arrowCurveApex
     case topLeft
     case topRight
     case bottomLeft
@@ -15,6 +17,8 @@ public enum HandlePosition: String, Hashable, Sendable {
     case stepPointer
     case textCalloutPull
     case textCalloutTip
+    case textSecondaryCalloutPull
+    case textSecondaryCalloutTip
     case textWidthLeft
     case textWidthRight
 }
@@ -27,6 +31,7 @@ public enum ScreenshotTool: String, CaseIterable, Identifiable, Sendable {
     case highlighter = "highlighter"
     case step = "step"
     case pixelate = "pixelate"
+    case eraser = "eraser"
 
     /// Псевдоним для совместимости со спецификацией верхнего инструмента курсора выбора/перемещения
     public static let select: ScreenshotTool = .hand
@@ -35,7 +40,7 @@ public enum ScreenshotTool: String, CaseIterable, Identifiable, Sendable {
 
     public var hasSubmenu: Bool {
         switch self {
-        case .arrow, .text, .shape, .highlighter:
+        case .arrow, .text, .shape, .highlighter, .eraser:
             return true
         case .hand, .step, .pixelate:
             return false
@@ -51,6 +56,7 @@ public enum ScreenshotTool: String, CaseIterable, Identifiable, Sendable {
         case .highlighter: return "highlighter"
         case .step: return "mappin.and.ellipse"
         case .pixelate: return "squareshape.split.3x3"
+        case .eraser: return "paintbrush.pointed.fill"
         }
     }
 
@@ -70,6 +76,10 @@ public enum ScreenshotTool: String, CaseIterable, Identifiable, Sendable {
             return lang == .en ? "Step Counter (1, 2, 3...)" : "Шаги-маячки (1, 2, 3...)"
         case .pixelate:
             return lang == .en ? "Fine Pixelate (6px)" : "Мелкая пикселизация"
+        case .eraser:
+            return lang == .en
+                ? "Retouch (paint with color under cursor)"
+                : "Ретушь (закраска цветом под курсором)"
         }
     }
 }
@@ -79,7 +89,29 @@ public enum ScreenshotSubmenuKind: String, Equatable, Sendable {
     case text
     case shape
     case highlighter
+    case eraser
     case color
+}
+
+public enum ArrowCurveStyle: String, CaseIterable, Identifiable, Equatable, Sendable {
+    case straight = "straight"
+    case curved = "curved"
+
+    public var id: String { rawValue }
+
+    public var iconName: String {
+        switch self {
+        case .straight: return "arrow.up.right"
+        case .curved: return "arrow.turn.up.right"
+        }
+    }
+
+    public func title(in lang: AppLanguage = .current) -> String {
+        switch self {
+        case .straight: return lang == .en ? "Straight Arrow" : "Прямая стрелка"
+        case .curved: return lang == .en ? "Curved Arrow" : "Изогнутая стрелка"
+        }
+    }
 }
 
 public enum ScreenshotShapeKind: String, CaseIterable, Identifiable, Sendable {
@@ -171,13 +203,14 @@ public enum ScreenshotAnnotationColor: String, CaseIterable, Identifiable, Senda
 // MARK: - Annotation Model
 
 public enum ScreenshotAnnotationPayload: Equatable, Sendable {
-    case arrow(start: CGPoint, end: CGPoint, color: ScreenshotAnnotationColor, lineWidth: CGFloat)
-    case text(position: CGPoint, text: String, font: AppFont, fontSize: CGFloat, color: ScreenshotAnnotationColor, calloutTarget: CGPoint? = nil, maxWidth: CGFloat? = nil)
+    case arrow(start: CGPoint, end: CGPoint, color: ScreenshotAnnotationColor, lineWidth: CGFloat, style: ArrowCurveStyle = .straight, customControlPointOffset: CGFloat? = nil)
+    case text(position: CGPoint, text: String, font: AppFont, fontSize: CGFloat, color: ScreenshotAnnotationColor, calloutTarget: CGPoint? = nil, secondaryCalloutTarget: CGPoint? = nil, maxWidth: CGFloat? = nil)
     case shape(kind: ScreenshotShapeKind, start: CGPoint, end: CGPoint, color: ScreenshotAnnotationColor, lineWidth: CGFloat)
-    case highlighterFreehand(points: [CGPoint], color: ScreenshotAnnotationColor, lineWidth: CGFloat)
-    case highlighterBox(rect: CGRect, color: ScreenshotAnnotationColor)
+    case highlighterFreehand(points: [CGPoint], color: ScreenshotAnnotationColor, lineWidth: CGFloat, opacity: Double = 0.35)
+    case highlighterBox(rect: CGRect, color: ScreenshotAnnotationColor, opacity: Double = 0.35)
     case step(number: Int, position: CGPoint, color: ScreenshotAnnotationColor, pointerAngle: Double)
     case pixelate(rect: CGRect, pixelScale: CGFloat)
+    case eraser(points: [CGPoint], strokeWidth: CGFloat, red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat)
 }
 
 public struct ScreenshotAnnotationItem: Identifiable, Equatable, Sendable {
@@ -196,23 +229,54 @@ public struct ScreenshotAnnotationItem: Identifiable, Equatable, Sendable {
         }
         return nil
     }
+
+    /// Проверяет, соответствует ли тип аннотации указанному инструменту тулбара
+    public func matchesTool(_ tool: ScreenshotTool) -> Bool {
+        switch payload {
+        case .arrow: return tool == .arrow
+        case .shape: return tool == .shape
+        case .text: return tool == .text
+        case .highlighterBox, .highlighterFreehand: return tool == .highlighter
+        case .step: return tool == .step
+        case .pixelate: return tool == .pixelate
+        case .eraser: return tool == .eraser
+        }
+    }
 }
 
 // MARK: - Screenshot Editor Engine (ViewModel)
 
 @MainActor
 public final class ScreenshotEditorEngine: ObservableObject {
+    public enum EscapeAction: Equatable, Sendable {
+        case committedText
+        case closedSubmenu
+        case clearedSelection
+        case closeEditor
+    }
+
     public static let availableStrokeWidths: [CGFloat] = [2, 4, 6, 8, 12]
     public static let availableFontSizes: [CGFloat] = [12, 14, 16, 18, 24]
-    private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
+    public static let availableEraserWidths: [CGFloat] = [14, 22, 32]
+    private static let sharedCIContext: CIContext = {
+        var options: [CIContextOption: Any] = [.useSoftwareRenderer: false]
+        if let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+            options[.workingColorSpace] = srgb
+            options[.outputColorSpace] = srgb
+        }
+        return CIContext(options: options)
+    }()
 
     @Published public var annotations: [ScreenshotAnnotationItem] = []
     @Published public var selectedAnnotationId: UUID? = nil
     @Published public var selectedTool: ScreenshotTool = .hand
+    @Published public var selectedArrowStyle: ArrowCurveStyle = .straight
     @Published public var selectedShapeKind: ScreenshotShapeKind = .roundedRect
     @Published public var selectedHighlighterMode: ScreenshotHighlighterMode = .box
     @Published public var selectedColor: ScreenshotAnnotationColor = .crimson
     @Published public var selectedStrokeWidth: CGFloat = 4
+    @Published public var highlighterOpacity: Double = 0.35
+    @Published public var selectedEraserWidth: CGFloat = 22
     @Published public var selectedFontSize: CGFloat = 16
     /// По умолчанию шрифт для текста в редакторе скриншотов всегда Inter
     @Published public var selectedFont: AppFont = .inter
@@ -228,8 +292,13 @@ public final class ScreenshotEditorEngine: ObservableObject {
     /// Зажата ли сейчас клавиша ⇧ Shift (для непрерывной подсветки бейджа Shift в футере)
     @Published public var isShiftShortcutHeld: Bool = false
 
-    private var undoStack: [[ScreenshotAnnotationItem]] = []
+    @Published private var undoStack: [[ScreenshotAnnotationItem]] = []
+    @Published private var redoStack: [[ScreenshotAnnotationItem]] = []
+    private var pendingTextEditSnapshot: (id: UUID, originalText: String, preEditAnnotations: [ScreenshotAnnotationItem])? = nil
     private var shortcutHighlightResetTask: Task<Void, Never>? = nil
+
+    public var canUndo: Bool { !undoStack.isEmpty || !annotations.isEmpty }
+    public var canRedo: Bool { !redoStack.isEmpty }
 
     public init() {}
 
@@ -268,12 +337,13 @@ public final class ScreenshotEditorEngine: ObservableObject {
         return activeShortcutID == id
     }
 
-    /// Записывает текущее состояние в стек отмены (Undo)
+    /// Записывает текущее состояние в стек отмены (Undo) и очищает стек повтора (Redo)
     public func recordUndoSnapshot(_ customState: [ScreenshotAnnotationItem]? = nil) {
         undoStack.append(customState ?? annotations)
         if undoStack.count > 60 {
             undoStack.removeFirst()
         }
+        redoStack.removeAll()
     }
 
     /// Следующий номер маячка-шага (1, 2, 3...), динамически вычисляемый из текущих аннотаций на холсте
@@ -281,9 +351,46 @@ public final class ScreenshotEditorEngine: ObservableObject {
         (annotations.compactMap { $0.stepNumber }.max() ?? 0) + 1
     }
 
+    /// Синхронизирует активные настройки тулбара со свойствами выделенного объекта
+    public func syncToolbarDefaults(from item: ScreenshotAnnotationItem) {
+        switch item.payload {
+        case .arrow(_, _, let color, let lineWidth, let style, _):
+            selectedColor = color
+            selectedStrokeWidth = lineWidth
+            selectedArrowStyle = style
+        case .shape(let kind, _, _, let color, let lineWidth):
+            selectedShapeKind = kind
+            selectedColor = color
+            selectedStrokeWidth = lineWidth
+        case .text(_, _, let font, let fontSize, let color, _, _, _):
+            selectedFont = font
+            selectedFontSize = fontSize
+            selectedColor = color
+        case .highlighterBox(_, let color, let opacity):
+            selectedColor = color
+            highlighterOpacity = opacity
+            selectedHighlighterMode = .box
+        case .highlighterFreehand(_, let color, let lineWidth, let opacity):
+            selectedColor = color
+            highlighterOpacity = opacity
+            selectedStrokeWidth = max(2, round(lineWidth / 3.2))
+            selectedHighlighterMode = .freehand
+        case .step(_, _, let color, _):
+            selectedColor = color
+        case .pixelate, .eraser:
+            break
+        }
+    }
+
     public func selectTool(_ tool: ScreenshotTool) {
+        let previousSelectedId = selectedAnnotationId
         commitActiveTextEditing()
-        if tool != .hand {
+        if let selId = previousSelectedId,
+           let selItem = annotations.first(where: { $0.id == selId }),
+           (tool == .hand || selItem.matchesTool(tool)) {
+            selectedAnnotationId = selId
+            syncToolbarDefaults(from: selItem)
+        } else {
             selectedAnnotationId = nil
         }
         if selectedTool == tool {
@@ -302,6 +409,75 @@ public final class ScreenshotEditorEngine: ObservableObject {
         }
     }
 
+    /// Ступенчатая обработка клавиши Esc: 1) текст -> 2) подменю -> 3) выделение -> 4) закрытие редактора
+    @discardableResult
+    public func handleEscape() -> EscapeAction {
+        if editingTextAnnotationId != nil {
+            commitActiveTextEditing()
+            return .committedText
+        }
+        if activeSubmenu != nil {
+            activeSubmenu = nil
+            return .closedSubmenu
+        }
+        if selectedAnnotationId != nil {
+            selectedAnnotationId = nil
+            return .clearedSelection
+        }
+        return .closeEditor
+    }
+
+    /// Возвращает `true` только если зажат чистый Shift БЕЗ Command, Option или Control
+    public static func isPureShiftModifier(_ modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return flags.contains(.shift) && flags.intersection([.command, .option, .control]).isEmpty
+    }
+
+    /// Распознаёт клавишу Undo/Redo (Z / Я) независимо от активной раскладки клавиатуры
+    public static func matchesUndoRedoKey(
+        charactersIgnoringModifiers: String?,
+        keyCode: UInt16
+    ) -> Bool {
+        if let translated = asciiCharacter(forKeyCode: keyCode), translated == "z" {
+            return true
+        }
+        if let char = charactersIgnoringModifiers?.lowercased(), char == "z" || char == "я" {
+            return true
+        }
+        return false
+    }
+
+    private static func asciiCharacter(forKeyCode keyCode: UInt16) -> String? {
+        guard let inputSource = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let rawLayoutData = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else {
+            return nil
+        }
+        let layoutData = Unmanaged<CFData>.fromOpaque(rawLayoutData).takeUnretainedValue()
+        guard let bytePtr = CFDataGetBytePtr(layoutData) else {
+            return nil
+        }
+        let keyboardLayout = UnsafeRawPointer(bytePtr).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var deadKeyState: UInt32 = 0
+        var chars = [UniChar](repeating: 0, count: 4)
+        var actualLength: Int = 0
+        let status = UCKeyTranslate(
+            keyboardLayout,
+            keyCode,
+            UInt16(kUCKeyActionDown),
+            0,
+            UInt32(LMGetKbdType()),
+            OptionBits(kUCKeyTranslateNoDeadKeysBit),
+            &deadKeyState,
+            chars.count,
+            &actualLength,
+            &chars
+        )
+        guard status == noErr, actualLength > 0 else {
+            return nil
+        }
+        return String(utf16CodeUnits: chars, count: actualLength).lowercased()
+    }
+
     public func toggleSubmenu(_ kind: ScreenshotSubmenuKind) {
         if activeSubmenu == kind {
             activeSubmenu = nil
@@ -316,24 +492,223 @@ public final class ScreenshotEditorEngine: ObservableObject {
         case .text: return .text
         case .shape: return .shape
         case .highlighter: return .highlighter
+        case .eraser: return .eraser
         case .hand, .step, .pixelate: return nil
         }
     }
 
     @discardableResult
-    public func addArrow(from start: CGPoint, to end: CGPoint, color: ScreenshotAnnotationColor? = nil, lineWidth: CGFloat? = nil) -> UUID {
+    public func addArrow(
+        from start: CGPoint,
+        to end: CGPoint,
+        color: ScreenshotAnnotationColor? = nil,
+        lineWidth: CGFloat? = nil,
+        style: ArrowCurveStyle? = nil,
+        customControlPointOffset: CGFloat? = nil
+    ) -> UUID {
         recordUndoSnapshot()
         let item = ScreenshotAnnotationItem(
             payload: .arrow(
                 start: start,
                 end: end,
                 color: color ?? selectedColor,
-                lineWidth: lineWidth ?? selectedStrokeWidth
+                lineWidth: lineWidth ?? selectedStrokeWidth,
+                style: style ?? selectedArrowStyle,
+                customControlPointOffset: customControlPointOffset
             )
         )
         annotations.append(item)
         selectedAnnotationId = nil
         return item.id
+    }
+
+    /// Добавляет мазок умного ластика цветом подложки
+    @discardableResult
+    public func addEraserStroke(
+        points: [CGPoint],
+        strokeWidth: CGFloat? = nil,
+        red: CGFloat,
+        green: CGFloat,
+        blue: CGFloat,
+        alpha: CGFloat
+    ) -> UUID {
+        recordUndoSnapshot()
+        let item = ScreenshotAnnotationItem(
+            payload: .eraser(
+                points: points,
+                strokeWidth: strokeWidth ?? selectedEraserWidth,
+                red: red,
+                green: green,
+                blue: blue,
+                alpha: alpha
+            )
+        )
+        annotations.append(item)
+        selectedAnnotationId = nil
+        return item.id
+    }
+
+    private struct SRGBPixelSurface {
+        let pointSize: CGSize
+        let pixelWidth: Int
+        let pixelHeight: Int
+        let bytes: [UInt8]
+        let sRGBCGImage: CGImage
+        let sRGBNSImage: NSImage
+    }
+
+    private struct PixelatePreviewCacheKey: Equatable {
+        let imageIdentifier: ObjectIdentifier
+        let canvasSize: CGSize
+        let layers: [PixelateLayerSignature]
+    }
+
+    private struct PixelateLayerSignature: Equatable {
+        let rect: CGRect
+        let pixelScale: CGFloat
+    }
+
+    private static weak var lastSampledImageRef: NSImage?
+    private static var lastSampledSurface: SRGBPixelSurface?
+    private static var cachedPixelateKey: PixelatePreviewCacheKey?
+    private static var cachedPixelateImage: NSImage?
+
+    /// Освобождает кэш пикселей «Ретуши» и мозаики после закрытия редактора
+    public static func clearSamplingCache() {
+        lastSampledImageRef = nil
+        lastSampledSurface = nil
+        cachedPixelateKey = nil
+        cachedPixelateImage = nil
+    }
+
+    private static func cachedSRGBSurface(for image: NSImage) -> SRGBPixelSurface? {
+        if lastSampledImageRef === image, let surface = lastSampledSurface, surface.pointSize == image.size {
+            return surface
+        }
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0,
+              let srgbSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return nil
+        }
+
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        guard let ctx = CGContext(
+            data: &bytes,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: srgbSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return nil
+        }
+
+        ctx.interpolationQuality = .none
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        guard let sRGBCG = ctx.makeImage() else {
+            return nil
+        }
+        let rep = NSBitmapImageRep(cgImage: sRGBCG)
+        rep.size = image.size
+        let sRGBNS = NSImage(size: image.size)
+        sRGBNS.addRepresentation(rep)
+
+        let surface = SRGBPixelSurface(
+            pointSize: image.size,
+            pixelWidth: width,
+            pixelHeight: height,
+            bytes: bytes,
+            sRGBCGImage: sRGBCG,
+            sRGBNSImage: sRGBNS
+        )
+        lastSampledImageRef = image
+        lastSampledSurface = surface
+        return surface
+    }
+
+    /// Нормализует исходное изображение строго в цветовое пространство sRGB для 100% совпадения цвета холста и пипетки ретуши
+    public static func sRGBNormalizedImage(from image: NSImage) -> NSImage {
+        cachedSRGBSurface(for: image)?.sRGBNSImage ?? image
+    }
+
+    /// Конвертирует произвольный CGImage в строго sRGB для идентичности пикселей при экспорте PNG
+    public static func convertCGImageToSRGB(_ cgImage: CGImage) -> CGImage {
+        if cgImage.colorSpace?.name == CGColorSpace.sRGB {
+            return cgImage
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0,
+              let srgbSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return cgImage
+        }
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        guard let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: srgbSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return cgImage
+        }
+        ctx.interpolationQuality = .none
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage() ?? cgImage
+    }
+
+    /// Сэмплирует точный центральный sRGB-пиксель строго под точкой прицела на исходном изображении
+    public static func sampleBackgroundColor(
+        in image: NSImage,
+        at canvasPoint: CGPoint,
+        canvasSize: CGSize
+    ) -> (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) {
+        guard canvasSize.width > 0, canvasSize.height > 0,
+              let surface = cachedSRGBSurface(for: image) else {
+            return (1.0, 1.0, 1.0, 1.0)
+        }
+        let width = surface.pixelWidth
+        let height = surface.pixelHeight
+        guard width > 0, height > 0 else {
+            return (1.0, 1.0, 1.0, 1.0)
+        }
+
+        let px = min(max(0, Int((canvasPoint.x / max(1.0, canvasSize.width)) * CGFloat(width))), width - 1)
+        let py = min(max(0, Int((canvasPoint.y / max(1.0, canvasSize.height)) * CGFloat(height))), height - 1)
+        let offset = (py * width + px) * 4
+
+        let rByte = surface.bytes[offset]
+        let gByte = surface.bytes[offset + 1]
+        let bByte = surface.bytes[offset + 2]
+        let aByte = surface.bytes[offset + 3]
+
+        let a = CGFloat(aByte) / 255.0
+        let r: CGFloat
+        let g: CGFloat
+        let b: CGFloat
+        if aByte == 255 {
+            r = CGFloat(rByte) / 255.0
+            g = CGFloat(gByte) / 255.0
+            b = CGFloat(bByte) / 255.0
+        } else if aByte > 0 {
+            r = min(1.0, (CGFloat(rByte) / 255.0) / a)
+            g = min(1.0, (CGFloat(gByte) / 255.0) / a)
+            b = min(1.0, (CGFloat(bByte) / 255.0) / a)
+        } else {
+            r = 1.0
+            g = 1.0
+            b = 1.0
+        }
+        return (r, g, b, 1.0)
     }
 
     @discardableResult
@@ -344,6 +719,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
         fontSize: CGFloat? = nil,
         color: ScreenshotAnnotationColor? = nil,
         calloutTarget: CGPoint? = nil,
+        secondaryCalloutTarget: CGPoint? = nil,
         maxWidth: CGFloat? = nil,
         canvasSize: CGSize? = nil
     ) -> UUID {
@@ -368,6 +744,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 fontSize: effectiveSize,
                 color: effectiveColor,
                 calloutTarget: calloutTarget,
+                secondaryCalloutTarget: secondaryCalloutTarget,
                 maxWidth: maxWidth
             )
         )
@@ -377,13 +754,18 @@ public final class ScreenshotEditorEngine: ObservableObject {
     }
 
     /// Открывает режим редактирования существующей текстовой надписи с синхронизацией её индивидуального шрифта, размера и цвета
-    public func beginEditingTextAnnotation(id: UUID) {
+    public func beginEditingTextAnnotation(id: UUID, isInitialPlaceholderEdit: Bool = false) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }),
-              case .text(_, _, let font, let fontSize, let color, _, _) = annotations[idx].payload else {
+              case .text(_, let currentText, let font, let fontSize, let color, _, _, _) = annotations[idx].payload else {
             return
         }
         if let activeId = editingTextAnnotationId, activeId != id {
             commitActiveTextEditing()
+        }
+        if !isInitialPlaceholderEdit {
+            pendingTextEditSnapshot = (id: id, originalText: currentText, preEditAnnotations: annotations)
+        } else {
+            pendingTextEditSnapshot = nil
         }
         selectedFont = font
         selectedFontSize = fontSize
@@ -395,7 +777,13 @@ public final class ScreenshotEditorEngine: ObservableObject {
 
     public func updateText(id: UUID, newText: String, canvasSize: CGSize? = nil) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        if case .text(let pos, _, let font, let size, let color, let calloutTarget, let maxWidth) = annotations[idx].payload {
+        if case .text(let pos, let oldText, let font, let size, let color, let calloutTarget, let secondaryCalloutTarget, let maxWidth) = annotations[idx].payload {
+            if let pending = pendingTextEditSnapshot, pending.id == id, newText != pending.originalText {
+                recordUndoSnapshot(pending.preEditAnnotations)
+                pendingTextEditSnapshot = nil
+            } else if oldText != newText {
+                redoStack.removeAll()
+            }
             let effectiveCanvas = canvasSize ?? lastCanvasSize
             let clampedPos = Self.clampTextPosition(
                 position: pos,
@@ -412,6 +800,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 fontSize: size,
                 color: color,
                 calloutTarget: calloutTarget,
+                secondaryCalloutTarget: secondaryCalloutTarget,
                 maxWidth: maxWidth
             )
         }
@@ -419,7 +808,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
 
     public func updateTextMaxWidth(id: UUID, maxWidth: CGFloat?, canvasSize: CGSize? = nil) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        if case .text(let pos, let text, let font, let size, let color, let calloutTarget, _) = annotations[idx].payload {
+        if case .text(let pos, let text, let font, let size, let color, let calloutTarget, let secondaryCalloutTarget, _) = annotations[idx].payload {
             let clampedMaxW = maxWidth.map { max(Self.minTextBoxWidth, $0) }
             let effectiveCanvas = canvasSize ?? lastCanvasSize
             let clampedPos = Self.clampTextPosition(
@@ -437,6 +826,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 fontSize: size,
                 color: color,
                 calloutTarget: calloutTarget,
+                secondaryCalloutTarget: secondaryCalloutTarget,
                 maxWidth: clampedMaxW
             )
         }
@@ -448,7 +838,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
         if let color { selectedColor = color }
         guard let id = editingTextAnnotationId ?? selectedAnnotationId,
               let idx = annotations.firstIndex(where: { $0.id == id }),
-              case .text(let pos, let text, let oldFont, let oldSize, let oldColor, let calloutTarget, let maxWidth) = annotations[idx].payload else {
+              case .text(let pos, let text, let oldFont, let oldSize, let oldColor, let calloutTarget, let secondaryCalloutTarget, let maxWidth) = annotations[idx].payload else {
             return
         }
         let effectiveFont = font ?? oldFont
@@ -470,6 +860,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
             fontSize: effectiveSize,
             color: effectiveColor,
             calloutTarget: calloutTarget,
+            secondaryCalloutTarget: secondaryCalloutTarget,
             maxWidth: maxWidth
         )
     }
@@ -478,12 +869,13 @@ public final class ScreenshotEditorEngine: ObservableObject {
         let hadActiveText = (editingTextAnnotationId != nil)
         if let id = editingTextAnnotationId,
             let idx = annotations.firstIndex(where: { $0.id == id }),
-            case .text(_, let text, _, _, _, _, _) = annotations[idx].payload {
+            case .text(_, let text, _, _, _, _, _, _) = annotations[idx].payload {
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 annotations.remove(at: idx)
             }
         }
         editingTextAnnotationId = nil
+        pendingTextEditSnapshot = nil
         selectedAnnotationId = nil
         ClipboardMonitor.shared.isEditingScreenshotText = false
         if hadActiveText {
@@ -498,7 +890,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
         switch annotations[idx].payload {
         case .step(let number, _, let color, let pointerAngle):
             annotations[idx].payload = .step(number: number, position: newPosition, color: color, pointerAngle: pointerAngle)
-        case .text(_, let text, let font, let fontSize, let color, let calloutTarget, let maxWidth):
+        case .text(_, let text, let font, let fontSize, let color, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
             let effectiveCanvas = canvasSize ?? lastCanvasSize
             let clampedPos = Self.clampTextPosition(
                 position: newPosition,
@@ -515,6 +907,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 fontSize: fontSize,
                 color: color,
                 calloutTarget: calloutTarget,
+                secondaryCalloutTarget: secondaryCalloutTarget,
                 maxWidth: maxWidth
             )
         default:
@@ -526,12 +919,14 @@ public final class ScreenshotEditorEngine: ObservableObject {
     public func translateAnnotation(id: UUID, by delta: CGPoint) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
         switch annotations[idx].payload {
-        case .arrow(let start, let end, let color, let lineWidth):
+        case .arrow(let start, let end, let color, let lineWidth, let style, let customControlPointOffset):
             annotations[idx].payload = .arrow(
                 start: CGPoint(x: start.x + delta.x, y: start.y + delta.y),
                 end: CGPoint(x: end.x + delta.x, y: end.y + delta.y),
                 color: color,
-                lineWidth: lineWidth
+                lineWidth: lineWidth,
+                style: style,
+                customControlPointOffset: customControlPointOffset
             )
         case .shape(let kind, let start, let end, let color, let lineWidth):
             annotations[idx].payload = .shape(
@@ -541,11 +936,11 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 color: color,
                 lineWidth: lineWidth
             )
-        case .highlighterFreehand(let points, let color, let lineWidth):
+        case .highlighterFreehand(let points, let color, let lineWidth, let opacity):
             let shifted = points.map { CGPoint(x: $0.x + delta.x, y: $0.y + delta.y) }
-            annotations[idx].payload = .highlighterFreehand(points: shifted, color: color, lineWidth: lineWidth)
-        case .highlighterBox(let rect, let color):
-            annotations[idx].payload = .highlighterBox(rect: rect.offsetBy(dx: delta.x, dy: delta.y), color: color)
+            annotations[idx].payload = .highlighterFreehand(points: shifted, color: color, lineWidth: lineWidth, opacity: opacity)
+        case .highlighterBox(let rect, let color, let opacity):
+            annotations[idx].payload = .highlighterBox(rect: rect.offsetBy(dx: delta.x, dy: delta.y), color: color, opacity: opacity)
         case .pixelate(let rect, let scale):
             annotations[idx].payload = .pixelate(rect: rect.offsetBy(dx: delta.x, dy: delta.y), pixelScale: scale)
         case .step(let number, let position, let color, let pointerAngle):
@@ -555,7 +950,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 color: color,
                 pointerAngle: pointerAngle
             )
-        case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let maxWidth):
+        case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
             let rawPos = CGPoint(x: position.x + delta.x, y: position.y + delta.y)
             let clampedPos = Self.clampTextPosition(
                 position: rawPos,
@@ -572,20 +967,66 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 fontSize: fontSize,
                 color: color,
                 calloutTarget: calloutTarget,
+                secondaryCalloutTarget: secondaryCalloutTarget,
                 maxWidth: maxWidth
             )
+        case .eraser(let points, let strokeWidth, let red, let green, let blue, let alpha):
+            let shifted = points.map { CGPoint(x: $0.x + delta.x, y: $0.y + delta.y) }
+            annotations[idx].payload = .eraser(points: shifted, strokeWidth: strokeWidth, red: red, green: green, blue: blue, alpha: alpha)
         }
     }
 
+    /// Минимальное расстояние (в pt) между остриями двух выносных стрелок текста, чтобы ручки не слипались
+    public static func enforceCalloutTipSeparation(
+        movedPoint: CGPoint,
+        otherPoint: CGPoint?,
+        minDistance: CGFloat = 18.0
+    ) -> CGPoint {
+        guard let other = otherPoint else { return movedPoint }
+        let dx = movedPoint.x - other.x
+        let dy = movedPoint.y - other.y
+        let dist = hypot(dx, dy)
+        guard dist < minDistance else { return movedPoint }
+        if dist > 0.001 {
+            let ux = dx / dist
+            let uy = dy / dist
+            return CGPoint(x: other.x + ux * minDistance, y: other.y + uy * minDistance)
+        }
+        return CGPoint(x: other.x + minDistance, y: other.y)
+    }
+
+    /// Ограничивает координату ручки/острия выносной стрелки границами холста
+    private static func clampPointInsideCanvas(_ point: CGPoint, canvasSize: CGSize, margin: CGFloat = 8.0) -> CGPoint {
+        guard canvasSize.width > margin * 2, canvasSize.height > margin * 2 else { return point }
+        return CGPoint(
+            x: min(max(margin, point.x), canvasSize.width - margin),
+            y: min(max(margin, point.y), canvasSize.height - margin)
+        )
+    }
+
     /// Обновление целевой точки выносной стрелки текста (с опциональным сворачиванием при возврате внутрь рамки текста)
-    public func updateTextCalloutTarget(id: UUID, to target: CGPoint?, retractIfInside: Bool = false) {
+    public func updateTextCalloutTarget(
+        id: UUID,
+        to target: CGPoint?,
+        isSecondary: Bool = false,
+        retractIfInside: Bool = false,
+        canvasSize: CGSize? = nil
+    ) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }),
-              case .text(let position, let text, let font, let fontSize, let color, _, let maxWidth) = annotations[idx].payload else {
+              case .text(let position, let text, let font, let fontSize, let color, let primaryTarget, let secondaryTarget, let maxWidth) = annotations[idx].payload else {
             return
         }
-        var resolvedTarget = target
-        if retractIfInside, let pt = target {
-            let rect = Self.textBoundingRect(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth)
+        let effectiveCanvas = canvasSize ?? lastCanvasSize
+        let otherTarget = isSecondary ? primaryTarget : secondaryTarget
+        var resolvedTarget = target.map {
+            let clamped = Self.clampPointInsideCanvas($0, canvasSize: effectiveCanvas)
+            return Self.clampPointInsideCanvas(
+                Self.enforceCalloutTipSeparation(movedPoint: clamped, otherPoint: otherTarget),
+                canvasSize: effectiveCanvas
+            )
+        }
+        if retractIfInside, let pt = resolvedTarget {
+            let rect = Self.textBoundingRect(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth, canvasSize: effectiveCanvas)
             if rect.insetBy(dx: -12, dy: -12).contains(pt) {
                 resolvedTarget = nil
             }
@@ -596,27 +1037,39 @@ public final class ScreenshotEditorEngine: ObservableObject {
             font: font,
             fontSize: fontSize,
             color: color,
-            calloutTarget: resolvedTarget,
+            calloutTarget: isSecondary ? primaryTarget : resolvedTarget,
+            secondaryCalloutTarget: isSecondary ? resolvedTarget : secondaryTarget,
             maxWidth: maxWidth
         )
     }
 
     /// Завершение перетаскивания выносной стрелки текста: если остриё вернули внутрь (или ближе 12 pt к рамке текста), стрелка убирается
-    public func finalizeTextCalloutDrag(id: UUID) {
+    public func finalizeTextCalloutDrag(id: UUID, canvasSize: CGSize? = nil) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }),
-              case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let maxWidth) = annotations[idx].payload,
-              let pt = calloutTarget else {
+              case .text(let position, let text, let font, let fontSize, let color, var calloutTarget, var secondaryCalloutTarget, let maxWidth) = annotations[idx].payload else {
             return
         }
-        let rect = Self.textBoundingRect(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth)
-        if rect.insetBy(dx: -12, dy: -12).contains(pt) {
+        let effectiveCanvas = canvasSize ?? lastCanvasSize
+        let rect = Self.textBoundingRect(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth, canvasSize: effectiveCanvas)
+        let retractZone = rect.insetBy(dx: -12, dy: -12)
+        var changed = false
+        if let pt = calloutTarget, retractZone.contains(pt) {
+            calloutTarget = nil
+            changed = true
+        }
+        if let pt2 = secondaryCalloutTarget, retractZone.contains(pt2) {
+            secondaryCalloutTarget = nil
+            changed = true
+        }
+        if changed {
             annotations[idx].payload = .text(
                 position: position,
                 text: text,
                 font: font,
                 fontSize: fontSize,
                 color: color,
-                calloutTarget: nil,
+                calloutTarget: calloutTarget,
+                secondaryCalloutTarget: secondaryCalloutTarget,
                 maxWidth: maxWidth
             )
         }
@@ -632,13 +1085,23 @@ public final class ScreenshotEditorEngine: ObservableObject {
     ) {
         guard let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
         switch annotations[idx].payload {
-        case .arrow(let start, let end, let color, let lineWidth):
+        case .arrow(let start, let end, let color, let lineWidth, let style, let customControlPointOffset):
             if handle == .start {
                 let adjusted = Self.adjustedDragEndPoint(start: end, rawEnd: point, tool: .arrow, shapeKind: .line, isShiftPressed: isShiftPressed)
-                annotations[idx].payload = .arrow(start: adjusted, end: end, color: color, lineWidth: lineWidth)
+                annotations[idx].payload = .arrow(start: adjusted, end: end, color: color, lineWidth: lineWidth, style: style, customControlPointOffset: customControlPointOffset)
             } else if handle == .end {
                 let adjusted = Self.adjustedDragEndPoint(start: start, rawEnd: point, tool: .arrow, shapeKind: .line, isShiftPressed: isShiftPressed)
-                annotations[idx].payload = .arrow(start: start, end: adjusted, color: color, lineWidth: lineWidth)
+                annotations[idx].payload = .arrow(start: start, end: adjusted, color: color, lineWidth: lineWidth, style: style, customControlPointOffset: customControlPointOffset)
+            } else if handle == .arrowCurveApex {
+                let dx = end.x - start.x
+                let dy = end.y - start.y
+                let length = hypot(dx, dy)
+                guard length > 4 else { return }
+                let nx = -dy / length
+                let ny = dx / length
+                let mid = CGPoint(x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5)
+                let signedBend = (point.x - mid.x) * nx + (point.y - mid.y) * ny
+                annotations[idx].payload = .arrow(start: start, end: end, color: color, lineWidth: lineWidth, style: .curved, customControlPointOffset: signedBend)
             }
 
         case .shape(let kind, let start, let end, let color, let lineWidth):
@@ -655,7 +1118,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 annotations[idx].payload = .shape(kind: kind, start: newStart, end: newEnd, color: color, lineWidth: lineWidth)
             }
 
-        case .highlighterBox(let rect, let color):
+        case .highlighterBox(let rect, let color, let opacity):
             let start = CGPoint(x: rect.minX, y: rect.minY)
             let end = CGPoint(x: rect.maxX, y: rect.maxY)
             let (newStart, newEnd) = Self.calculateResizedCorners(start: start, end: end, handle: handle, to: point, isShiftPressed: isShiftPressed)
@@ -665,7 +1128,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 width: max(4, abs(newEnd.x - newStart.x)),
                 height: max(4, abs(newEnd.y - newStart.y))
             )
-            annotations[idx].payload = .highlighterBox(rect: newRect, color: color)
+            annotations[idx].payload = .highlighterBox(rect: newRect, color: color, opacity: opacity)
 
         case .pixelate(let rect, let scale):
             let start = CGPoint(x: rect.minX, y: rect.minY)
@@ -690,12 +1153,17 @@ public final class ScreenshotEditorEngine: ObservableObject {
                 annotations[idx].payload = .step(number: number, position: position, color: color, pointerAngle: angle)
             }
 
-        case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let maxWidth):
+        case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
             if handle == .textCalloutPull || handle == .textCalloutTip {
                 var target = point
                 if isShiftPressed {
                     target = Self.adjustedDragEndPoint(start: position, rawEnd: point, tool: .arrow, shapeKind: .line, isShiftPressed: true)
                 }
+                target = Self.clampPointInsideCanvas(target, canvasSize: canvasSize)
+                target = Self.clampPointInsideCanvas(
+                    Self.enforceCalloutTipSeparation(movedPoint: target, otherPoint: secondaryCalloutTarget),
+                    canvasSize: canvasSize
+                )
                 annotations[idx].payload = .text(
                     position: position,
                     text: text,
@@ -703,6 +1171,27 @@ public final class ScreenshotEditorEngine: ObservableObject {
                     fontSize: fontSize,
                     color: color,
                     calloutTarget: target,
+                    secondaryCalloutTarget: secondaryCalloutTarget,
+                    maxWidth: maxWidth
+                )
+            } else if handle == .textSecondaryCalloutPull || handle == .textSecondaryCalloutTip {
+                var target = point
+                if isShiftPressed {
+                    target = Self.adjustedDragEndPoint(start: position, rawEnd: point, tool: .arrow, shapeKind: .line, isShiftPressed: true)
+                }
+                target = Self.clampPointInsideCanvas(target, canvasSize: canvasSize)
+                target = Self.clampPointInsideCanvas(
+                    Self.enforceCalloutTipSeparation(movedPoint: target, otherPoint: calloutTarget),
+                    canvasSize: canvasSize
+                )
+                annotations[idx].payload = .text(
+                    position: position,
+                    text: text,
+                    font: font,
+                    fontSize: fontSize,
+                    color: color,
+                    calloutTarget: calloutTarget,
+                    secondaryCalloutTarget: target,
                     maxWidth: maxWidth
                 )
             } else if handle == .textWidthRight || handle == .textWidthLeft {
@@ -758,11 +1247,12 @@ public final class ScreenshotEditorEngine: ObservableObject {
                     fontSize: fontSize,
                     color: color,
                     calloutTarget: calloutTarget,
+                    secondaryCalloutTarget: secondaryCalloutTarget,
                     maxWidth: newMaxWidth
                 )
             }
 
-        case .highlighterFreehand:
+        case .highlighterFreehand, .eraser:
             break
         }
     }
@@ -830,22 +1320,44 @@ public final class ScreenshotEditorEngine: ObservableObject {
         selectedColor = color
         guard let id = selectedAnnotationId ?? editingTextAnnotationId,
               let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        recordUndoSnapshot()
         switch annotations[idx].payload {
-        case .arrow(let s, let e, _, let w):
-            annotations[idx].payload = .arrow(start: s, end: e, color: color, lineWidth: w)
-        case .shape(let k, let s, let e, _, let w):
+        case .arrow(let s, let e, let oldColor, let w, let style, let customOffset):
+            guard oldColor != color else { return }
+            recordUndoSnapshot()
+            annotations[idx].payload = .arrow(start: s, end: e, color: color, lineWidth: w, style: style, customControlPointOffset: customOffset)
+        case .shape(let k, let s, let e, let oldColor, let w):
+            guard oldColor != color else { return }
+            recordUndoSnapshot()
             annotations[idx].payload = .shape(kind: k, start: s, end: e, color: color, lineWidth: w)
-        case .step(let n, let p, _, let a):
+        case .step(let n, let p, let oldColor, let a):
+            guard oldColor != color else { return }
+            recordUndoSnapshot()
             annotations[idx].payload = .step(number: n, position: p, color: color, pointerAngle: a)
-        case .text(let p, let t, let f, let sz, _, let calloutTarget, let maxWidth):
-            annotations[idx].payload = .text(position: p, text: t, font: f, fontSize: sz, color: color, calloutTarget: calloutTarget, maxWidth: maxWidth)
-        case .highlighterBox(let r, _):
-            annotations[idx].payload = .highlighterBox(rect: r, color: color)
-        case .highlighterFreehand(let pts, _, let w):
-            annotations[idx].payload = .highlighterFreehand(points: pts, color: color, lineWidth: w)
-        case .pixelate:
+        case .text(let p, let t, let f, let sz, let oldColor, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
+            guard oldColor != color else { return }
+            recordUndoSnapshot()
+            annotations[idx].payload = .text(position: p, text: t, font: f, fontSize: sz, color: color, calloutTarget: calloutTarget, secondaryCalloutTarget: secondaryCalloutTarget, maxWidth: maxWidth)
+        case .highlighterBox(let r, let oldColor, let op):
+            guard oldColor != color else { return }
+            recordUndoSnapshot()
+            annotations[idx].payload = .highlighterBox(rect: r, color: color, opacity: op)
+        case .highlighterFreehand(let pts, let oldColor, let w, let op):
+            guard oldColor != color else { return }
+            recordUndoSnapshot()
+            annotations[idx].payload = .highlighterFreehand(points: pts, color: color, lineWidth: w, opacity: op)
+        case .pixelate, .eraser:
             break
+        }
+    }
+
+    /// Живая смена стиля изгиба выделенной стрелки
+    public func updateSelectedArrowStyle(_ style: ArrowCurveStyle) {
+        selectedArrowStyle = style
+        guard let id = selectedAnnotationId,
+              let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
+        if case .arrow(let s, let e, let c, let w, _, _) = annotations[idx].payload {
+            recordUndoSnapshot()
+            annotations[idx].payload = .arrow(start: s, end: e, color: c, lineWidth: w, style: style, customControlPointOffset: nil)
         }
     }
 
@@ -854,38 +1366,78 @@ public final class ScreenshotEditorEngine: ObservableObject {
         selectedStrokeWidth = width
         guard let id = selectedAnnotationId,
               let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        recordUndoSnapshot()
         switch annotations[idx].payload {
-        case .arrow(let s, let e, let c, _):
-            annotations[idx].payload = .arrow(start: s, end: e, color: c, lineWidth: width)
+        case .arrow(let s, let e, let c, _, let style, let customOffset):
+            recordUndoSnapshot()
+            annotations[idx].payload = .arrow(start: s, end: e, color: c, lineWidth: width, style: style, customControlPointOffset: customOffset)
         case .shape(let k, let s, let e, let c, _):
+            recordUndoSnapshot()
             annotations[idx].payload = .shape(kind: k, start: s, end: e, color: c, lineWidth: width)
-        case .highlighterFreehand(let pts, let c, _):
-            annotations[idx].payload = .highlighterFreehand(points: pts, color: c, lineWidth: max(14, width * 3.2))
+        case .highlighterFreehand(let pts, let c, _, let op):
+            recordUndoSnapshot()
+            annotations[idx].payload = .highlighterFreehand(points: pts, color: c, lineWidth: max(14, width * 3.2), opacity: op)
+        default:
+            break
+        }
+    }
+
+    /// Живая смена прозрачности выделенного маркера (0.0 ... 1.0)
+    public func updateSelectedAnnotationHighlighterOpacity(_ opacity: Double, recordUndo: Bool = true) {
+        let clamped = min(1.0, max(0.0, opacity))
+        highlighterOpacity = clamped
+        guard let id = selectedAnnotationId,
+              let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
+        switch annotations[idx].payload {
+        case .highlighterBox(let r, let c, let oldOpacity):
+            guard abs(oldOpacity - clamped) > 0.001 else { return }
+            if recordUndo { recordUndoSnapshot() } else { redoStack.removeAll() }
+            annotations[idx].payload = .highlighterBox(rect: r, color: c, opacity: clamped)
+        case .highlighterFreehand(let pts, let c, let w, let oldOpacity):
+            guard abs(oldOpacity - clamped) > 0.001 else { return }
+            if recordUndo { recordUndoSnapshot() } else { redoStack.removeAll() }
+            annotations[idx].payload = .highlighterFreehand(points: pts, color: c, lineWidth: w, opacity: clamped)
         default:
             break
         }
     }
 
     /// Живая смена шрифта текста выделенного элемента
-    public func updateSelectedAnnotationFont(_ font: AppFont) {
+    public func updateSelectedAnnotationFont(_ font: AppFont, canvasSize: CGSize? = nil) {
         selectedFont = font
         guard let id = selectedAnnotationId ?? editingTextAnnotationId,
               let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        if case .text(let p, let t, _, let sz, let c, let calloutTarget, let maxWidth) = annotations[idx].payload {
+        if case .text(let p, let t, let oldFont, let sz, let c, let calloutTarget, let secondaryCalloutTarget, let maxWidth) = annotations[idx].payload,
+           oldFont != font {
             recordUndoSnapshot()
-            annotations[idx].payload = .text(position: p, text: t, font: font, fontSize: sz, color: c, calloutTarget: calloutTarget, maxWidth: maxWidth)
+            let clampedPos = Self.clampTextPosition(
+                position: p,
+                text: t,
+                font: font,
+                fontSize: sz,
+                maxWidth: maxWidth,
+                canvasSize: canvasSize ?? lastCanvasSize
+            )
+            annotations[idx].payload = .text(position: clampedPos, text: t, font: font, fontSize: sz, color: c, calloutTarget: calloutTarget, secondaryCalloutTarget: secondaryCalloutTarget, maxWidth: maxWidth)
         }
     }
 
     /// Живая смена размера шрифта текста выделенного элемента
-    public func updateSelectedAnnotationFontSize(_ size: CGFloat) {
+    public func updateSelectedAnnotationFontSize(_ size: CGFloat, canvasSize: CGSize? = nil) {
         selectedFontSize = size
         guard let id = selectedAnnotationId ?? editingTextAnnotationId,
               let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        if case .text(let p, let t, let f, _, let c, let calloutTarget, let maxWidth) = annotations[idx].payload {
+        if case .text(let p, let t, let f, let oldSize, let c, let calloutTarget, let secondaryCalloutTarget, let maxWidth) = annotations[idx].payload,
+           abs(oldSize - size) > 0.1 {
             recordUndoSnapshot()
-            annotations[idx].payload = .text(position: p, text: t, font: f, fontSize: size, color: c, calloutTarget: calloutTarget, maxWidth: maxWidth)
+            let clampedPos = Self.clampTextPosition(
+                position: p,
+                text: t,
+                font: f,
+                fontSize: size,
+                maxWidth: maxWidth,
+                canvasSize: canvasSize ?? lastCanvasSize
+            )
+            annotations[idx].payload = .text(position: clampedPos, text: t, font: f, fontSize: size, color: c, calloutTarget: calloutTarget, secondaryCalloutTarget: secondaryCalloutTarget, maxWidth: maxWidth)
         }
     }
 
@@ -894,7 +1446,8 @@ public final class ScreenshotEditorEngine: ObservableObject {
         selectedShapeKind = kind
         guard let id = selectedAnnotationId,
               let idx = annotations.firstIndex(where: { $0.id == id }) else { return }
-        if case .shape(_, let s, let e, let c, let w) = annotations[idx].payload {
+        if case .shape(let oldKind, let s, let e, let c, let w) = annotations[idx].payload,
+           oldKind != kind {
             recordUndoSnapshot()
             annotations[idx].payload = .shape(kind: kind, start: s, end: e, color: c, lineWidth: w)
         }
@@ -927,15 +1480,18 @@ public final class ScreenshotEditorEngine: ObservableObject {
     public func addFreehandHighlighter(
         points: [CGPoint],
         color: ScreenshotAnnotationColor? = nil,
-        lineWidth: CGFloat? = nil
+        lineWidth: CGFloat? = nil,
+        opacity: Double? = nil
     ) -> UUID {
         recordUndoSnapshot()
         let width = max(14, (lineWidth ?? selectedStrokeWidth) * 3.2)
+        let resolvedOpacity = min(1.0, max(0.0, opacity ?? highlighterOpacity))
         let item = ScreenshotAnnotationItem(
             payload: .highlighterFreehand(
                 points: points,
                 color: color ?? selectedColor,
-                lineWidth: width
+                lineWidth: width,
+                opacity: resolvedOpacity
             )
         )
         annotations.append(item)
@@ -946,14 +1502,17 @@ public final class ScreenshotEditorEngine: ObservableObject {
     @discardableResult
     public func addBoxHighlighter(
         rect: CGRect,
-        color: ScreenshotAnnotationColor? = nil
+        color: ScreenshotAnnotationColor? = nil,
+        opacity: Double? = nil
     ) -> UUID {
         recordUndoSnapshot()
         let normalized = rect.standardized
+        let resolvedOpacity = min(1.0, max(0.0, opacity ?? highlighterOpacity))
         let item = ScreenshotAnnotationItem(
             payload: .highlighterBox(
                 rect: normalized,
-                color: color ?? selectedColor
+                color: color ?? selectedColor,
+                opacity: resolvedOpacity
             )
         )
         annotations.append(item)
@@ -1001,11 +1560,30 @@ public final class ScreenshotEditorEngine: ObservableObject {
         commitActiveTextEditing()
         guard let previous = undoStack.popLast() else {
             if !annotations.isEmpty {
+                redoStack.append(annotations)
+                if redoStack.count > 60 { redoStack.removeFirst() }
                 annotations.removeLast()
             }
             return
         }
+        redoStack.append(annotations)
+        if redoStack.count > 60 {
+            redoStack.removeFirst()
+        }
         annotations = previous
+        if let sel = selectedAnnotationId, !annotations.contains(where: { $0.id == sel }) {
+            selectedAnnotationId = nil
+        }
+    }
+
+    public func redo() {
+        commitActiveTextEditing()
+        guard let nextState = redoStack.popLast() else { return }
+        undoStack.append(annotations)
+        if undoStack.count > 60 {
+            undoStack.removeFirst()
+        }
+        annotations = nextState
         if let sel = selectedAnnotationId, !annotations.contains(where: { $0.id == sel }) {
             selectedAnnotationId = nil
         }
@@ -1023,9 +1601,23 @@ public final class ScreenshotEditorEngine: ObservableObject {
 
     // MARK: - Geometry & Hit-Testing Helpers
 
-    public static let textHorizontalPadding: CGFloat = 12.0
+    public static let textHorizontalPadding: CGFloat = 10.0
     public static let textVerticalPadding: CGFloat = 8.0
-    public static let minTextBoxWidth: CGFloat = 110.0
+    public static let minTextBoxWidth: CGFloat = 42.0
+
+    public static func maxSingleLineWidth(for text: String, font nsFont: NSFont) -> CGFloat {
+        let displayString = text.isEmpty ? " " : text
+        let lines = displayString.components(separatedBy: .newlines)
+        var maxLineWidth: CGFloat = 0.0
+        for line in lines {
+            let lineStr = line.isEmpty ? " " : line
+            let lineWidth = (lineStr as NSString).size(withAttributes: [.font: nsFont]).width
+            if lineWidth > maxLineWidth {
+                maxLineWidth = lineWidth
+            }
+        }
+        return ceil(maxLineWidth) + 6.0
+    }
 
     /// Вычисляет точный габаритный прямоугольник текстовой плашки в координатах холста с учётом шрифта, размера и многострочного переноса по `maxWidth`
     public static func textBoundingRect(
@@ -1038,11 +1630,12 @@ public final class ScreenshotEditorEngine: ObservableObject {
     ) -> CGRect {
         let displayString = text.isEmpty ? " " : text
         let nsFont = font.nsFont(size: fontSize, weight: .bold)
-        let horizontalPadding: CGFloat = textHorizontalPadding // 12 pt (суммарно 24 pt слева и справа)
+        let horizontalPadding: CGFloat = textHorizontalPadding // 10 pt (суммарно 20 pt слева и справа)
         let verticalPadding: CGFloat = textVerticalPadding     // 8 pt (суммарно 16 pt сверху и снизу)
-        let minBoxWidth: CGFloat = minTextBoxWidth             // 110 pt
+        let minBoxWidth: CGFloat = minTextBoxWidth             // 42 pt
         let defaultMaxBoxWidth: CGFloat = min(340.0, max(180.0, canvasSize.width * 0.65))
         let maxAllowedBoxWidth: CGFloat = max(minBoxWidth, canvasSize.width - 24.0)
+        let effectiveDefaultMaxWidth: CGFloat = min(defaultMaxBoxWidth, maxAllowedBoxWidth)
 
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineBreakMode = .byWordWrapping
@@ -1051,35 +1644,27 @@ public final class ScreenshotEditorEngine: ObservableObject {
             .paragraphStyle: paragraphStyle
         ]
 
-        let singleLineRect = (displayString as NSString).boundingRect(
-            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes,
-            context: nil
-        )
-        let singleLineWidth = ceil(singleLineRect.width) + 10.0
+        let singleLineWidth = maxSingleLineWidth(for: displayString, font: nsFont)
 
         let targetBoxWidth: CGFloat
         if let customMaxWidth = maxWidth {
             targetBoxWidth = min(max(customMaxWidth, minBoxWidth), maxAllowedBoxWidth)
         } else {
-            if !displayString.contains("\n") && (singleLineWidth + horizontalPadding * 2.0) <= defaultMaxBoxWidth {
-                targetBoxWidth = max(minBoxWidth, singleLineWidth + horizontalPadding * 2.0)
-            } else {
-                targetBoxWidth = defaultMaxBoxWidth
-            }
+            let naturalBoxWidth = singleLineWidth + horizontalPadding * 2.0
+            targetBoxWidth = min(effectiveDefaultMaxWidth, max(minBoxWidth, naturalBoxWidth))
         }
 
-        let innerTextWidth = max(60.0, targetBoxWidth - horizontalPadding * 2.0)
+        let innerTextWidth = max(22.0, targetBoxWidth - horizontalPadding * 2.0)
+        let measureHeightString = displayString.hasSuffix("\n") ? (displayString + " ") : displayString
 
-        let multiLineRect = (displayString as NSString).boundingRect(
+        let multiLineRect = (measureHeightString as NSString).boundingRect(
             with: NSSize(width: innerTextWidth, height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes,
             context: nil
         )
-        let conservativeWrapRect = (displayString as NSString).boundingRect(
-            with: NSSize(width: max(50.0, innerTextWidth - 6.0), height: CGFloat.greatestFiniteMagnitude),
+        let conservativeWrapRect = (measureHeightString as NSString).boundingRect(
+            with: NSSize(width: max(22.0, innerTextWidth - 6.0), height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes,
             context: nil
@@ -1163,6 +1748,23 @@ public final class ScreenshotEditorEngine: ObservableObject {
         return CGPoint(x: tipPoint.x - offset.x, y: tipPoint.y - offset.y)
     }
 
+    /// Позиция центра метки-шага с аккуратным клампом внутрь границ холста, чтобы бейдж не обрезался у краёв и углов
+    public static func clampedStepPinCenter(
+        forTipPoint tipPoint: CGPoint,
+        pointerAngle: Double = .pi / 4.0,
+        canvasSize: CGSize
+    ) -> CGPoint {
+        var center = stepPinCenter(forTipPoint: tipPoint, pointerAngle: pointerAngle)
+        let halfPinBodyWithMargin: CGFloat = 16.0
+        guard canvasSize.width > halfPinBodyWithMargin * 2,
+              canvasSize.height > halfPinBodyWithMargin * 2 else {
+            return center
+        }
+        center.x = min(max(halfPinBodyWithMargin, center.x), canvasSize.width - halfPinBodyWithMargin)
+        center.y = min(max(halfPinBodyWithMargin, center.y), canvasSize.height - halfPinBodyWithMargin)
+        return center
+    }
+
     /// Габаритный прямоугольник метки-шага (включая корпус 26x26 и остриё носика) вокруг annotation.position
     public static func stepPinBoundingRect(at position: CGPoint, pointerAngle: Double = .pi / 4.0) -> CGRect {
         let center = position
@@ -1174,7 +1776,91 @@ public final class ScreenshotEditorEngine: ObservableObject {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    /// Вычисляет точку СНАРУЖИ за правым краем текстовой рамки (на расстоянии 8 pt от внешней границы), за которую можно вытянуть стрелку от текста
+    /// Вычисляет смещение дуги изогнутой стрелки (подписанное: > 0 для curvedRight, < 0 для curvedLeft)
+    nonisolated public static func arrowBendOffset(
+        start: CGPoint,
+        end: CGPoint,
+        style: ArrowCurveStyle,
+        customOffset: CGFloat? = nil
+    ) -> CGFloat {
+        if let customOffset {
+            return customOffset
+        }
+        let length = hypot(end.x - start.x, end.y - start.y)
+        let mag = min(95.0, max(18.0, length * 0.24))
+        switch style {
+        case .straight:
+            return 0
+        case .curved:
+            return mag
+        }
+    }
+
+    /// Контрольная точка квадратичной кривой Безье для изогнутой стрелки
+    nonisolated public static func arrowControlPoint(
+        start: CGPoint,
+        end: CGPoint,
+        style: ArrowCurveStyle,
+        customOffset: CGFloat? = nil
+    ) -> CGPoint {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let length = hypot(dx, dy)
+        let mid = CGPoint(x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5)
+        guard length > 4 else { return mid }
+        let bend = arrowBendOffset(start: start, end: end, style: style, customOffset: customOffset)
+        guard abs(bend) > 0.5 else { return mid }
+        let nx = -dy / length
+        let ny = dx / length
+        return CGPoint(x: mid.x + nx * (bend * 2.0), y: mid.y + ny * (bend * 2.0))
+    }
+
+    /// Вершина дуги изогнутой стрелки при t = 0.5 (позиция 3-й ручки редактирования изгиба ●)
+    nonisolated public static func arrowApexPoint(
+        start: CGPoint,
+        end: CGPoint,
+        style: ArrowCurveStyle,
+        customOffset: CGFloat? = nil
+    ) -> CGPoint {
+        let ctrl = arrowControlPoint(start: start, end: end, style: style, customOffset: customOffset)
+        return arrowPointOnCurve(t: 0.5, start: start, control: ctrl, end: end)
+    }
+
+    /// Точка на квадратичной кривой Безье при параметре t ∈ [0, 1]
+    nonisolated public static func arrowPointOnCurve(t: CGFloat, start: CGPoint, control: CGPoint, end: CGPoint) -> CGPoint {
+        let oneMinusT = 1.0 - t
+        return CGPoint(
+            x: oneMinusT * oneMinusT * start.x + 2.0 * oneMinusT * t * control.x + t * t * end.x,
+            y: oneMinusT * oneMinusT * start.y + 2.0 * oneMinusT * t * control.y + t * t * end.y
+        )
+    }
+
+    /// Минимальное расстояние от точки до (прямой или изогнутой) стрелки
+    nonisolated public static func arrowDistanceToCurve(
+        point: CGPoint,
+        start: CGPoint,
+        end: CGPoint,
+        style: ArrowCurveStyle,
+        customOffset: CGFloat? = nil
+    ) -> CGFloat {
+        let bend = arrowBendOffset(start: start, end: end, style: style, customOffset: customOffset)
+        if abs(bend) <= 0.5 {
+            return distanceToSegment(p: point, a: start, b: end)
+        }
+        let ctrl = arrowControlPoint(start: start, end: end, style: style, customOffset: customOffset)
+        let segments = 16
+        var prev = start
+        var minDist = CGFloat.greatestFiniteMagnitude
+        for i in 1...segments {
+            let t = CGFloat(i) / CGFloat(segments)
+            let curr = arrowPointOnCurve(t: t, start: start, control: ctrl, end: end)
+            minDist = min(minDist, distanceToSegment(p: point, a: prev, b: curr))
+            prev = curr
+        }
+        return minDist
+    }
+
+    /// Вычисляет точку СНАРУЖИ за правым краем текстовой рамки (на расстоянии 18 pt), за которую можно вытянуть основную стрелку от текста
     public static func textCalloutPullHandlePosition(
         position: CGPoint,
         text: String,
@@ -1191,7 +1877,40 @@ public final class ScreenshotEditorEngine: ObservableObject {
             maxWidth: maxWidth,
             canvasSize: canvasSize
         )
-        return CGPoint(x: rect.maxX + 18.0, y: rect.midY)
+        let raw = CGPoint(x: rect.maxX + 18.0, y: rect.midY)
+        return clampPullHandlePoint(raw, in: canvasSize)
+    }
+
+    /// Вычисляет точку СНАРУЖИ за левым краем текстовой рамки (на расстоянии 18 pt), за которую можно вытянуть вторую выносную стрелку от текста
+    public static func textSecondaryCalloutPullHandlePosition(
+        position: CGPoint,
+        text: String,
+        font: AppFont = .inter,
+        fontSize: CGFloat,
+        maxWidth: CGFloat? = nil,
+        canvasSize: CGSize = CGSize(width: 800, height: 600)
+    ) -> CGPoint {
+        let rect = textBoundingRect(
+            position: position,
+            text: text,
+            font: font,
+            fontSize: fontSize,
+            maxWidth: maxWidth,
+            canvasSize: canvasSize
+        )
+        let raw = CGPoint(x: rect.minX - 18.0, y: rect.midY)
+        return clampPullHandlePoint(raw, in: canvasSize)
+    }
+
+    private static func clampPullHandlePoint(_ point: CGPoint, in canvasSize: CGSize) -> CGPoint {
+        let pad: CGFloat = 12.0
+        guard canvasSize.width >= pad * 2.5, canvasSize.height >= pad * 2.5 else {
+            return point
+        }
+        return CGPoint(
+            x: min(max(pad, point.x), canvasSize.width - pad),
+            y: min(max(pad, point.y), canvasSize.height - pad)
+        )
     }
 
     /// Вычисляет ближайшую опорную точку на границе скруглённого прямоугольника `textRect` к точке острия `target`
@@ -1223,35 +1942,28 @@ public final class ScreenshotEditorEngine: ObservableObject {
         )
     }
 
-    /// Строит единый замкнутый контур (`Path`) для скруглённого текстового окна (`pillRect`) и выносной стрелки к `calloutTarget` через булево объединение (`CGPath.union`) без преломления углов и без перекоса на широких текстовых блоках
-    public static func unifiedTextCalloutPath(
+    private static func calloutTailCGPath(
         pillRect: CGRect,
-        cornerRadius: CGFloat = 7.0,
-        calloutTarget: CGPoint?
-    ) -> Path {
-        let r = min(cornerRadius, min(pillRect.width, pillRect.height) * 0.45)
-        let boxCGPath = CGPath(roundedRect: pillRect, cornerWidth: r, cornerHeight: r, transform: nil)
-
-        guard let target = calloutTarget,
-              !pillRect.insetBy(dx: -4, dy: -4).contains(target) else {
-            return Path(boxCGPath)
+        cornerRadius: CGFloat,
+        target: CGPoint
+    ) -> CGPath? {
+        guard !pillRect.insetBy(dx: -4, dy: -4).contains(target) else {
+            return nil
         }
 
-        // Находим ближайшую опорную точку на границе скруглённого прямоугольника pillRect к точке острия target
+        let r = min(cornerRadius, min(pillRect.width, pillRect.height) * 0.45)
         let anchorPt = calloutAnchorPoint(for: pillRect, target: target, cornerRadius: r)
 
         let rawDX = target.x - anchorPt.x
         let rawDY = target.y - anchorPt.y
         let rawDist = hypot(rawDX, rawDY)
         guard rawDist > 3.5 else {
-            return Path(boxCGPath)
+            return nil
         }
 
         let rawUX = rawDX / rawDist
         let rawUY = rawDY / rawDist
 
-        // Заводим внутренний центр основания клина внутрь pillRect на 7–9 pt с безопасным отступом от углов,
-        // чтобы булево объединение CGPath.union идеально сливало плашку и стрелку без зазоров и без преломления углов
         let safeInset = min(max(r + 2.5, 9.5), min(pillRect.width, pillRect.height) * 0.45)
         let innerBaseCenter = CGPoint(
             x: min(max(anchorPt.x - rawUX * 8.0, pillRect.minX + safeInset), pillRect.maxX - safeInset),
@@ -1276,12 +1988,26 @@ public final class ScreenshotEditorEngine: ObservableObject {
             y: innerBaseCenter.y - ny * innerHalfWidth
         )
 
-        // Геометрия классического наконечника стрелки (усики + остриё в точке calloutTarget)
-        let headLength = min(11.5, max(7.5, dist * 0.42))
-        let headHalfWidth = min(6.2, max(4.4, headLength * 0.55))
-        let barbBackset = min(1.8, headLength * 0.18)
-        let neckDist = max(2.0, dist - headLength + barbBackset)
-        let neckHalfWidth: CGFloat = 2.1
+        let headLength: CGFloat
+        let headHalfWidth: CGFloat
+        let neckDist: CGFloat
+        let neckHalfWidth: CGFloat
+        let ctrlHalfWidth: CGFloat
+
+        if dist < 14.0 {
+            headLength = min(dist * 0.72, 11.5)
+            headHalfWidth = max(2.2, min(6.2, headLength * 0.56))
+            neckDist = max(0.5, dist - headLength)
+            neckHalfWidth = min(2.1, headHalfWidth * 0.55)
+            ctrlHalfWidth = min(3.8, neckHalfWidth * 1.4)
+        } else {
+            headLength = min(11.5, max(7.5, dist * 0.42))
+            headHalfWidth = min(6.2, max(4.4, headLength * 0.55))
+            let barbBackset = min(1.8, headLength * 0.18)
+            neckDist = max(2.0, dist - headLength + barbBackset)
+            neckHalfWidth = 2.1
+            ctrlHalfWidth = 3.8
+        }
 
         let neckCenter = CGPoint(
             x: anchorPt.x + ux * neckDist,
@@ -1309,9 +2035,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
             y: barbBase.y - ny * headHalfWidth
         )
 
-        // Контрольные точки вогнутых кривых Безье от широкого основания (~15 pt) к тонкой шейке перед наконечником
         let ctrlDist = min(10.0, neckDist * 0.36)
-        let ctrlHalfWidth: CGFloat = 3.8
         let ctrlLeft = CGPoint(
             x: anchorPt.x + ux * ctrlDist + nx * ctrlHalfWidth,
             y: anchorPt.y + uy * ctrlDist + ny * ctrlHalfWidth
@@ -1330,13 +2054,32 @@ public final class ScreenshotEditorEngine: ObservableObject {
         arrowCGPath.addLine(to: neckRight)
         arrowCGPath.addQuadCurve(to: innerBaseRight, control: ctrlRight)
         arrowCGPath.closeSubpath()
+        return arrowCGPath
+    }
 
-        let combinedCGPath = boxCGPath.union(arrowCGPath, using: .winding)
+    /// Строит единый замкнутый контур (`Path`) для скруглённого текстового окна (`pillRect`) и одной или двух выносных стрелок через булево объединение (`CGPath.union`) без преломления углов и без перекоса
+    public static func unifiedTextCalloutPath(
+        pillRect: CGRect,
+        cornerRadius: CGFloat = 7.0,
+        calloutTarget: CGPoint?,
+        secondaryCalloutTarget: CGPoint? = nil
+    ) -> Path {
+        let r = min(cornerRadius, min(pillRect.width, pillRect.height) * 0.45)
+        var combinedCGPath: CGPath = CGPath(roundedRect: pillRect, cornerWidth: r, cornerHeight: r, transform: nil)
+
+        if let target1 = calloutTarget,
+           let tail1 = calloutTailCGPath(pillRect: pillRect, cornerRadius: r, target: target1) {
+            combinedCGPath = combinedCGPath.union(tail1, using: .winding)
+        }
+        if let target2 = secondaryCalloutTarget,
+           let tail2 = calloutTailCGPath(pillRect: pillRect, cornerRadius: r, target: target2) {
+            combinedCGPath = combinedCGPath.union(tail2, using: .winding)
+        }
         return Path(combinedCGPath)
     }
 
     /// Расстояние от точки p до отрезка [a, b]
-    public static func distanceToSegment(p: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
+    nonisolated public static func distanceToSegment(p: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
         let dx = b.x - a.x
         let dy = b.y - a.y
         let lengthSq = dx * dx + dy * dy
@@ -1350,12 +2093,42 @@ public final class ScreenshotEditorEngine: ObservableObject {
         return hypot(p.x - projX, p.y - projY)
     }
 
+    /// Проверяет, должен ли редактор перехватывать клавишное событие
+    public static func shouldProcessKeyEvent(
+        eventWindow: NSWindow?,
+        hostWindow: NSWindow?,
+        hasModalWindow: Bool,
+        isRecordingShortcut: Bool,
+        isHostFirstResponderTextView: Bool,
+        isEditingAnnotationText: Bool
+    ) -> Bool {
+        if hasModalWindow || isRecordingShortcut {
+            return false
+        }
+        if let hostWindow, let eventWindow, eventWindow !== hostWindow {
+            return false
+        }
+        if isHostFirstResponderTextView && !isEditingAnnotationText {
+            return false
+        }
+        return true
+    }
+
     /// Проверка попадания клика в интерактивную точку-ручку (●) выбранного элемента
-    public static func hitTestHandle(point: CGPoint, in item: ScreenshotAnnotationItem, handleRadius: CGFloat = 12.0) -> HandlePosition? {
+    public static func hitTestHandle(
+        point: CGPoint,
+        in item: ScreenshotAnnotationItem,
+        handleRadius: CGFloat = 12.0,
+        canvasSize: CGSize = CGSize(width: 800, height: 600)
+    ) -> HandlePosition? {
         switch item.payload {
-        case .arrow(let start, let end, _, _):
+        case .arrow(let start, let end, _, _, let style, let customControlPointOffset):
             if hypot(point.x - start.x, point.y - start.y) <= handleRadius { return .start }
             if hypot(point.x - end.x, point.y - end.y) <= handleRadius { return .end }
+            if style != .straight || customControlPointOffset != nil {
+                let apex = arrowApexPoint(start: start, end: end, style: style, customOffset: customControlPointOffset)
+                if hypot(point.x - apex.x, point.y - apex.y) <= handleRadius { return .arrowCurveApex }
+            }
             return nil
 
         case .shape(let kind, let start, let end, _, _):
@@ -1374,7 +2147,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
             if hypot(point.x - maxX, point.y - maxY) <= handleRadius { return .bottomRight }
             return nil
 
-        case .highlighterBox(let rect, _), .pixelate(let rect, _):
+        case .highlighterBox(let rect, _, _), .pixelate(let rect, _):
             let minX = rect.minX
             let maxX = rect.maxX
             let minY = rect.minY
@@ -1391,17 +2164,48 @@ public final class ScreenshotEditorEngine: ObservableObject {
             if hypot(point.x - handlePt.x, point.y - handlePt.y) <= handleRadius { return .stepPointer }
             return nil
 
-        case .text(let position, let text, let font, let fontSize, _, let calloutTarget, let maxWidth):
-            let rect = textBoundingRect(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth)
-            // 1. Сначала проверяем кружок острия стрелки или кружок вытягивания стрелки (↗) снаружи справа
+        case .text(let position, let text, let font, let fontSize, _, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
+            let rect = textBoundingRect(
+                position: position,
+                text: text,
+                font: font,
+                fontSize: fontSize,
+                maxWidth: maxWidth,
+                canvasSize: canvasSize
+            )
+            // 1. Проверяем кружки острия стрелок или кружки вытягивания стрелок (справа и слева)
             if let tip = calloutTarget {
                 if hypot(point.x - tip.x, point.y - tip.y) <= max(handleRadius, 14.0) {
                     return .textCalloutTip
                 }
             } else {
-                let pullPt = textCalloutPullHandlePosition(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth)
+                let pullPt = textCalloutPullHandlePosition(
+                    position: position,
+                    text: text,
+                    font: font,
+                    fontSize: fontSize,
+                    maxWidth: maxWidth,
+                    canvasSize: canvasSize
+                )
                 if hypot(point.x - pullPt.x, point.y - pullPt.y) <= max(handleRadius, 13.0) {
                     return .textCalloutPull
+                }
+            }
+            if let tip2 = secondaryCalloutTarget {
+                if hypot(point.x - tip2.x, point.y - tip2.y) <= max(handleRadius, 14.0) {
+                    return .textSecondaryCalloutTip
+                }
+            } else {
+                let pullPt2 = textSecondaryCalloutPullHandlePosition(
+                    position: position,
+                    text: text,
+                    font: font,
+                    fontSize: fontSize,
+                    maxWidth: maxWidth,
+                    canvasSize: canvasSize
+                )
+                if hypot(point.x - pullPt2.x, point.y - pullPt2.y) <= max(handleRadius, 13.0) {
+                    return .textSecondaryCalloutPull
                 }
             }
             // 2. Проверяем боковые ползунки изменения ширины текстового окна (слева и справа)
@@ -1416,17 +2220,21 @@ public final class ScreenshotEditorEngine: ObservableObject {
             }
             return nil
 
-        case .highlighterFreehand:
+        case .highlighterFreehand, .eraser:
             return nil
         }
     }
 
     /// Проверка попадания клика в тело любого созданного объекта на холсте
-    public static func hitTestBody(point: CGPoint, in annotations: [ScreenshotAnnotationItem]) -> UUID? {
+    public static func hitTestBody(
+        point: CGPoint,
+        in annotations: [ScreenshotAnnotationItem],
+        canvasSize: CGSize = CGSize(width: 800, height: 600)
+    ) -> UUID? {
         for item in annotations.reversed() {
             switch item.payload {
-            case .arrow(let start, let end, _, let lineWidth):
-                if distanceToSegment(p: point, a: start, b: end) <= max(14.0, lineWidth * 2.2) {
+            case .arrow(let start, let end, _, let lineWidth, let style, let customControlPointOffset):
+                if arrowDistanceToCurve(point: point, start: start, end: end, style: style, customOffset: customControlPointOffset) <= max(14.0, lineWidth * 2.2) {
                     return item.id
                 }
 
@@ -1461,7 +2269,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                     }
                 }
 
-            case .highlighterFreehand(let points, _, let lineWidth):
+            case .highlighterFreehand(let points, _, let lineWidth, _):
                 guard points.count >= 2 else { continue }
                 let threshold = max(14.0, lineWidth * 0.8)
                 for i in 0..<(points.count - 1) {
@@ -1470,7 +2278,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
                     }
                 }
 
-            case .highlighterBox(let rect, _):
+            case .highlighterBox(let rect, _, _):
                 if rect.insetBy(dx: -6, dy: -6).contains(point) {
                     return item.id
                 }
@@ -1486,16 +2294,45 @@ public final class ScreenshotEditorEngine: ObservableObject {
                     return item.id
                 }
 
-            case .text(let position, let text, let font, let fontSize, _, let calloutTarget, let maxWidth):
-                let rect = textBoundingRect(position: position, text: text, font: font, fontSize: fontSize, maxWidth: maxWidth)
+            case .text(let position, let text, let font, let fontSize, _, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
+                let rect = textBoundingRect(
+                    position: position,
+                    text: text,
+                    font: font,
+                    fontSize: fontSize,
+                    maxWidth: maxWidth,
+                    canvasSize: canvasSize
+                )
                 if rect.insetBy(dx: -6, dy: -6).contains(point) {
                     return item.id
                 }
+                let strokeWidth = max(2.5, fontSize * 0.14)
+                let tailHitRadius = max(14.0, strokeWidth * 2.4)
                 if let target = calloutTarget {
                     let anchor = calloutAnchorPoint(for: rect, target: target)
-                    let strokeWidth = max(2.5, fontSize * 0.14)
-                    if distanceToSegment(p: point, a: anchor, b: target) <= max(14.0, strokeWidth * 2.4) {
+                    if distanceToSegment(p: point, a: anchor, b: target) <= tailHitRadius {
                         return item.id
+                    }
+                }
+                if let target2 = secondaryCalloutTarget {
+                    let anchor2 = calloutAnchorPoint(for: rect, target: target2)
+                    if distanceToSegment(p: point, a: anchor2, b: target2) <= tailHitRadius {
+                        return item.id
+                    }
+                }
+
+            case .eraser(let points, let strokeWidth, _, _, _, _):
+                guard let first = points.first else { continue }
+                let threshold = max(12.0, strokeWidth * 0.65)
+                if points.count == 1 {
+                    if hypot(point.x - first.x, point.y - first.y) <= threshold {
+                        return item.id
+                    }
+                } else {
+                    for i in 0..<(points.count - 1) {
+                        if distanceToSegment(p: point, a: points[i], b: points[i + 1]) <= threshold {
+                            return item.id
+                        }
                     }
                 }
             }
@@ -1550,7 +2387,7 @@ public final class ScreenshotEditorEngine: ObservableObject {
     }
 
     public func hitTest(point: CGPoint) -> UUID? {
-        Self.hitTestBody(point: point, in: annotations)
+        Self.hitTestBody(point: point, in: annotations, canvasSize: lastCanvasSize)
     }
 
     /// Вычисляет конечную точку перетаскивания мыши с учётом зажатой клавиши `⇧ Shift`:
@@ -1639,22 +2476,23 @@ public final class ScreenshotEditorEngine: ObservableObject {
         let targetCanvasSize = (canvasSize.width > 10 && canvasSize.height > 10) ? canvasSize : baseImage.size
         guard targetCanvasSize.width > 0, targetCanvasSize.height > 0 else { return nil }
 
-        // Определяем Retina-масштаб относительно размера холста (с учётом zoomScale для максимальной чёткости при кропе)
-        var pixelWidth = Int(baseImage.size.width * 2)
+        // Определяем честный нативный DPI-масштаб относительно размера холста (без искусственного апскейла в 2x–5x)
+        var nativePixelWidth = baseImage.size.width
         if let cgImage = baseImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            pixelWidth = max(cgImage.width, Int(baseImage.size.width))
+            nativePixelWidth = max(CGFloat(cgImage.width), baseImage.size.width)
         }
         let effectiveZoom = max(1.0, zoomScale)
-        let renderScale = max(2.0, (CGFloat(pixelWidth) / max(1.0, targetCanvasSize.width)) * effectiveZoom)
+        let renderScale = max(1.0, nativePixelWidth / max(1.0, targetCanvasSize.width))
 
-        // 1. Применяем все слои пикселизации к базовому изображению
+        // 1. Нормализуем изображение в sRGB и применяем все слои пикселизации к базовому изображению
+        let srgbBaseImage = Self.sRGBNormalizedImage(from: baseImage)
         let pixelatedBaseImage = Self.applyPixelateLayers(
-            to: baseImage,
+            to: srgbBaseImage,
             annotations: annotations,
             canvasSize: targetCanvasSize
         )
 
-        // 2. Рендерим полный кадр со всеми векторными аннотациями
+        // 2. Рендерим полный кадр со всеми векторными аннотациями (isOpaque = false сохраняет альфа-канал прозрачных PNG)
         let exportView = ScreenshotExportCanvasView(
             image: pixelatedBaseImage,
             annotations: annotations,
@@ -1664,11 +2502,12 @@ public final class ScreenshotEditorEngine: ObservableObject {
 
         let renderer = ImageRenderer(content: exportView)
         renderer.scale = renderScale
-        renderer.isOpaque = true
+        renderer.isOpaque = false
 
-        guard let fullCGImage = renderer.cgImage else {
+        guard let rawFullCGImage = renderer.cgImage else {
             return nil
         }
+        let fullCGImage = Self.convertCGImageToSRGB(rawFullCGImage)
 
         // 3. Если масштаб увеличен (zoomScale > 1.0), вырезаем (crop) ровно видимый в viewport приближенный фрагмент
         if effectiveZoom > 1.001 {
@@ -1765,20 +2604,59 @@ public final class ScreenshotEditorEngine: ObservableObject {
         }
         return sourceImage
     }
+
+    /// Кэшированный вариант `applyPixelateLayers` для интерактивного превью (не вызывает CoreImage на каждый кадр hover/redraw)
+    public static func cachedApplyPixelateLayers(
+        to sourceImage: NSImage,
+        annotations: [ScreenshotAnnotationItem],
+        canvasSize: CGSize
+    ) -> NSImage {
+        let layers: [PixelateLayerSignature] = annotations.compactMap { item in
+            if case .pixelate(let rect, let scale) = item.payload, rect.width > 2, rect.height > 2 {
+                return PixelateLayerSignature(rect: rect, pixelScale: scale)
+            }
+            return nil
+        }
+        guard !layers.isEmpty else {
+            return sourceImage
+        }
+        let key = PixelatePreviewCacheKey(
+            imageIdentifier: ObjectIdentifier(sourceImage),
+            canvasSize: canvasSize,
+            layers: layers
+        )
+        if cachedPixelateKey == key, let cached = cachedPixelateImage {
+            return cached
+        }
+        let result = applyPixelateLayers(to: sourceImage, annotations: annotations, canvasSize: canvasSize)
+        cachedPixelateKey = key
+        cachedPixelateImage = result
+        return result
+    }
 }
 
 // MARK: - Signature PasteVault Vector Shapes
 
-/// Авторская стрелка PasteVault: плавный клиновидный стержень, расширяющийся к геометричному наконечнику
+/// Авторская стрелка PasteVault: плавный клиновидный стержень (прямой или изогнутый по квадратичной кривой Безье), расширяющийся к геометричному наконечнику
 public struct PasteVaultArrowShape: Shape {
     public var start: CGPoint
     public var end: CGPoint
     public var strokeWidth: CGFloat
+    public var style: ArrowCurveStyle
+    public var customControlPointOffset: CGFloat?
 
-    public init(start: CGPoint, end: CGPoint, strokeWidth: CGFloat) {
+    public init(
+        start: CGPoint,
+        end: CGPoint,
+        strokeWidth: CGFloat,
+        style: ArrowCurveStyle = .straight,
+        customControlPointOffset: CGFloat? = nil
+    ) {
         self.start = start
         self.end = end
         self.strokeWidth = strokeWidth
+        self.style = style
+        self.customControlPointOffset = customControlPointOffset
     }
 
     public func path(in rect: CGRect) -> Path {
@@ -1788,16 +2666,66 @@ public struct PasteVaultArrowShape: Shape {
         let length = hypot(dx, dy)
         guard length > 4 else { return path }
 
-        let ux = dx / length
-        let uy = dy / length
-        let px = -uy
-        let py = ux
-
         let headLength = min(length * 0.55, max(14.0, strokeWidth * 3.8))
         let headWidth = max(12.0, strokeWidth * 3.4)
         let tailHalfWidth = max(1.2, strokeWidth * 0.24)
         let neckHalfWidth = max(2.2, strokeWidth * 0.68)
         let notchDepth = headLength * 0.22
+
+        let bend = ScreenshotEditorEngine.arrowBendOffset(
+            start: start,
+            end: end,
+            style: style,
+            customOffset: customControlPointOffset
+        )
+
+        if abs(bend) <= 0.5 {
+            let ux = dx / length
+            let uy = dy / length
+            let px = -uy
+            let py = ux
+
+            let neckCenter = CGPoint(
+                x: end.x - ux * (headLength - notchDepth),
+                y: end.y - uy * (headLength - notchDepth)
+            )
+            let barbBase = CGPoint(
+                x: end.x - ux * headLength,
+                y: end.y - uy * headLength
+            )
+
+            let tailLeft = CGPoint(x: start.x + px * tailHalfWidth, y: start.y + py * tailHalfWidth)
+            let tailRight = CGPoint(x: start.x - px * tailHalfWidth, y: start.y - py * tailHalfWidth)
+            let neckLeft = CGPoint(x: neckCenter.x + px * neckHalfWidth, y: neckCenter.y + py * neckHalfWidth)
+            let neckRight = CGPoint(x: neckCenter.x - px * neckHalfWidth, y: neckCenter.y - py * neckHalfWidth)
+            let wingLeft = CGPoint(x: barbBase.x + px * (headWidth * 0.5), y: barbBase.y + py * (headWidth * 0.5))
+            let wingRight = CGPoint(x: barbBase.x - px * (headWidth * 0.5), y: barbBase.y - py * (headWidth * 0.5))
+
+            path.move(to: tailLeft)
+            path.addLine(to: neckLeft)
+            path.addLine(to: wingLeft)
+            path.addLine(to: end)
+            path.addLine(to: wingRight)
+            path.addLine(to: neckRight)
+            path.addLine(to: tailRight)
+            path.closeSubpath()
+            return path
+        }
+
+        // Изогнутая стрелка вдоль квадратичной кривой Безье
+        let ctrl = ScreenshotEditorEngine.arrowControlPoint(
+            start: start,
+            end: end,
+            style: style,
+            customOffset: customControlPointOffset
+        )
+        let tanX = end.x - ctrl.x
+        let tanY = end.y - ctrl.y
+        let tanLen = hypot(tanX, tanY)
+        let ux = tanLen > 0.5 ? (tanX / tanLen) : (dx / length)
+        let uy = tanLen > 0.5 ? (tanY / tanLen) : (dy / length)
+        let px = -uy
+        let py = ux
 
         let neckCenter = CGPoint(
             x: end.x - ux * (headLength - notchDepth),
@@ -1808,20 +2736,38 @@ public struct PasteVaultArrowShape: Shape {
             y: end.y - uy * headLength
         )
 
-        let tailLeft = CGPoint(x: start.x + px * tailHalfWidth, y: start.y + py * tailHalfWidth)
-        let tailRight = CGPoint(x: start.x - px * tailHalfWidth, y: start.y - py * tailHalfWidth)
-        let neckLeft = CGPoint(x: neckCenter.x + px * neckHalfWidth, y: neckCenter.y + py * neckHalfWidth)
-        let neckRight = CGPoint(x: neckCenter.x - px * neckHalfWidth, y: neckCenter.y - py * neckHalfWidth)
         let wingLeft = CGPoint(x: barbBase.x + px * (headWidth * 0.5), y: barbBase.y + py * (headWidth * 0.5))
         let wingRight = CGPoint(x: barbBase.x - px * (headWidth * 0.5), y: barbBase.y - py * (headWidth * 0.5))
 
-        path.move(to: tailLeft)
-        path.addLine(to: neckLeft)
+        let segments = 20
+        var leftPoints: [CGPoint] = []
+        var rightPoints: [CGPoint] = []
+        leftPoints.reserveCapacity(segments + 1)
+        rightPoints.reserveCapacity(segments + 1)
+
+        for i in 0...segments {
+            let t = CGFloat(i) / CGFloat(segments)
+            let centerPt = ScreenshotEditorEngine.arrowPointOnCurve(t: t, start: start, control: ctrl, end: neckCenter)
+            let dtx = 2.0 * (1.0 - t) * (ctrl.x - start.x) + 2.0 * t * (neckCenter.x - ctrl.x)
+            let dty = 2.0 * (1.0 - t) * (ctrl.y - start.y) + 2.0 * t * (neckCenter.y - ctrl.y)
+            let dLen = hypot(dtx, dty)
+            let nx = dLen > 0.001 ? (-dty / dLen) : px
+            let ny = dLen > 0.001 ? (dtx / dLen) : py
+            let halfW = tailHalfWidth + (neckHalfWidth - tailHalfWidth) * t
+            leftPoints.append(CGPoint(x: centerPt.x + nx * halfW, y: centerPt.y + ny * halfW))
+            rightPoints.append(CGPoint(x: centerPt.x - nx * halfW, y: centerPt.y - ny * halfW))
+        }
+
+        path.move(to: leftPoints[0])
+        for pt in leftPoints.dropFirst() {
+            path.addLine(to: pt)
+        }
         path.addLine(to: wingLeft)
         path.addLine(to: end)
         path.addLine(to: wingRight)
-        path.addLine(to: neckRight)
-        path.addLine(to: tailRight)
+        for pt in rightPoints.reversed() {
+            path.addLine(to: pt)
+        }
         path.closeSubpath()
         return path
     }
@@ -1942,20 +2888,32 @@ public struct ScreenshotAnnotationLayerView: View {
     public var body: some View {
         Group {
             switch item.payload {
-            case .arrow(let start, let end, let color, let lineWidth):
-                PasteVaultArrowShape(start: start, end: end, strokeWidth: lineWidth)
-                    .fill(color.swiftUIColor)
-                    .overlay(
-                        PasteVaultArrowShape(start: start, end: end, strokeWidth: lineWidth)
-                            .stroke(Color.white.opacity(color == .white ? 0.0 : 0.45), lineWidth: 0.8)
+            case .arrow(let start, let end, let color, let lineWidth, let style, let customControlPointOffset):
+                PasteVaultArrowShape(
+                    start: start,
+                    end: end,
+                    strokeWidth: lineWidth,
+                    style: style,
+                    customControlPointOffset: customControlPointOffset
+                )
+                .fill(color.swiftUIColor)
+                .overlay(
+                    PasteVaultArrowShape(
+                        start: start,
+                        end: end,
+                        strokeWidth: lineWidth,
+                        style: style,
+                        customControlPointOffset: customControlPointOffset
                     )
-                    .shadow(color: Color.black.opacity(0.45), radius: 3, x: 0, y: 1.5)
+                    .stroke(Color.white.opacity(color == .white ? 0.0 : 0.45), lineWidth: 0.8)
+                )
+                .shadow(color: Color.black.opacity(0.45), radius: 3, x: 0, y: 1.5)
 
             case .shape(let kind, let start, let end, let color, let lineWidth):
                 shapeView(kind: kind, start: start, end: end, color: color, lineWidth: lineWidth)
                     .shadow(color: Color.black.opacity(0.35), radius: 2.5, x: 0, y: 1)
 
-            case .highlighterFreehand(let points, let color, let lineWidth):
+            case .highlighterFreehand(let points, let color, let lineWidth, let opacity):
                 Path { path in
                     guard let first = points.first else { return }
                     path.move(to: first)
@@ -1964,16 +2922,17 @@ public struct ScreenshotAnnotationLayerView: View {
                     }
                 }
                 .stroke(
-                    color.swiftUIColor.opacity(0.35),
+                    color.swiftUIColor.opacity(opacity),
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                 )
 
-            case .highlighterBox(let rect, let color):
+            case .highlighterBox(let rect, let color, let opacity):
+                let clampedOpacity = min(1.0, max(0.0, opacity))
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(color.swiftUIColor.opacity(0.35))
+                    .fill(color.swiftUIColor.opacity(clampedOpacity))
                     .overlay(
                         RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(color.swiftUIColor.opacity(0.65), lineWidth: 1)
+                            .strokeBorder(color.swiftUIColor.opacity(min(1.0, clampedOpacity + min(0.30, clampedOpacity))), lineWidth: 1)
                     )
                     .frame(width: max(2, rect.width), height: max(2, rect.height))
                     .position(x: rect.midX, y: rect.midY)
@@ -1982,7 +2941,7 @@ public struct ScreenshotAnnotationLayerView: View {
                 PasteVaultStepPinBadgeView(number: number, color: color, pointerAngle: pointerAngle)
                     .position(position)
 
-            case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let maxWidth):
+            case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
                 if !text.isEmpty {
                     let horizontalPadding = ScreenshotEditorEngine.textHorizontalPadding
                     let verticalPadding = ScreenshotEditorEngine.textVerticalPadding
@@ -1994,19 +2953,20 @@ public struct ScreenshotAnnotationLayerView: View {
                         maxWidth: maxWidth,
                         canvasSize: canvasSize
                     )
-                    let innerTextWidth = max(60.0, pillRect.width - horizontalPadding * 2.0)
+                    let innerTextWidth = max(22.0, pillRect.width - horizontalPadding * 2.0)
                     let innerTextHeight = max(fontSize, pillRect.height - verticalPadding * 2.0)
                     let bubblePath = ScreenshotEditorEngine.unifiedTextCalloutPath(
                         pillRect: pillRect,
                         cornerRadius: 7.0,
-                        calloutTarget: calloutTarget
+                        calloutTarget: calloutTarget,
+                        secondaryCalloutTarget: secondaryCalloutTarget
                     )
                     let nsFont = font.nsFont(size: fontSize, weight: .bold)
-                    let singleLineWidth = ceil((text as NSString).size(withAttributes: [.font: nsFont]).width) + 10.0
+                    let singleLineWidth = ScreenshotEditorEngine.maxSingleLineWidth(for: text, font: nsFont)
                     let isMultiline = text.contains("\n") || singleLineWidth > innerTextWidth
                     ZStack {
                         bubblePath
-                            .fill(Color.black.opacity(color == .obsidian ? 0.22 : 0.68))
+                            .fill(color == .obsidian ? Color.white.opacity(0.90) : Color.black.opacity(0.68))
                             .overlay(
                                 bubblePath
                                     .stroke(
@@ -2030,6 +2990,27 @@ public struct ScreenshotAnnotationLayerView: View {
 
             case .pixelate:
                 EmptyView()
+
+            case .eraser(let points, let strokeWidth, let red, let green, let blue, let alpha):
+                let eraserColor = Color(.sRGB, red: Double(red), green: Double(green), blue: Double(blue), opacity: Double(alpha))
+                if points.count == 1, let pt = points.first {
+                    Circle()
+                        .fill(eraserColor)
+                        .frame(width: strokeWidth, height: strokeWidth)
+                        .position(pt)
+                } else {
+                    Path { path in
+                        guard let first = points.first else { return }
+                        path.move(to: first)
+                        for pt in points.dropFirst() {
+                            path.addLine(to: pt)
+                        }
+                    }
+                    .stroke(
+                        eraserColor,
+                        style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round, lineJoin: .round)
+                    )
+                }
             }
         }
         .allowsHitTesting(false)
@@ -2181,10 +3162,19 @@ public struct AnnotationSelectionOverlayView: View {
     public var body: some View {
         Group {
             switch item.payload {
-            case .arrow(let start, let end, _, _):
+            case .arrow(let start, let end, _, _, let style, let customControlPointOffset):
                 ZStack {
                     AnnotationControlHandle(position: start, theme: theme)
                     AnnotationControlHandle(position: end, theme: theme)
+                    if style != .straight || customControlPointOffset != nil {
+                        let apexPt = ScreenshotEditorEngine.arrowApexPoint(
+                            start: start,
+                            end: end,
+                            style: style,
+                            customOffset: customControlPointOffset
+                        )
+                        AnnotationControlHandle(position: apexPt, theme: theme)
+                    }
                 }
 
             case .shape(let kind, let start, let end, _, _):
@@ -2216,7 +3206,7 @@ public struct AnnotationSelectionOverlayView: View {
                     }
                 }
 
-            case .highlighterBox(let rect, _), .pixelate(let rect, _):
+            case .highlighterBox(let rect, _, _), .pixelate(let rect, _):
                 ZStack {
                     Rectangle()
                         .strokeBorder(
@@ -2256,7 +3246,7 @@ public struct AnnotationSelectionOverlayView: View {
                     AnnotationControlHandle(position: handlePt, theme: theme)
                 }
 
-            case .text(let position, let text, let font, let fontSize, _, let calloutTarget, let maxWidth):
+            case .text(let position, let text, let font, let fontSize, _, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
                 let rect = ScreenshotEditorEngine.textBoundingRect(
                     position: position,
                     text: text,
@@ -2298,7 +3288,7 @@ public struct AnnotationSelectionOverlayView: View {
                         .position(rightResizePt)
 
                     if let target = calloutTarget, !rect.insetBy(dx: -4, dy: -4).contains(target) {
-                        // Когда стрелка вытянута — рисуем ТОЛЬКО один кружок-ручку (14x14 pt) на самом острие стрелки
+                        // Когда правая стрелка вытянута — рисуем кружок-ручку (14x14 pt) на её острие
                         Circle()
                             .fill(Color(nsColor: ScreenshotAnnotationColor.sky.nsColor))
                             .frame(width: 14, height: 14)
@@ -2326,7 +3316,7 @@ public struct AnnotationSelectionOverlayView: View {
                         )
                         .foregroundStyle(Color(nsColor: ScreenshotAnnotationColor.sky.nsColor).opacity(0.85))
 
-                        // Интерактивный кружок-ручка (20x20 pt) со значком стрелки СНАРУЖИ за правым краем текстовой плашки (на расстоянии 8 pt от внешней границы)
+                        // Интерактивный кружок-ручка (20x20 pt) со значком стрелки СНАРУЖИ за правым краем текстовой плашки
                         ZStack {
                             Circle()
                                 .fill(
@@ -2352,9 +3342,65 @@ public struct AnnotationSelectionOverlayView: View {
                         }
                         .position(pullPt)
                     }
+
+                    if let target2 = secondaryCalloutTarget, !rect.insetBy(dx: -4, dy: -4).contains(target2) {
+                        // Когда левая стрелка вытянута — рисуем кружок-ручку (14x14 pt) на её острие
+                        Circle()
+                            .fill(Color(nsColor: ScreenshotAnnotationColor.sky.nsColor))
+                            .frame(width: 14, height: 14)
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(Color.white, lineWidth: 1.8)
+                            )
+                            .shadow(color: Color.black.opacity(0.5), radius: 3, x: 0, y: 1.5)
+                            .position(target2)
+                    } else {
+                        let pullPt2 = ScreenshotEditorEngine.textSecondaryCalloutPullHandlePosition(
+                            position: position,
+                            text: text,
+                            font: font,
+                            fontSize: fontSize,
+                            maxWidth: maxWidth,
+                            canvasSize: canvasSize
+                        )
+                        Path { path in
+                            path.move(to: CGPoint(x: rect.minX - 6, y: rect.midY))
+                            path.addLine(to: pullPt2)
+                        }
+                        .stroke(
+                            style: StrokeStyle(lineWidth: 1.1, dash: [2, 2])
+                        )
+                        .foregroundStyle(Color(nsColor: ScreenshotAnnotationColor.sky.nsColor).opacity(0.85))
+
+                        // Интерактивный кружок-ручка (20x20 pt) со значком стрелки СНАРУЖИ за левым краем текстовой плашки
+                        ZStack {
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(nsColor: ScreenshotAnnotationColor.sky.nsColor),
+                                            theme.accentColor
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: 20, height: 20)
+                                .overlay(
+                                    Circle()
+                                        .strokeBorder(Color.white, lineWidth: 1.6)
+                                )
+                                .shadow(color: Color.black.opacity(0.5), radius: 3.5, x: 0, y: 1.5)
+
+                            Image(systemName: "arrow.up.left")
+                                .font(.system(size: 10, weight: .heavy))
+                                .foregroundStyle(Color.white)
+                        }
+                        .position(pullPt2)
+                    }
                 }
 
-            case .highlighterFreehand(let points, _, _):
+            case .highlighterFreehand(let points, _, _, _), .eraser(let points, _, _, _, _, _):
                 if let first = points.first {
                     let minX = points.reduce(first.x) { min($0, $1.x) }
                     let maxX = points.reduce(first.x) { max($0, $1.x) }
@@ -2402,10 +3448,14 @@ private struct ScreenshotExportCanvasView: View {
 @MainActor
 public final class StepHoverTracker: ObservableObject {
     @Published public var hoverPoint: CGPoint? = nil
+    @Published public var liveSampledColor: NSColor? = nil
 
     public init() {}
 
-    public func update(_ point: CGPoint) {
+    public func update(_ point: CGPoint, sampledColor: NSColor? = nil) {
+        if let sampledColor {
+            liveSampledColor = sampledColor
+        }
         if let current = hoverPoint {
             if hypot(point.x - current.x, point.y - current.y) >= 0.5 {
                 hoverPoint = point
@@ -2419,6 +3469,9 @@ public final class StepHoverTracker: ObservableObject {
         if hoverPoint != nil {
             hoverPoint = nil
         }
+        if liveSampledColor != nil {
+            liveSampledColor = nil
+        }
     }
 }
 
@@ -2426,15 +3479,18 @@ public struct StepCursorPreviewOverlayView: View {
     @ObservedObject public var tracker: StepHoverTracker
     @ObservedObject public var engine: ScreenshotEditorEngine
     public let isDragging: Bool
+    public var canvasSize: CGSize = CGSize(width: 800, height: 600)
 
     public init(
         tracker: StepHoverTracker,
         engine: ScreenshotEditorEngine,
-        isDragging: Bool = false
+        isDragging: Bool = false,
+        canvasSize: CGSize = CGSize(width: 800, height: 600)
     ) {
         self.tracker = tracker
         self.engine = engine
         self.isDragging = isDragging
+        self.canvasSize = canvasSize
     }
 
     public var body: some View {
@@ -2442,7 +3498,7 @@ public struct StepCursorPreviewOverlayView: View {
             if engine.selectedTool == .step,
                !isDragging,
                let canvasPt = tracker.hoverPoint {
-                let centerPos = ScreenshotEditorEngine.stepPinCenter(forTipPoint: canvasPt)
+                let centerPos = ScreenshotEditorEngine.clampedStepPinCenter(forTipPoint: canvasPt, canvasSize: canvasSize)
                 PasteVaultStepPinBadgeView(
                     number: engine.nextStepNumber,
                     color: engine.selectedColor,
@@ -2450,6 +3506,56 @@ public struct StepCursorPreviewOverlayView: View {
                 )
                 // Остриё носика метки точно совпадает с кончиком курсора мыши (нулевой прыжок при клике)
                 .position(centerPos)
+            } else if engine.selectedTool == .eraser,
+                      !isDragging,
+                      let canvasPt = tracker.hoverPoint {
+                let brushDiameter = engine.selectedEraserWidth
+                let swatchNSColor = tracker.liveSampledColor ?? .white
+
+                ZStack {
+                    // Контур кисти в точке курсора + центральная точка-прицел 2x2 pt
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.92), lineWidth: 1.4)
+                        .frame(width: brushDiameter, height: brushDiameter)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Color.black.opacity(0.65), lineWidth: 0.8)
+                                .padding(1)
+                        )
+                        .position(canvasPt)
+
+                    Rectangle()
+                        .fill(Color.white)
+                        .frame(width: 2, height: 2)
+                        .overlay(
+                            Rectangle()
+                                .stroke(Color.black.opacity(0.75), lineWidth: 0.6)
+                        )
+                        .position(canvasPt)
+
+                    // Живое окошко-индикатор цвета со смещением (+20, -22) от курсора
+                    let srgbSwatch = swatchNSColor.usingColorSpace(.sRGB) ?? swatchNSColor
+                    let swatchColor = Color(
+                        .sRGB,
+                        red: Double(srgbSwatch.redComponent),
+                        green: Double(srgbSwatch.greenComponent),
+                        blue: Double(srgbSwatch.blueComponent),
+                        opacity: 1.0
+                    )
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(swatchColor)
+                        .frame(width: 22, height: 22)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(Color.white, lineWidth: 1.5)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                .stroke(Color.black.opacity(0.55), lineWidth: 1.0)
+                        )
+                        .shadow(color: Color.black.opacity(0.35), radius: 3, x: 0, y: 1.5)
+                        .position(x: canvasPt.x + 20, y: canvasPt.y - 22)
+                }
             }
         }
         .allowsHitTesting(false)
@@ -2457,6 +3563,50 @@ public struct StepCursorPreviewOverlayView: View {
 }
 
 // MARK: - Interactive Screenshot Editor Canvas & Floating Toolbars
+
+@MainActor
+private final class ViewportMonitorState: ObservableObject {
+    var zoomScale: CGFloat = 1.0
+    var baseViewportSize: CGSize = .zero
+    var isCanvasHovered: Bool = false
+    var suppressCanvasActionUntilMouseUp: Bool = false
+    var canvasGlobalFrame: CGRect = .zero
+    var toolbarGlobalFrame: CGRect = .zero
+    var submenuGlobalFrame: CGRect = .zero
+    weak var hostWindow: NSWindow?
+}
+
+private struct EditorWindowReader: NSViewRepresentable {
+    let onWindowChange: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        WindowTrackingNSView(onWindowChange: onWindowChange)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let tracking = nsView as? WindowTrackingNSView {
+            tracking.onWindowChange = onWindowChange
+            onWindowChange(nsView.window)
+        }
+    }
+
+    private final class WindowTrackingNSView: NSView {
+        var onWindowChange: (NSWindow?) -> Void
+
+        init(onWindowChange: @escaping (NSWindow?) -> Void) {
+            self.onWindowChange = onWindowChange
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChange(window)
+        }
+    }
+}
 
 public struct ScreenshotEditorWorkspaceView: View {
     @ObservedObject public var engine: ScreenshotEditorEngine
@@ -2473,16 +3623,15 @@ public struct ScreenshotEditorWorkspaceView: View {
     @State private var activeDragCurrent: CGPoint? = nil
     @State private var lastDragPoint: CGPoint? = nil
     @State private var freehandPoints: [CGPoint] = []
+    @State private var eraserSampledColor: (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat)? = nil
     @StateObject private var stepHoverTracker = StepHoverTracker()
-    @State private var isCanvasHovered: Bool = false
+    @StateObject private var viewportState = ViewportMonitorState()
     @State private var currentCanvasCursor: NSCursor = .crosshair
     @State private var isFontDropdownExpanded: Bool = false
-    @FocusState private var isInlineTextFieldFocused: Bool
 
     // Состояния инструмента «✋ Рука» и интерактивных ручек
     @State private var activeDragHandle: HandlePosition? = nil
     @State private var draggedAnnotationId: UUID? = nil
-    @State private var dragInitialAnnotation: ScreenshotAnnotationItem? = nil
     @State private var hasMovedDuringDrag: Bool = false
     @State private var hasRecordedUndoForCurrentDrag: Bool = false
     @State private var wasAlreadySelectedOnDragStart: Bool = false
@@ -2494,6 +3643,7 @@ public struct ScreenshotEditorWorkspaceView: View {
     @State private var keyDownMonitor: Any? = nil
     @State private var flagsChangedMonitor: Any? = nil
     @State private var rightMouseDownMonitor: Any? = nil
+    @State private var leftMouseDownMonitor: Any? = nil
     @State private var didDismissSubmenuOnDragStart: Bool = false
 
     public init(
@@ -2526,6 +3676,10 @@ public struct ScreenshotEditorWorkspaceView: View {
             )
             // Фиксированный размер видимой рамки (viewport) при 100%, внутри которой происходит приближение
             let baseViewportSize = computeBaseViewportSize(available: availableSize)
+            let _ = {
+                viewportState.zoomScale = zoomScale
+                viewportState.baseViewportSize = baseViewportSize
+            }()
 
             ZStack(alignment: .leading) {
                 // Центрированный интерактивный холст скриншота (фиксированное окно предпросмотра с приближением внутри)
@@ -2537,9 +3691,28 @@ public struct ScreenshotEditorWorkspaceView: View {
 
                 // Левая вертикальная панель инструментов (жёстко зафиксирована по вертикали, подменю в overlay не влияет на её геометрию)
                 leftVerticalToolbar
+                    .background(
+                        GeometryReader { g in
+                            Color.clear
+                                .onAppear { viewportState.toolbarGlobalFrame = g.frame(in: .global) }
+                                .onChange(of: g.frame(in: .global)) { _, newFrame in
+                                    viewportState.toolbarGlobalFrame = newFrame
+                                }
+                        }
+                    )
                     .overlay(alignment: .topLeading) {
                         if let submenu = engine.activeSubmenu {
                             submenuContainer(for: submenu)
+                                .background(
+                                    GeometryReader { g in
+                                        Color.clear
+                                            .onAppear { viewportState.submenuGlobalFrame = g.frame(in: .global) }
+                                            .onChange(of: g.frame(in: .global)) { _, newFrame in
+                                                viewportState.submenuGlobalFrame = newFrame
+                                            }
+                                            .onDisappear { viewportState.submenuGlobalFrame = .zero }
+                                    }
+                                )
                                 .offset(x: 56)
                         }
                     }
@@ -2548,14 +3721,27 @@ public struct ScreenshotEditorWorkspaceView: View {
                     .zIndex(20)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                EditorWindowReader { win in
+                    if let win {
+                        viewportState.hostWindow = win
+                    }
+                }
+                .allowsHitTesting(false)
+            )
             .onAppear {
+                removeEventMonitors()
                 lastCanvasSize = baseViewportSize
                 engine.lastCanvasSize = baseViewportSize
+                viewportState.zoomScale = zoomScale
+                viewportState.baseViewportSize = baseViewportSize
                 DispatchQueue.main.async {
-                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    (viewportState.hostWindow ?? NSApp.keyWindow)?.makeFirstResponder(nil)
                 }
-                rightMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [engine] event in
-                    guard let window = event.window, window === NSApp.keyWindow else { return event }
+                rightMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [engine, viewportState] event in
+                    guard NSApp.modalWindow == nil,
+                          let window = event.window,
+                          window === (viewportState.hostWindow ?? NSApp.keyWindow) else { return event }
 
                     // Если в момент правого клика активно редактирование текста и курсор находится ВНУТРИ NSTextView
                     if engine.editingTextAnnotationId != nil {
@@ -2577,30 +3763,50 @@ public struct ScreenshotEditorWorkspaceView: View {
                     // Во всех остальных случаях при клике по холсту или вне редактируемого текстового поля:
                     if engine.editingTextAnnotationId != nil {
                         engine.commitActiveTextEditing()
-                        isInlineTextFieldFocused = false
                     }
 
-                    withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                        engine.activeSubmenu = nil
-                        isFontDropdownExpanded = false
-                        engine.selectedTool = .hand
-                        engine.selectedAnnotationId = nil
-                    }
+                    engine.activeSubmenu = nil
+                    isFontDropdownExpanded = false
+                    engine.selectedTool = .hand
+                    engine.selectedAnnotationId = nil
                     stepHoverTracker.clear()
                     applyStableCursor(.arrow)
 
                     return nil
                 }
-                scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                    guard zoomScale > 1.001 else { return event }
-                    guard isCanvasHovered else { return event }
+                leftMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [engine, viewportState] event in
+                    guard NSApp.modalWindow == nil,
+                          engine.activeSubmenu != nil else { return event }
+                    guard let window = event.window,
+                          window === (viewportState.hostWindow ?? NSApp.keyWindow) else { return event }
+                    let windowHeight = window.contentView?.bounds.height ?? window.frame.height
+                    let swiftUIPoint = CGPoint(x: event.locationInWindow.x, y: windowHeight - event.locationInWindow.y)
+                    if !viewportState.toolbarGlobalFrame.contains(swiftUIPoint) &&
+                        !viewportState.submenuGlobalFrame.contains(swiftUIPoint) {
+                        viewportState.suppressCanvasActionUntilMouseUp = viewportState.canvasGlobalFrame.contains(swiftUIPoint)
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) {
+                            engine.activeSubmenu = nil
+                            isFontDropdownExpanded = false
+                        }
+                    }
+                    return event
+                }
+                scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [viewportState] event in
+                    let liveZoom = viewportState.zoomScale
+                    let liveViewportSize = viewportState.baseViewportSize
+                    guard liveZoom > 1.001,
+                          liveViewportSize.width > 0,
+                          liveViewportSize.height > 0 else { return event }
+                    guard viewportState.isCanvasHovered else { return event }
 
                     let factor: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
                     let stepX = event.scrollingDeltaX * factor
                     let stepY = event.scrollingDeltaY * factor
 
-                    let maxPanX = max(0, baseViewportSize.width * (zoomScale - 1.0) / 2.0)
-                    let maxPanY = max(0, baseViewportSize.height * (zoomScale - 1.0) / 2.0)
+                    let maxPanX = max(0, liveViewportSize.width * (liveZoom - 1.0) / 2.0)
+                    let maxPanY = max(0, liveViewportSize.height * (liveZoom - 1.0) / 2.0)
 
                     let newX = min(max(-maxPanX, panOffset.width + stepX), maxPanX)
                     let newY = min(max(-maxPanY, panOffset.height + stepY), maxPanY)
@@ -2608,30 +3814,63 @@ public struct ScreenshotEditorWorkspaceView: View {
                     panOffset = CGSize(width: newX, height: newY)
                     return nil
                 }
-                flagsChangedMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-                    let isShift = event.modifierFlags.contains(.shift)
-                    engine.setShiftShortcutHeld(isShift)
+                flagsChangedMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [engine] event in
+                    engine.setShiftShortcutHeld(ScreenshotEditorEngine.isPureShiftModifier(event.modifierFlags))
                     return event
                 }
-                keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                    if ShortcutManager.shared.isRecordingShortcut {
+                keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [engine, viewportState] event in
+                    let hostWin = viewportState.hostWindow ?? NSApp.keyWindow
+                    let isHostTextView = hostWin?.firstResponder is NSTextView
+                    guard ScreenshotEditorEngine.shouldProcessKeyEvent(
+                        eventWindow: event.window,
+                        hostWindow: hostWin,
+                        hasModalWindow: NSApp.modalWindow != nil,
+                        isRecordingShortcut: ShortcutManager.shared.isRecordingShortcut,
+                        isHostFirstResponderTextView: isHostTextView,
+                        isEditingAnnotationText: engine.editingTextAnnotationId != nil
+                    ) else {
                         return event
                     }
+
                     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                    if engine.editingTextAnnotationId != nil {
-                        if event.keyCode == 53 && flags.isEmpty {
-                            engine.triggerShortcutHighlight("escape")
-                            engine.commitActiveTextEditing()
-                            isInlineTextFieldFocused = false
+
+                    // Поэтапный Escape: 1) коммит текста -> 2) закрытие подменю -> 3) снятие выделения -> 4) закрытие редактора
+                    if event.keyCode == 53 && flags.isEmpty {
+                        engine.triggerShortcutHighlight("escape")
+                        let escAction = engine.handleEscape()
+                        switch escAction {
+                        case .committedText, .clearedSelection:
+                            return nil
+                        case .closedSubmenu:
+                            isFontDropdownExpanded = false
+                            return nil
+                        case .closeEditor:
+                            isFontDropdownExpanded = false
+                            NotificationCenter.default.post(name: Notification.Name("pasteVaultModalEscape"), object: nil)
                             return nil
                         }
+                    }
+
+                    if engine.editingTextAnnotationId != nil {
                         return event
                     }
-                    // Когда редактирование текста НЕ активно:
-                    // ⌘ + Z (keyCode == 6) отменяет последнее действие и подсвечивает бейдж ⌘Z внизу
-                    if flags == .command && (event.keyCode == 6 || event.charactersIgnoringModifiers?.lowercased() == "z") {
-                        engine.triggerShortcutHighlight("undo")
-                        engine.undo()
+
+                    // ⌘⇧Z / ⌘Z — Повтор или отмена действия в любой раскладке (приоритет Shift -> Redo)
+                    let relevantModifiers = flags.intersection([.command, .shift, .option, .control])
+                    if relevantModifiers.contains(.command) &&
+                        relevantModifiers.intersection([.option, .control]).isEmpty &&
+                        ScreenshotEditorEngine.matchesUndoRedoKey(
+                            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+                            keyCode: event.keyCode
+                        ) {
+                        engine.setShiftShortcutHeld(false)
+                        if relevantModifiers.contains(.shift) {
+                            engine.triggerShortcutHighlight("redo")
+                            engine.redo()
+                        } else {
+                            engine.triggerShortcutHighlight("undo")
+                            engine.undo()
+                        }
                         return nil
                     }
                     // Пробел (Space, keyCode == 49) мгновенно включает инструмент «✋ Рука» и подсвечивает хоткей внизу
@@ -2643,41 +3882,27 @@ public struct ScreenshotEditorWorkspaceView: View {
                             isFontDropdownExpanded = false
                         }
                         DispatchQueue.main.async {
-                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            (viewportState.hostWindow ?? NSApp.keyWindow)?.makeFirstResponder(nil)
                         }
                         return nil
                     }
-                    // Backspace (51) или Delete (117) мгновенно удаляет выделенный элемент и подсвечивает хоткей внизу
+                    // Backspace (51) или Delete (117) удаляет выбранный элемент; без выделения гасим событие без системного бипа и без ложной подсветки
                     if (event.keyCode == 51 || event.keyCode == 117) && flags.subtracting([.numericPad, .function]).isEmpty {
-                        engine.triggerShortcutHighlight("delete")
                         if engine.selectedAnnotationId != nil {
+                            engine.triggerShortcutHighlight("delete")
                             withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
                                 engine.deleteSelectedAnnotation()
                             }
-                            return nil
                         }
+                        return nil
                     }
                     return event
                 }
             }
             .onDisappear {
                 engine.setShiftShortcutHeld(false)
-                if let monitor = rightMouseDownMonitor {
-                    NSEvent.removeMonitor(monitor)
-                    rightMouseDownMonitor = nil
-                }
-                if let monitor = scrollMonitor {
-                    NSEvent.removeMonitor(monitor)
-                    scrollMonitor = nil
-                }
-                if let monitor = keyDownMonitor {
-                    NSEvent.removeMonitor(monitor)
-                    keyDownMonitor = nil
-                }
-                if let monitor = flagsChangedMonitor {
-                    NSEvent.removeMonitor(monitor)
-                    flagsChangedMonitor = nil
-                }
+                removeEventMonitors()
+                ScreenshotEditorEngine.clearSamplingCache()
             }
             .onChange(of: zoomScale) { _, newZoom in
                 if newZoom <= 1.001 {
@@ -2708,12 +3933,37 @@ public struct ScreenshotEditorWorkspaceView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pasteVaultEditorDeleteSelected"))) { _ in
-                guard engine.editingTextAnnotationId == nil else { return }
+                guard NSApp.modalWindow == nil,
+                      engine.editingTextAnnotationId == nil,
+                      engine.selectedAnnotationId != nil else { return }
                 engine.triggerShortcutHighlight("delete")
                 withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
                     engine.deleteSelectedAnnotation()
                 }
             }
+        }
+    }
+
+    private func removeEventMonitors() {
+        if let monitor = rightMouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            rightMouseDownMonitor = nil
+        }
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
+        }
+        if let monitor = keyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyDownMonitor = nil
+        }
+        if let monitor = flagsChangedMonitor {
+            NSEvent.removeMonitor(monitor)
+            flagsChangedMonitor = nil
+        }
+        if let monitor = leftMouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            leftMouseDownMonitor = nil
         }
     }
 
@@ -2731,7 +3981,6 @@ public struct ScreenshotEditorWorkspaceView: View {
                 .position(x: 3.5, y: pointerY)
         }
         .offset(y: cardOffset)
-        .transition(.scale(scale: 0.92, anchor: .leading).combined(with: .opacity))
     }
 
     private func submenuVerticalOffset(for kind: ScreenshotSubmenuKind) -> CGFloat {
@@ -2740,7 +3989,8 @@ public struct ScreenshotEditorWorkspaceView: View {
         case .text: return 18
         case .shape: return 0
         case .highlighter: return 0
-        case .color: return 288
+        case .eraser: return 220
+        case .color: return 330
         }
     }
 
@@ -2750,7 +4000,8 @@ public struct ScreenshotEditorWorkspaceView: View {
         case .text: return 109
         case .shape: return 151
         case .highlighter: return 193
-        case .color: return 324
+        case .eraser: return 319
+        case .color: return 366
         }
     }
 
@@ -2813,7 +4064,7 @@ public struct ScreenshotEditorWorkspaceView: View {
 
             // Живое превью рисуемого элемента во время перетаскивания мышью
             if let previewItem = activePreviewAnnotation() {
-                ScreenshotAnnotationLayerView(item: itemWithClampedBounds(previewItem), canvasSize: viewportSize)
+                ScreenshotAnnotationLayerView(item: previewItem, canvasSize: viewportSize)
                     .allowsHitTesting(false)
             }
 
@@ -2841,7 +4092,8 @@ public struct ScreenshotEditorWorkspaceView: View {
             StepCursorPreviewOverlayView(
                 tracker: stepHoverTracker,
                 engine: engine,
-                isDragging: activeDragStart != nil || draggedAnnotationId != nil
+                isDragging: activeDragStart != nil || draggedAnnotationId != nil,
+                canvasSize: viewportSize
             )
             .allowsHitTesting(false)
         }
@@ -2854,8 +4106,9 @@ public struct ScreenshotEditorWorkspaceView: View {
     @ViewBuilder
     private func interactiveCanvas(viewportSize: CGSize) -> some View {
         let clampedZoom = max(1.0, zoomScale)
-        let previewPixelatedImage = ScreenshotEditorEngine.applyPixelateLayers(
-            to: sourceImage,
+        let srgbSourceImage = ScreenshotEditorEngine.sRGBNormalizedImage(from: sourceImage)
+        let previewPixelatedImage = ScreenshotEditorEngine.cachedApplyPixelateLayers(
+            to: srgbSourceImage,
             annotations: engine.annotations + activePreviewAnnotationAsArray(),
             canvasSize: viewportSize
         )
@@ -2872,6 +4125,15 @@ public struct ScreenshotEditorWorkspaceView: View {
             )
         }
         .frame(width: viewportSize.width, height: viewportSize.height)
+        .background(
+            GeometryReader { g in
+                Color.clear
+                    .onAppear { viewportState.canvasGlobalFrame = g.frame(in: .global) }
+                    .onChange(of: g.frame(in: .global)) { _, newFrame in
+                        viewportState.canvasGlobalFrame = newFrame
+                    }
+            }
+        )
         .background(CanvasCursorEnforcer(cursor: currentCanvasCursor).allowsHitTesting(false))
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
@@ -2885,18 +4147,32 @@ public struct ScreenshotEditorWorkspaceView: View {
         .onContinuousHover { phase in
             switch phase {
             case .active(let pt):
-                if !isCanvasHovered {
-                    isCanvasHovered = true
+                if !viewportState.isCanvasHovered {
+                    viewportState.isCanvasHovered = true
                 }
                 if engine.selectedTool == .step {
                     let canvasPt = viewportPointToCanvasPoint(pt, viewportSize: viewportSize)
                     stepHoverTracker.update(canvasPt)
+                } else if engine.selectedTool == .eraser && activeDragStart == nil {
+                    let canvasPt = viewportPointToCanvasPoint(pt, viewportSize: viewportSize)
+                    let sampled = ScreenshotEditorEngine.sampleBackgroundColor(
+                        in: sourceImage,
+                        at: canvasPt,
+                        canvasSize: viewportSize
+                    )
+                    let nsColor = NSColor(
+                        srgbRed: sampled.red,
+                        green: sampled.green,
+                        blue: sampled.blue,
+                        alpha: sampled.alpha
+                    )
+                    stepHoverTracker.update(canvasPt, sampledColor: nsColor)
                 } else {
                     stepHoverTracker.clear()
                 }
                 updateCursor(at: pt, viewportSize: viewportSize)
             case .ended:
-                isCanvasHovered = false
+                viewportState.isCanvasHovered = false
                 stepHoverTracker.clear()
                 applyStableCursor(.arrow)
             }
@@ -2943,7 +4219,7 @@ public struct ScreenshotEditorWorkspaceView: View {
         let canvasPoint = viewportPointToCanvasPoint(viewportPoint, viewportSize: viewportSize)
         if let activeOverlayId = engine.selectedAnnotationId ?? engine.editingTextAnnotationId,
            let activeItem = engine.annotations.first(where: { $0.id == activeOverlayId }),
-           let handle = ScreenshotEditorEngine.hitTestHandle(point: canvasPoint, in: activeItem) {
+           let handle = ScreenshotEditorEngine.hitTestHandle(point: canvasPoint, in: activeItem, canvasSize: viewportSize) {
             if handle == .textWidthLeft || handle == .textWidthRight {
                 applyStableCursor(.resizeLeftRight)
             } else {
@@ -2952,7 +4228,7 @@ public struct ScreenshotEditorWorkspaceView: View {
             return
         }
         if engine.selectedTool == .hand {
-            if ScreenshotEditorEngine.hitTestBody(point: canvasPoint, in: engine.annotations) != nil {
+            if ScreenshotEditorEngine.hitTestBody(point: canvasPoint, in: engine.annotations, canvasSize: viewportSize) != nil {
                 applyStableCursor(.openHand)
                 return
             }
@@ -2963,7 +4239,7 @@ public struct ScreenshotEditorWorkspaceView: View {
             applyStableCursor(.arrow)
         } else {
             switch engine.selectedTool {
-            case .arrow, .shape, .highlighter, .pixelate:
+            case .arrow, .shape, .highlighter, .pixelate, .eraser:
                 applyStableCursor(.crosshair)
             case .text:
                 applyStableCursor(.iBeam)
@@ -2975,10 +4251,6 @@ public struct ScreenshotEditorWorkspaceView: View {
         }
     }
 
-    private func itemWithClampedBounds(_ item: ScreenshotAnnotationItem) -> ScreenshotAnnotationItem {
-        item
-    }
-
     @ViewBuilder
     private func annotationInteractiveItemView(item: ScreenshotAnnotationItem, canvasSize: CGSize) -> some View {
         switch item.payload {
@@ -2987,7 +4259,7 @@ public struct ScreenshotEditorWorkspaceView: View {
                 .position(position)
                 .allowsHitTesting(false)
 
-        case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let maxWidth):
+        case .text(let position, let text, let font, let fontSize, let color, let calloutTarget, let secondaryCalloutTarget, let maxWidth):
             if engine.editingTextAnnotationId == item.id {
                 let horizontalPadding = ScreenshotEditorEngine.textHorizontalPadding
                 let verticalPadding = ScreenshotEditorEngine.textVerticalPadding
@@ -3000,19 +4272,20 @@ public struct ScreenshotEditorWorkspaceView: View {
                     maxWidth: maxWidth,
                     canvasSize: canvasSize
                 )
-                let innerTextWidth = max(60.0, editRect.width - horizontalPadding * 2.0)
+                let innerTextWidth = max(22.0, editRect.width - horizontalPadding * 2.0)
                 let innerTextHeight = max(fontSize, editRect.height - verticalPadding * 2.0)
                 let bubblePath = ScreenshotEditorEngine.unifiedTextCalloutPath(
                     pillRect: editRect,
                     cornerRadius: 7.0,
-                    calloutTarget: calloutTarget
+                    calloutTarget: calloutTarget,
+                    secondaryCalloutTarget: secondaryCalloutTarget
                 )
                 let nsFont = font.nsFont(size: fontSize, weight: .bold)
-                let singleLineWidth = ceil((displayStr as NSString).size(withAttributes: [.font: nsFont]).width) + 10.0
+                let singleLineWidth = ScreenshotEditorEngine.maxSingleLineWidth(for: displayStr, font: nsFont)
                 let isMultiline = text.contains("\n") || singleLineWidth > innerTextWidth
                 ZStack {
                     bubblePath
-                        .fill(Color.black.opacity(0.75))
+                        .fill(color == .obsidian ? Color.white.opacity(0.92) : Color.black.opacity(0.75))
                         .overlay(
                             bubblePath
                                 .stroke(
@@ -3023,33 +4296,18 @@ public struct ScreenshotEditorWorkspaceView: View {
                         .shadow(color: Color.black.opacity(0.45), radius: 3, x: 0, y: 1.5)
                         .allowsHitTesting(false)
 
-                    TextField(
-                        "",
+                    ScreenshotInlineTextEditor(
                         text: Binding(
                             get: { text },
                             set: { engine.updateText(id: item.id, newText: $0, canvasSize: canvasSize) }
                         ),
-                        axis: .vertical
+                        nsFont: nsFont,
+                        textColor: NSColor(color.swiftUIColor),
+                        insertionPointColor: color == .obsidian ? .black : .white,
+                        alignment: isMultiline ? .left : .center
                     )
-                    .textFieldStyle(.plain)
-                    .font(font.font(size: fontSize, weight: .bold))
-                    .foregroundStyle(color.swiftUIColor)
-                    .multilineTextAlignment(isMultiline ? .leading : .center)
-                    .lineLimit(nil)
-                    .frame(width: innerTextWidth, alignment: isMultiline ? .leading : .center)
-                    .fixedSize(horizontal: false, vertical: true)
                     .frame(width: innerTextWidth, height: innerTextHeight, alignment: isMultiline ? .leading : .center)
-                    .environment(\.colorScheme, .dark)
-                    .tint(.white)
-                    .background(WhiteCaretEnforcer(trigger: text))
-                    .focused($isInlineTextFieldFocused)
-                    .onSubmit {
-                        engine.commitActiveTextEditing()
-                    }
                     .position(x: editRect.midX, y: editRect.midY)
-                    .onAppear {
-                        isInlineTextFieldFocused = true
-                    }
                 }
             } else {
                 ScreenshotAnnotationLayerView(item: item, canvasSize: canvasSize)
@@ -3071,9 +4329,17 @@ public struct ScreenshotEditorWorkspaceView: View {
                 let clampedZoom = max(1.0, zoomScale)
 
                 if activeDragStart == nil {
+                    // Если leftMouseDownMonitor на том же клике закрыл подменю — гасим создание/рисование до отпускания кнопки (H25)
+                    if viewportState.suppressCanvasActionUntilMouseUp {
+                        viewportState.suppressCanvasActionUntilMouseUp = false
+                        didDismissSubmenuOnDragStart = true
+                        return
+                    }
                     // Если открыто выпадающее подменю или список шрифтов — первый клик ТОЛЬКО закрывает его!
                     if engine.activeSubmenu != nil || isFontDropdownExpanded {
-                        withAnimation(.easeOut(duration: 0.15)) {
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) {
                             engine.activeSubmenu = nil
                             isFontDropdownExpanded = false
                         }
@@ -3084,19 +4350,26 @@ public struct ScreenshotEditorWorkspaceView: View {
                     // 0. Проверяем попадание в ручку выносной стрелки текста или узловую точку активного/выделенного элемента
                     if let targetId = engine.selectedAnnotationId ?? engine.editingTextAnnotationId,
                        let targetItem = engine.annotations.first(where: { $0.id == targetId }),
-                       let handle = ScreenshotEditorEngine.hitTestHandle(point: start, in: targetItem) {
+                       let handle = ScreenshotEditorEngine.hitTestHandle(point: start, in: targetItem, canvasSize: viewportSize) {
                         if handle == .textCalloutTip {
                             let isDoubleClick = CardClickDetector.registerTap(itemId: "calloutTip_\(targetId.uuidString)")
                             if isDoubleClick {
                                 engine.recordUndoSnapshot()
-                                engine.updateTextCalloutTarget(id: targetId, to: nil)
+                                engine.updateTextCalloutTarget(id: targetId, to: nil, isSecondary: false, canvasSize: viewportSize)
+                                didDismissSubmenuOnDragStart = true
+                                return
+                            }
+                        } else if handle == .textSecondaryCalloutTip {
+                            let isDoubleClick = CardClickDetector.registerTap(itemId: "calloutTip2_\(targetId.uuidString)")
+                            if isDoubleClick {
+                                engine.recordUndoSnapshot()
+                                engine.updateTextCalloutTarget(id: targetId, to: nil, isSecondary: true, canvasSize: viewportSize)
                                 didDismissSubmenuOnDragStart = true
                                 return
                             }
                         }
                         if engine.editingTextAnnotationId != nil {
                             engine.commitActiveTextEditing()
-                            isInlineTextFieldFocused = false
                             engine.selectedAnnotationId = targetId
                         }
                         activeDragStart = start
@@ -3108,16 +4381,14 @@ public struct ScreenshotEditorWorkspaceView: View {
                         panOffsetAtDragStart = panOffset
                         activeDragHandle = handle
                         draggedAnnotationId = targetId
-                        dragInitialAnnotation = targetItem
                         return
                     }
 
                     // Если сейчас активно редактируется текстовая надпись — клик мимо неё завершает ввод и снимает фокус
                     if let activeTextId = engine.editingTextAnnotationId {
-                        let hitId = ScreenshotEditorEngine.hitTestBody(point: start, in: engine.annotations)
+                        let hitId = ScreenshotEditorEngine.hitTestBody(point: start, in: engine.annotations, canvasSize: viewportSize)
                         if hitId != activeTextId {
                             engine.commitActiveTextEditing()
-                            isInlineTextFieldFocused = false
                             didDismissSubmenuOnDragStart = true
                             return
                         }
@@ -3135,28 +4406,25 @@ public struct ScreenshotEditorWorkspaceView: View {
                         // 1. Попадание в интерактивную ручку (●) текущего выделенного элемента
                         if let selId = engine.selectedAnnotationId,
                            let selItem = engine.annotations.first(where: { $0.id == selId }),
-                           let handle = ScreenshotEditorEngine.hitTestHandle(point: start, in: selItem) {
+                           let handle = ScreenshotEditorEngine.hitTestHandle(point: start, in: selItem, canvasSize: viewportSize) {
                             activeDragHandle = handle
                             draggedAnnotationId = selId
-                            dragInitialAnnotation = selItem
                         }
                         // 2. Попадание в тело любого элемента на холсте (включая клик внутри фигуры или по тексту/стрелке текста)
-                        else if let hitId = ScreenshotEditorEngine.hitTestBody(point: start, in: engine.annotations) {
+                        else if let hitId = ScreenshotEditorEngine.hitTestBody(point: start, in: engine.annotations, canvasSize: viewportSize) {
                             wasAlreadySelectedOnDragStart = (engine.selectedAnnotationId == hitId)
                             let isDoubleClick = CardClickDetector.registerTap(itemId: hitId.uuidString)
                             engine.selectedAnnotationId = hitId
                             draggedAnnotationId = hitId
                             activeDragHandle = nil
                             let hitItem = engine.annotations.first(where: { $0.id == hitId })
-                            dragInitialAnnotation = hitItem
                             if let item = hitItem,
-                               case .text(_, _, let font, let fontSize, let color, _, _) = item.payload {
+                               case .text(_, _, let font, let fontSize, let color, _, _, _) = item.payload {
                                 engine.selectedFont = font
                                 engine.selectedFontSize = fontSize
                                 engine.selectedColor = color
                                 if isDoubleClick {
                                     engine.beginEditingTextAnnotation(id: hitId)
-                                    isInlineTextFieldFocused = true
                                     didDismissSubmenuOnDragStart = true
                                     return
                                 }
@@ -3167,23 +4435,28 @@ public struct ScreenshotEditorWorkspaceView: View {
                             engine.selectedAnnotationId = nil
                             draggedAnnotationId = nil
                             activeDragHandle = nil
-                            dragInitialAnnotation = nil
                             DispatchQueue.main.async {
-                                NSApp.keyWindow?.makeFirstResponder(nil)
+                                (viewportState.hostWindow ?? NSApp.keyWindow)?.makeFirstResponder(nil)
                             }
                             if clampedZoom > 1.001 {
                                 isPanningImage = true
                             }
                         }
                     } else if engine.selectedTool == .text {
-                        if let hitId = ScreenshotEditorEngine.hitTestBody(point: start, in: engine.annotations),
+                        if let hitId = ScreenshotEditorEngine.hitTestBody(point: start, in: engine.annotations, canvasSize: viewportSize),
                            let item = engine.annotations.first(where: { $0.id == hitId }),
                            case .text = item.payload {
                             engine.beginEditingTextAnnotation(id: hitId)
-                            isInlineTextFieldFocused = true
                             didDismissSubmenuOnDragStart = true
                             return
                         }
+                    } else if engine.selectedTool == .eraser {
+                        eraserSampledColor = ScreenshotEditorEngine.sampleBackgroundColor(
+                            in: sourceImage,
+                            at: start,
+                            canvasSize: viewportSize
+                        )
+                        freehandPoints = [start]
                     }
                 }
 
@@ -3254,7 +4527,8 @@ public struct ScreenshotEditorWorkspaceView: View {
                     let cur = clampPoint(adjustedCur, in: viewportSize)
                     activeDragCurrent = cur
 
-                    if engine.selectedTool == .highlighter && engine.selectedHighlighterMode == .freehand {
+                    if (engine.selectedTool == .highlighter && engine.selectedHighlighterMode == .freehand) ||
+                        (engine.selectedTool == .eraser && eraserSampledColor != nil) {
                         if freehandPoints.isEmpty {
                             freehandPoints.append(effectiveStart)
                         }
@@ -3263,7 +4537,8 @@ public struct ScreenshotEditorWorkspaceView: View {
                 }
             }
             .onEnded { value in
-                if didDismissSubmenuOnDragStart {
+                if didDismissSubmenuOnDragStart || viewportState.suppressCanvasActionUntilMouseUp {
+                    viewportState.suppressCanvasActionUntilMouseUp = false
                     didDismissSubmenuOnDragStart = false
                     activeDragStart = nil
                     activeDragCurrent = nil
@@ -3284,6 +4559,7 @@ public struct ScreenshotEditorWorkspaceView: View {
                 let distance = hypot(end.x - start.x, end.y - start.y)
                 let endedHandle = activeDragHandle
                 let endedId = draggedAnnotationId
+                let endedEraserColor = eraserSampledColor
 
                 defer {
                     activeDragStart = nil
@@ -3291,19 +4567,20 @@ public struct ScreenshotEditorWorkspaceView: View {
                     lastDragPoint = nil
                     activeDragHandle = nil
                     draggedAnnotationId = nil
-                    dragInitialAnnotation = nil
                     hasMovedDuringDrag = false
                     hasRecordedUndoForCurrentDrag = false
                     wasAlreadySelectedOnDragStart = false
                     isPanningImage = false
                     panOffsetAtDragStart = .zero
                     freehandPoints.removeAll()
+                    eraserSampledColor = nil
                     updateCursor(at: value.location, viewportSize: viewportSize)
                 }
 
                 if let handle = endedHandle, let id = endedId {
-                    if handle == .textCalloutPull || handle == .textCalloutTip {
-                        engine.finalizeTextCalloutDrag(id: id)
+                    if handle == .textCalloutPull || handle == .textCalloutTip ||
+                        handle == .textSecondaryCalloutPull || handle == .textSecondaryCalloutTip {
+                        engine.finalizeTextCalloutDrag(id: id, canvasSize: viewportSize)
                     }
                     return
                 }
@@ -3316,7 +4593,6 @@ public struct ScreenshotEditorWorkspaceView: View {
                        let item = engine.annotations.first(where: { $0.id == hitId }),
                        case .text = item.payload {
                         engine.beginEditingTextAnnotation(id: hitId)
-                        isInlineTextFieldFocused = true
                     }
                     return
                 }
@@ -3327,22 +4603,20 @@ public struct ScreenshotEditorWorkspaceView: View {
 
                 case .step:
                     TapticSoundAndHaptics.shared.performDialTick()
-                    let centerPos = ScreenshotEditorEngine.stepPinCenter(forTipPoint: end)
+                    let centerPos = ScreenshotEditorEngine.clampedStepPinCenter(forTipPoint: start, canvasSize: viewportSize)
                     _ = engine.addStepPin(at: centerPos)
 
                 case .text:
                     if engine.editingTextAnnotationId != nil {
                         engine.commitActiveTextEditing()
-                        isInlineTextFieldFocused = false
                     } else {
                         let newId = engine.addText(
                             tr("Текст", "Text"),
-                            at: end,
+                            at: start,
                             maxWidth: nil,
                             canvasSize: viewportSize
                         )
-                        engine.beginEditingTextAnnotation(id: newId)
-                        isInlineTextFieldFocused = true
+                        engine.beginEditingTextAnnotation(id: newId, isInitialPlaceholderEdit: true)
                     }
 
                 case .arrow:
@@ -3382,6 +4656,19 @@ public struct ScreenshotEditorWorkspaceView: View {
                     if rect.width >= 6 && rect.height >= 6 {
                         _ = engine.addPixelate(rect: rect, pixelScale: 6.0)
                     }
+
+                case .eraser:
+                    if let sampled = endedEraserColor {
+                        let strokePoints = freehandPoints.isEmpty ? [end] : freehandPoints
+                        _ = engine.addEraserStroke(
+                            points: strokePoints,
+                            strokeWidth: engine.selectedEraserWidth,
+                            red: sampled.red,
+                            green: sampled.green,
+                            blue: sampled.blue,
+                            alpha: sampled.alpha
+                        )
+                    }
                 }
             }
     }
@@ -3397,7 +4684,9 @@ public struct ScreenshotEditorWorkspaceView: View {
                     start: start,
                     end: cur,
                     color: engine.selectedColor,
-                    lineWidth: engine.selectedStrokeWidth
+                    lineWidth: engine.selectedStrokeWidth,
+                    style: engine.selectedArrowStyle,
+                    customControlPointOffset: nil
                 )
             )
         case .shape:
@@ -3418,7 +4707,8 @@ public struct ScreenshotEditorWorkspaceView: View {
                     payload: .highlighterFreehand(
                         points: freehandPoints,
                         color: engine.selectedColor,
-                        lineWidth: max(14, engine.selectedStrokeWidth * 3.2)
+                        lineWidth: max(14, engine.selectedStrokeWidth * 3.2),
+                        opacity: engine.highlighterOpacity
                     )
                 )
             } else {
@@ -3430,7 +4720,7 @@ public struct ScreenshotEditorWorkspaceView: View {
                 )
                 guard rect.width >= 3, rect.height >= 3 else { return nil }
                 return ScreenshotAnnotationItem(
-                    payload: .highlighterBox(rect: rect, color: engine.selectedColor)
+                    payload: .highlighterBox(rect: rect, color: engine.selectedColor, opacity: engine.highlighterOpacity)
                 )
             }
         case .pixelate:
@@ -3443,6 +4733,18 @@ public struct ScreenshotEditorWorkspaceView: View {
             guard rect.width >= 4, rect.height >= 4 else { return nil }
             return ScreenshotAnnotationItem(
                 payload: .pixelate(rect: rect, pixelScale: 6.0)
+            )
+        case .eraser:
+            guard let sampled = eraserSampledColor, !freehandPoints.isEmpty else { return nil }
+            return ScreenshotAnnotationItem(
+                payload: .eraser(
+                    points: freehandPoints,
+                    strokeWidth: engine.selectedEraserWidth,
+                    red: sampled.red,
+                    green: sampled.green,
+                    blue: sampled.blue,
+                    alpha: sampled.alpha
+                )
             )
         case .text, .step, .hand:
             return nil
@@ -3546,18 +4848,92 @@ public struct ScreenshotEditorWorkspaceView: View {
                 shapeSubmenuContent
             case .highlighter:
                 highlighterSubmenuContent
+            case .eraser:
+                eraserSubmenuContent
             case .color:
                 colorSubmenuContent
             }
         }
         .padding(12)
         .frame(width: 245)
-        .liquidGlassCard(theme: theme, windowOpacity: windowOpacity, cornerRadius: 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.isLight ? Color(red: 0.95, green: 0.96, blue: 0.98) : Color(red: 0.13, green: 0.14, blue: 0.16))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.borderColor, lineWidth: 1)
+        )
         .shadow(color: Color.black.opacity(theme.isLight ? 0.18 : 0.50), radius: 16, x: 0, y: 8)
     }
 
     private var arrowSubmenuContent: some View {
-        strokeWidthPickerRow
+        VStack(alignment: .leading, spacing: 10) {
+            Text(tr("Форма стрелки", "Arrow Style"))
+                .font(currentFont.font(size: 11, weight: .bold))
+                .foregroundStyle(theme.secondaryText)
+
+            VStack(spacing: 4) {
+                ForEach(ArrowCurveStyle.allCases) { style in
+                    let isSelected = (engine.selectedArrowStyle == style)
+                    Button {
+                        engine.updateSelectedArrowStyle(style)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: style.iconName)
+                                .font(.system(size: 12, weight: .semibold))
+                                .frame(width: 18)
+                            Text(style.title())
+                                .font(currentFont.font(size: 11.5, weight: isSelected ? .semibold : .regular))
+                            Spacer()
+                            if isSelected {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(theme.accentColor)
+                            }
+                        }
+                        .foregroundStyle(theme.primaryText)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(isSelected ? theme.accentColor.opacity(0.22) : theme.primaryText.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider()
+                .background(theme.borderColor)
+
+            strokeWidthPickerRow
+        }
+    }
+
+    private var eraserSubmenuContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(tr("Размер кисти ретуши", "Retouch brush size"))
+                .font(currentFont.font(size: 11, weight: .bold))
+                .foregroundStyle(theme.secondaryText)
+
+            HStack(spacing: 6) {
+                let labels: [(CGFloat, String)] = [(14, "S (14)"), (22, "M (22)"), (32, "L (32)")]
+                ForEach(labels, id: \.0) { size, label in
+                    let isSelected = abs(engine.selectedEraserWidth - size) < 0.5
+                    Button {
+                        engine.selectedEraserWidth = size
+                    } label: {
+                        Text(label)
+                            .font(currentFont.font(size: 11, weight: isSelected ? .bold : .medium))
+                            .foregroundStyle(isSelected ? Color.white : theme.primaryText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(isSelected ? theme.accentColor : theme.primaryText.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     private var textSubmenuContent: some View {
@@ -3571,7 +4947,6 @@ public struct ScreenshotEditorWorkspaceView: View {
                     let isSelected = (engine.selectedFontSize == size)
                     Button {
                         engine.updateSelectedAnnotationFontSize(size)
-                        engine.updateActiveTextStyle(fontSize: size)
                     } label: {
                         Text("\(Int(size))")
                             .font(currentFont.font(size: 11, weight: isSelected ? .bold : .medium))
@@ -3582,7 +4957,10 @@ public struct ScreenshotEditorWorkspaceView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .strokeBorder(isSelected ? theme.accentColor : theme.borderColor, lineWidth: 1)
+                                    .strokeBorder(
+                                        isSelected ? engine.selectedColor.swiftUIColor.opacity(0.85) : theme.borderColor,
+                                        lineWidth: 1
+                                    )
                             )
                     }
                     .buttonStyle(.plain)
@@ -3627,10 +5005,7 @@ public struct ScreenshotEditorWorkspaceView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(
-                            isFontDropdownExpanded ? theme.accentColor.opacity(0.65) : theme.borderColor,
-                            lineWidth: 1
-                        )
+                        .strokeBorder(engine.selectedColor.swiftUIColor.opacity(0.85), lineWidth: 1)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
@@ -3644,7 +5019,6 @@ public struct ScreenshotEditorWorkspaceView: View {
                             theme: theme
                         ) {
                             engine.updateSelectedAnnotationFont(fontItem)
-                            engine.updateActiveTextStyle(font: fontItem)
                             isFontDropdownExpanded = false
                         }
                     }
@@ -3707,7 +5081,16 @@ public struct ScreenshotEditorWorkspaceView: View {
 
     private var highlighterSubmenuContent: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(tr("Режим маркера (прозрачность 35%)", "Highlighter Mode (35% Opacity)"))
+            HighlighterOpacitySliderSection(
+                engine: engine,
+                theme: theme,
+                currentFont: currentFont
+            )
+
+            Divider()
+                .background(theme.borderColor)
+
+            Text(tr("Режим маркера", "Marker mode"))
                 .font(currentFont.font(size: 11, weight: .bold))
                 .foregroundStyle(theme.secondaryText)
 
@@ -3758,7 +5141,6 @@ public struct ScreenshotEditorWorkspaceView: View {
                     let isSelected = (engine.selectedColor == colorItem)
                     Button {
                         engine.updateSelectedAnnotationColor(colorItem)
-                        engine.updateActiveTextStyle(color: colorItem)
                     } label: {
                         ZStack {
                             Circle()
@@ -3812,6 +5194,10 @@ public struct ScreenshotEditorWorkspaceView: View {
                         .padding(.vertical, 5)
                         .background(isSelected ? theme.accentColor.opacity(0.22) : theme.primaryText.opacity(0.06))
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(isSelected ? engine.selectedColor.swiftUIColor.opacity(0.85) : Color.clear, lineWidth: 1)
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -3949,45 +5335,6 @@ private struct CanvasCursorEnforcer: NSViewRepresentable {
     }
 }
 
-// MARK: - White Blinking Caret Enforcer for Dark Text Pill
-
-private struct WhiteCaretEnforcer: NSViewRepresentable {
-    var trigger: String
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        applyWhiteCaret(from: view)
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        applyWhiteCaret(from: nsView)
-    }
-
-    private func applyWhiteCaret(from view: NSView) {
-        for delay in [0.0, 0.02, 0.06] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard let window = view.window ?? NSApp.keyWindow else { return }
-                if let tv = window.firstResponder as? NSTextView {
-                    tv.appearance = NSAppearance(named: .darkAqua)
-                    tv.insertionPointColor = .white
-                    tv.drawsBackground = false
-                    tv.textContainerInset = .zero
-                    tv.textContainer?.lineFragmentPadding = 0
-                    tv.needsDisplay = true
-                }
-                if let fe = window.fieldEditor(false, for: nil) as? NSTextView {
-                    fe.appearance = NSAppearance(named: .darkAqua)
-                    fe.insertionPointColor = .white
-                    fe.drawsBackground = false
-                    fe.textContainerInset = .zero
-                    fe.textContainer?.lineFragmentPadding = 0
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Interactive Bottom Shortcut Bar with Press Highlight & Scale Animation
 
 public struct ScreenshotEditorBottomShortcutBar: View {
@@ -4001,6 +5348,7 @@ public struct ScreenshotEditorBottomShortcutBar: View {
     public var onStepZoom: () -> Void
     public var onSaveCopy: () -> Void
     public var onEscape: () -> Void
+    public var onRedo: (() -> Void)?
 
     public init(
         engine: ScreenshotEditorEngine,
@@ -4012,7 +5360,8 @@ public struct ScreenshotEditorBottomShortcutBar: View {
         onDeleteSelected: @escaping () -> Void = {},
         onStepZoom: @escaping () -> Void = {},
         onSaveCopy: @escaping () -> Void = {},
-        onEscape: @escaping () -> Void = {}
+        onEscape: @escaping () -> Void = {},
+        onRedo: (() -> Void)? = nil
     ) {
         self.engine = engine
         self.theme = theme
@@ -4024,72 +5373,26 @@ public struct ScreenshotEditorBottomShortcutBar: View {
         self.onStepZoom = onStepZoom
         self.onSaveCopy = onSaveCopy
         self.onEscape = onEscape
+        self.onRedo = onRedo
     }
 
     public var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            Spacer(minLength: 10)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 11) {
+                Spacer(minLength: 4)
+                shortcutBarItems
+                Spacer(minLength: 4)
+            }
+            .lineLimit(1)
 
-            shortcutPill(
-                id: "undo",
-                key: "⌘Z",
-                label: tr("Отмена", "Undo"),
-                action: {
-                    engine.triggerShortcutHighlight("undo")
-                    onUndo()
-                }
-            )
-            shortcutPill(
-                id: "hand",
-                key: tr("Пробел", "Space"),
-                label: tr("Рука", "Hand"),
-                action: {
-                    engine.triggerShortcutHighlight("hand")
-                    onSelectHand()
-                }
-            )
-            shortcutPill(
-                id: "delete",
-                key: "⌫",
-                label: tr("Удалить", "Delete"),
-                action: {
-                    engine.triggerShortcutHighlight("delete")
-                    onDeleteSelected()
-                }
-            )
-            shortcutPill(
-                id: "shift",
-                key: "⇧ Shift",
-                label: tr("Ровный круг / линия", "Perfect circle / line"),
-                action: {
-                    engine.triggerShortcutHighlight("shift")
-                }
-            )
-            shortcutPill(
-                id: "zoom",
-                key: "⌘ +/-",
-                label: tr("Масштаб", "Zoom"),
-                action: {
-                    engine.triggerShortcutHighlight("zoom")
-                    onStepZoom()
-                }
-            )
-            shortcutPill(
-                id: "escape",
-                key: "Esc",
-                label: tr("Закрыть", "Close"),
-                action: {
-                    engine.triggerShortcutHighlight("escape")
-                    onEscape()
-                }
-            )
-
-            Spacer(minLength: 10)
+            ScreenshotEditorCenteredFlowLayout(horizontalSpacing: 10, verticalSpacing: 6) {
+                shortcutBarItems
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
-        .lineLimit(1)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(minWidth: 0, idealWidth: 360, maxWidth: .infinity, alignment: .center)
         .background(
             ZStack {
                 theme.cardColor.opacity(theme.usesLiquidGlass ? 0.88 : 0.98)
@@ -4109,14 +5412,103 @@ public struct ScreenshotEditorBottomShortcutBar: View {
         )
     }
 
-    private func shortcutPill(
+    @ViewBuilder
+    private var shortcutBarItems: some View {
+        undoRedoShortcutGroup
+        shortcutPill(
+            id: "hand",
+            key: tr("Пробел", "Space"),
+            label: tr("Рука", "Hand"),
+            action: {
+                engine.triggerShortcutHighlight("hand")
+                onSelectHand()
+            }
+        )
+        shortcutPill(
+            id: "delete",
+            key: "⌫",
+            label: tr("Удалить", "Delete"),
+            action: {
+                engine.triggerShortcutHighlight("delete")
+                onDeleteSelected()
+            }
+        )
+        shortcutPill(
+            id: "shift",
+            key: "⇧ Shift",
+            label: tr("Ровный круг / линия", "Perfect circle / line"),
+            action: {
+                engine.triggerShortcutHighlight("shift")
+            }
+        )
+        shortcutPill(
+            id: "zoom",
+            key: "⌘ +/-",
+            label: tr("Масштаб", "Zoom"),
+            action: {
+                engine.triggerShortcutHighlight("zoom")
+                onStepZoom()
+            }
+        )
+        shortcutPill(
+            id: "escape",
+            key: "Esc",
+            label: tr("Закрыть", "Close"),
+            action: {
+                engine.triggerShortcutHighlight("escape")
+                onEscape()
+            }
+        )
+    }
+
+    private var undoRedoShortcutGroup: some View {
+        HStack(alignment: .center, spacing: 5) {
+            HStack(alignment: .center, spacing: 4) {
+                Button {
+                    engine.triggerShortcutHighlight("undo")
+                    onUndo()
+                } label: {
+                    keyBadgeView(id: "undo", key: "⌘Z")
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+
+                Text("|")
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(theme.secondaryText.opacity(0.55))
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Button {
+                    engine.triggerShortcutHighlight("redo")
+                    if let onRedo {
+                        onRedo()
+                    } else {
+                        engine.redo()
+                    }
+                } label: {
+                    keyBadgeView(id: "redo", key: "⌘⇧Z")
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+
+            Text(tr("Отменить / Повторить", "Undo / Redo"))
+                .font(currentFont.font(size: 11, weight: .medium))
+                .foregroundStyle(theme.secondaryText)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func keyBadgeView(
         id: String,
         key: String,
-        label: String,
-        action: @escaping () -> Void
+        isDeleteKey: Bool = false
     ) -> some View {
         let isHighlighted = engine.isShortcutHighlighted(id)
-        let isDeleteKey = (id == "delete")
         let badgeTextColor: Color = isHighlighted ? Color.white : theme.primaryText
         let idleBadgeFill: Color = theme.isLight ? Color.black.opacity(0.10) : Color.white.opacity(0.14)
         let badgeFillColor: Color = isHighlighted ? theme.accentColor : idleBadgeFill
@@ -4127,32 +5519,43 @@ public struct ScreenshotEditorBottomShortcutBar: View {
         let badgeShadowRadius: CGFloat = isHighlighted ? 4.0 : 0.0
         let badgeScale: CGFloat = isHighlighted ? 1.08 : 1.0
 
-        return Button(action: action) {
+        return Group {
+            if isDeleteKey {
+                Image(systemName: "delete.left")
+                    .font(.system(size: 13, weight: .bold))
+            } else {
+                Text(key)
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+        }
+        .padding(.horizontal, 6)
+        .frame(minHeight: 20, maxHeight: 20)
+        .fixedSize(horizontal: true, vertical: false)
+        .foregroundStyle(badgeTextColor)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(badgeFillColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(badgeBorderColor, lineWidth: badgeBorderWidth)
+        )
+        .shadow(color: badgeShadowColor, radius: badgeShadowRadius, x: 0, y: 0)
+        .scaleEffect(badgeScale)
+        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isHighlighted)
+    }
+
+    private func shortcutPill(
+        id: String,
+        key: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
             HStack(spacing: 5) {
-                Group {
-                    if isDeleteKey {
-                        Image(systemName: "delete.left")
-                            .font(.system(size: 13, weight: .bold))
-                    } else {
-                        Text(key)
-                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .frame(minHeight: 20, maxHeight: 20)
-                .foregroundStyle(badgeTextColor)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(badgeFillColor)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(badgeBorderColor, lineWidth: badgeBorderWidth)
-                )
-                .shadow(color: badgeShadowColor, radius: badgeShadowRadius, x: 0, y: 0)
-                .scaleEffect(badgeScale)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isHighlighted)
+                keyBadgeView(id: id, key: key, isDeleteKey: id == "delete")
 
                 Text(label)
                     .font(currentFont.font(size: 11, weight: .medium))
@@ -4163,5 +5566,245 @@ public struct ScreenshotEditorBottomShortcutBar: View {
             .lineLimit(1)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct ScreenshotEditorCenteredFlowLayout: Layout {
+    var horizontalSpacing: CGFloat = 10
+    var verticalSpacing: CGFloat = 6
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func computeRows(maxWidth: CGFloat, subviews: Subviews) -> [Row] {
+        let limit = maxWidth.isFinite && maxWidth > 0 ? maxWidth : .greatestFiniteMagnitude
+        var rows: [Row] = []
+        var current = Row()
+
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let neededWidth = current.indices.isEmpty ? size.width : current.width + horizontalSpacing + size.width
+            if !current.indices.isEmpty && neededWidth > limit {
+                rows.append(current)
+                current = Row(indices: [index], width: size.width, height: size.height)
+            } else {
+                current.indices.append(index)
+                current.width = neededWidth
+                current.height = max(current.height, size.height)
+            }
+        }
+        if !current.indices.isEmpty {
+            rows.append(current)
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = computeRows(maxWidth: maxWidth, subviews: subviews)
+        let totalHeight = rows.reduce(CGFloat(0)) { $0 + $1.height }
+            + CGFloat(max(0, rows.count - 1)) * verticalSpacing
+        let maxRowWidth = rows.map(\.width).max() ?? 0
+        let finalWidth = proposal.width.map { min($0, max(maxRowWidth, 0)) } ?? maxRowWidth
+        return CGSize(width: max(finalWidth, maxRowWidth), height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = computeRows(maxWidth: bounds.width, subviews: subviews)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX + max(0, (bounds.width - row.width) / 2)
+            for idx in row.indices {
+                let size = subviews[idx].sizeThatFits(.unspecified)
+                let yOffset = (row.height - size.height) / 2
+                subviews[idx].place(
+                    at: CGPoint(x: x, y: y + yOffset),
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width + horizontalSpacing
+            }
+            y += row.height + verticalSpacing
+        }
+    }
+}
+
+private struct ScreenshotInlineTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let nsFont: NSFont
+    let textColor: NSColor
+    var insertionPointColor: NSColor = .white
+    let alignment: NSTextAlignment
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSTextView {
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.isFieldEditor = false
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.insertionPointColor = insertionPointColor
+        textView.textColor = textColor
+        textView.font = nsFont
+        textView.alignment = alignment
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.string = text
+        DispatchQueue.main.async {
+            if let window = textView.window, window.firstResponder !== textView {
+                window.makeFirstResponder(textView)
+            }
+        }
+        return textView
+    }
+
+    func updateNSView(_ textView: NSTextView, context: Context) {
+        context.coordinator.parent = self
+        if textView.string != text {
+            let selectedRanges = textView.selectedRanges
+            textView.string = text
+            textView.selectedRanges = selectedRanges
+        }
+        if textView.font != nsFont {
+            textView.font = nsFont
+        }
+        if textView.textColor != textColor {
+            textView.textColor = textColor
+        }
+        if textView.alignment != alignment {
+            textView.alignment = alignment
+        }
+        if textView.insertionPointColor != insertionPointColor {
+            textView.insertionPointColor = insertionPointColor
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ScreenshotInlineTextEditor
+
+        init(_ parent: ScreenshotInlineTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                textView.insertNewlineIgnoringFieldEditor(nil)
+                return true
+            }
+            return false
+        }
+    }
+}
+
+private struct HighlighterOpacitySliderSection: View {
+    @ObservedObject var engine: ScreenshotEditorEngine
+    let theme: AppTheme
+    let currentFont: AppFont
+
+    @State private var localOpacity: Double = 0.35
+    @State private var hasRecordedUndoForSliderDrag: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            let clamped = min(1.0, max(0.0, localOpacity))
+            let pct = Int(round(clamped * 100))
+            Text(tr("Прозрачность маркера: \(pct)%", "Marker opacity: \(pct)%"))
+                .font(currentFont.font(size: 11, weight: .bold))
+                .foregroundStyle(theme.primaryText)
+
+            let markerColor = engine.selectedColor.swiftUIColor
+            let knobSize: CGFloat = 14.0
+
+            GeometryReader { geo in
+                let trackWidth = max(1.0, geo.size.width)
+                let progress = clamped
+                let knobX = progress * max(0.0, trackWidth - knobSize)
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(height: 6)
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [markerColor.opacity(0.0), markerColor.opacity(clamped)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(knobSize * 0.5, knobX + knobSize * 0.5), height: 6)
+
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: knobSize, height: knobSize)
+                        .overlay(
+                            Circle()
+                                .stroke(markerColor, lineWidth: 1.5)
+                        )
+                        .shadow(color: Color.black.opacity(0.25), radius: 2, y: 1)
+                        .offset(x: knobX)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let usableWidth = max(1.0, trackWidth - knobSize)
+                            let clampedX = min(usableWidth, max(0.0, value.location.x - knobSize * 0.5))
+                            let ratio = min(1.0, max(0.0, Double(clampedX / usableWidth)))
+                            localOpacity = ratio
+                            var tx = Transaction()
+                            tx.disablesAnimations = true
+                            withTransaction(tx) {
+                                engine.updateSelectedAnnotationHighlighterOpacity(
+                                    ratio,
+                                    recordUndo: !hasRecordedUndoForSliderDrag
+                                )
+                            }
+                            hasRecordedUndoForSliderDrag = true
+                        }
+                        .onEnded { _ in
+                            hasRecordedUndoForSliderDrag = false
+                        }
+                )
+            }
+            .frame(height: 18)
+
+            HStack {
+                Text("0%")
+                Spacer()
+                Text("100%")
+            }
+            .font(.system(size: 9.5, weight: .medium).monospacedDigit())
+            .foregroundStyle(theme.secondaryText)
+        }
+        .onAppear {
+            localOpacity = min(1.0, max(0.0, engine.highlighterOpacity))
+        }
+        .onChange(of: engine.highlighterOpacity) { _, newValue in
+            if abs(localOpacity - newValue) > 0.005 {
+                localOpacity = min(1.0, max(0.0, newValue))
+            }
+        }
     }
 }
