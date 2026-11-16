@@ -79,4 +79,34 @@ final class CleanLaunchTests: XCTestCase {
         AppDefaults.shared.removeObject(forKey: "pv_snippet_categories_seeded_v1")
         try? await db.initializeDatabase()
     }
+
+    func testTestPreferencesPlistAutoCleanupAndOrphanRemoval() throws {
+        let suiteName = try XCTUnwrap(AppDefaults.testSuiteName)
+        XCTAssertTrue(suiteName.hasPrefix("com.pastevault.tests."))
+
+        let tempPrefsDir = FileManager.default.temporaryDirectory.appendingPathComponent("pv_prefs_test_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempPrefsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempPrefsDir) }
+
+        let deadSuite = "com.pastevault.tests.99999999"
+        let deadPlist = tempPrefsDir.appendingPathComponent("\(deadSuite).plist")
+        let livePlist = tempPrefsDir.appendingPathComponent("\(suiteName).plist")
+        let unrelatedPlist = tempPrefsDir.appendingPathComponent("com.pastevault.app.plist")
+
+        try Data("orphan".utf8).write(to: deadPlist)
+        try Data("live".utf8).write(to: livePlist)
+        try Data("prod".utf8).write(to: unrelatedPlist)
+
+        AppDefaults.cleanupOrphanedTestPreferences(
+            currentPID: ProcessInfo.processInfo.processIdentifier,
+            preferencesDir: tempPrefsDir
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: deadPlist.path), "Orphaned test .plist for dead PID must be removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: livePlist.path), "Current running test PID .plist must stay until process exit")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedPlist.path), "Production com.pastevault.app.plist must never be touched")
+
+        AppDefaults.removeTestPreferences(forSuiteName: suiteName, preferencesDir: tempPrefsDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: livePlist.path), "removeTestPreferences must delete target test .plist")
+    }
 }

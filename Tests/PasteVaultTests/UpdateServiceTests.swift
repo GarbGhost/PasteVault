@@ -31,9 +31,26 @@ final class UpdateServiceTests: XCTestCase {
     @MainActor
     func testPrivateOrOfflineStateDistinctFromUpToDate() {
         let releasesURL = UpdateService.releasesPageURL
-        let offline = UpdateService.UpdateState.privateOrOffline(currentVersion: "1.1.0", releasesURL: releasesURL)
-        let upToDate = UpdateService.UpdateState.upToDate(currentVersion: "1.1.0")
+        let offline = UpdateService.UpdateState.privateOrOffline(currentVersion: "1.1.1", releasesURL: releasesURL)
+        let upToDate = UpdateService.UpdateState.upToDate(currentVersion: "1.1.1")
         XCTAssertNotEqual(offline, upToDate, "404/offline state must stay distinct from verified upToDate state")
-        XCTAssertEqual(UpdateService.shared.currentVersion, "1.1.0")
+        XCTAssertEqual(UpdateService.shared.currentVersion, "1.1.1")
+    }
+
+    func testDetachedRelaunchCommandAndOpenPanelFlag() {
+        let cmd = UpdateService.buildDetachedRelaunchCommand(
+            waitingForPID: 42424,
+            appPath: "/Applications/Paste Vault.app"
+        )
+        XCTAssertTrue(cmd.contains("kill -0 42424"), "Relaunch command must wait for old PID exit")
+        XCTAssertTrue(cmd.contains("xattr -dr com.apple.quarantine"), "Relaunch command must clear quarantine if present")
+        XCTAssertTrue(cmd.contains("/usr/bin/open -a '/Applications/Paste Vault.app'"), "Relaunch command must open target app bundle")
+
+        let key = UpdateService.openPanelOnNextLaunchKey
+        XCTAssertEqual(key, "pv_open_panel_on_next_launch")
+        AppDefaults.shared.set(true, forKey: key)
+        XCTAssertTrue(AppDefaults.shared.bool(forKey: key))
+        AppDefaults.shared.set(false, forKey: key)
+        XCTAssertFalse(AppDefaults.shared.bool(forKey: key))
     }
 }

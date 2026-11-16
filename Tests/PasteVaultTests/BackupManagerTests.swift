@@ -941,4 +941,139 @@ final class BackupManagerTests: XCTestCase {
         // Финальная уборка тестовой БД
         await cleanDBAndSeedDefaults()
     }
+
+    // MARK: - 12. Полный round-trip всех настроек + обратная совместимость со старым JSON
+    @MainActor
+    func testFullSettingsRoundTripAndLegacyCompatibility() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        let monitor = ClipboardMonitor.shared
+        let defaults = AppDefaults.shared
+
+        // Сохраняем текущее состояние и восстанавливаем в defer
+        let prevTheme = defaults.string(forKey: "selectedThemeId")
+        let prevLegacyTheme = defaults.string(forKey: "pasteVaultTheme")
+        let prevFont = defaults.string(forKey: "selectedFontId")
+        let prevGlass = defaults.object(forKey: "userGlassLevel")
+        let prevLang = defaults.string(forKey: "appLanguage")
+        let prevSound = defaults.object(forKey: "tapticAudioFeedbackEnabled")
+        let prevAutoUpdates = defaults.object(forKey: "autoCheckUpdates")
+        let prevServiceAutoUpdates = UpdateService.shared.autoCheckUpdates
+        let prevLaunchAtLogin = monitor.isLaunchAtLoginEnabled
+
+        defer {
+            if let prevTheme { defaults.set(prevTheme, forKey: "selectedThemeId") } else { defaults.removeObject(forKey: "selectedThemeId") }
+            if let prevLegacyTheme { defaults.set(prevLegacyTheme, forKey: "pasteVaultTheme") } else { defaults.removeObject(forKey: "pasteVaultTheme") }
+            if let prevFont { defaults.set(prevFont, forKey: "selectedFontId") } else { defaults.removeObject(forKey: "selectedFontId") }
+            if let prevGlass { defaults.set(prevGlass, forKey: "userGlassLevel") } else { defaults.removeObject(forKey: "userGlassLevel") }
+            if let prevLang { defaults.set(prevLang, forKey: "appLanguage") } else { defaults.removeObject(forKey: "appLanguage") }
+            if let prevSound { defaults.set(prevSound, forKey: "tapticAudioFeedbackEnabled") } else { defaults.removeObject(forKey: "tapticAudioFeedbackEnabled") }
+            if let prevAutoUpdates { defaults.set(prevAutoUpdates, forKey: "autoCheckUpdates") } else { defaults.removeObject(forKey: "autoCheckUpdates") }
+            UpdateService.shared.autoCheckUpdates = prevServiceAutoUpdates
+            monitor.isLaunchAtLoginEnabled = prevLaunchAtLogin
+        }
+
+        // 1. Проверяем, что при отсутствии userGlassLevel экспорт сохраняет 0.70, а не 0.0
+        defaults.removeObject(forKey: "userGlassLevel")
+        let defaultArchive = BackupManager.buildArchive(
+            items: [],
+            monitor: monitor,
+            snippets: [],
+            includeClipboard: false,
+            clipboardPinnedOnly: false,
+            includeSnippets: false,
+            snippetsPinnedOnly: false,
+            includeBlacklist: false,
+            includeShortcuts: false,
+            includeAppearance: true
+        )
+        XCTAssertEqual(defaultArchive.settings?.appearanceAndStorage?.userGlassLevel ?? -1, 0.70, accuracy: 0.001)
+
+        // 2. Выставляем все настройки, экспортируем -> сбрасываем -> импортируем
+        defaults.set("catppuccinMocha", forKey: "selectedThemeId")
+        defaults.set("catppuccinMocha", forKey: "pasteVaultTheme")
+        defaults.set("jura", forKey: "selectedFontId")
+        defaults.set(0.42, forKey: "userGlassLevel")
+        defaults.set("en", forKey: "appLanguage")
+        defaults.set(false, forKey: "tapticAudioFeedbackEnabled")
+        defaults.set(true, forKey: "autoCheckUpdates")
+        UpdateService.shared.autoCheckUpdates = true
+        monitor.isLaunchAtLoginEnabled = true
+
+        let archive = BackupManager.buildArchive(
+            items: [],
+            monitor: monitor,
+            snippets: [],
+            includeClipboard: false,
+            clipboardPinnedOnly: false,
+            includeSnippets: false,
+            snippetsPinnedOnly: false,
+            includeBlacklist: true,
+            includeShortcuts: true,
+            includeAppearance: true
+        )
+
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("full_settings_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try BackupManager.exportArchiveToFile(archive: archive, to: tempURL, password: "TestSettingsPwd#1")
+
+        // Сбрасываем локальные настройки на противоположные
+        defaults.set("obsidian", forKey: "selectedThemeId")
+        defaults.set("obsidian", forKey: "pasteVaultTheme")
+        defaults.set("inter", forKey: "selectedFontId")
+        defaults.set(0.95, forKey: "userGlassLevel")
+        defaults.set("ru", forKey: "appLanguage")
+        defaults.set(true, forKey: "tapticAudioFeedbackEnabled")
+        defaults.set(false, forKey: "autoCheckUpdates")
+        UpdateService.shared.autoCheckUpdates = false
+        monitor.isLaunchAtLoginEnabled = false
+
+        let loaded = try BackupManager.loadArchiveFromFile(from: tempURL, password: "TestSettingsPwd#1")
+        try await BackupManager.restoreArchive(
+            loaded,
+            restoreClipboard: false,
+            restoreSnippets: false,
+            restoreSettings: true,
+            mergeMode: false,
+            monitor: monitor,
+            currentSnippets: [],
+            onUpdateSnippets: { _ in }
+        )
+
+        XCTAssertEqual(defaults.string(forKey: "selectedThemeId"), "catppuccinMocha")
+        XCTAssertEqual(defaults.string(forKey: "pasteVaultTheme"), "catppuccinMocha")
+        XCTAssertEqual(defaults.string(forKey: "selectedFontId"), "jura")
+        XCTAssertEqual(defaults.double(forKey: "userGlassLevel"), 0.42, accuracy: 0.001)
+        XCTAssertEqual(defaults.string(forKey: "appLanguage"), "en")
+        XCTAssertEqual(defaults.bool(forKey: "tapticAudioFeedbackEnabled"), false)
+        XCTAssertEqual(defaults.bool(forKey: "autoCheckUpdates"), true)
+        XCTAssertTrue(UpdateService.shared.autoCheckUpdates)
+        XCTAssertTrue(monitor.isLaunchAtLoginEnabled)
+
+        // 3. Обратная совместимость со старым JSON (без soundEnabled, autoCheckUpdates, launchAtLogin)
+        let legacyJSON = """
+        {
+          "version": 1,
+          "appVersion": "1.0.1",
+          "settings": {
+            "appearanceAndStorage": {
+              "selectedThemeId": "frost",
+              "userGlassLevel": 0.65,
+              "selectedFontId": "manrope",
+              "appLanguage": "ru",
+              "historyLimit": 250,
+              "saveFiles": true,
+              "saveImages": true,
+              "saveText": true
+            }
+          }
+        }
+        """
+        let legacyArchive = try BackupManager.decodeArchiveData(Data(legacyJSON.utf8))
+        let legacyAppearance = try XCTUnwrap(legacyArchive.settings?.appearanceAndStorage)
+        XCTAssertEqual(legacyAppearance.selectedThemeId, "frost")
+        XCTAssertEqual(legacyAppearance.selectedFontId, "manrope")
+        XCTAssertNil(legacyAppearance.soundEnabled)
+        XCTAssertNil(legacyAppearance.autoCheckUpdates)
+        XCTAssertNil(legacyAppearance.launchAtLogin)
+    }
 }

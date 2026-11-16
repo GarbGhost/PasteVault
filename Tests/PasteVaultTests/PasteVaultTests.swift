@@ -697,13 +697,24 @@ final class PasteVaultTests: XCTestCase {
             XCTAssertGreaterThan(size, 10_000, "Файл шрифта \(spec.filename) не должен быть пустым")
         }
 
-        FontManager.shared.ensureFontsInstalled()
-        for _ in 0..<40 {
-            if FontManager.shared.hasCompletedLoad { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        XCTAssertTrue(FontManager.shared.hasCompletedLoad, "Офлайн-загрузка шрифтов должна завершиться")
+        // Синхронная регистрация должна быть готова мгновенно без ожидания асинхронных Task
+        FontManager.shared.registerBundledFontsSynchronouslyIfNeeded()
+        XCTAssertTrue(FontManager.shared.hasCompletedLoad, "Офлайн-загрузка шрифтов должна завершаться синхронно")
         XCTAssertEqual(FontManager.shared.resolvedPostScriptNames.count, 6)
+
+        for appFont in AppFont.allCases {
+            for weight in [Font.Weight.regular, .medium, .semibold, .bold] {
+                let psName = try XCTUnwrap(
+                    FontManager.shared.resolvedFontName(for: appFont, weight: weight),
+                    "PostScript name must resolve for \(appFont.rawValue) weight=\(weight)"
+                )
+                XCTAssertFalse(psName.contains("Didot"), "Serif fallback Didot must never be used for \(appFont.rawValue)")
+                XCTAssertFalse(psName.contains("Times"), "Serif fallback Times must never be used for \(appFont.rawValue)")
+                XCTAssertNotNil(NSFont(name: psName, size: 13), "NSFont(name: \(psName)) must be registered and loadable")
+            }
+            let nsBold = appFont.nsFont(size: 13, weight: .bold)
+            XCTAssertFalse(nsBold.fontName.contains("Didot"))
+        }
     }
 
     // MARK: - Этап 1: Изоляция @AppStorage от UserDefaults.standard
@@ -904,5 +915,87 @@ final class PasteVaultTests: XCTestCase {
         } else {
             XCTFail("Global .togglePanel without modifiers must fail validation")
         }
+    }
+
+    // MARK: - Этап 4: Сохранение реальных картинок в Screenshots/, перезагрузка с диска и удаление без синтетики
+    @MainActor
+    func testCapturedImagePersistsRealPNGToDiskReloadsAndDeletesCleanly() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        try await DatabaseManager.shared.clearAllHistory()
+
+        let monitor = ClipboardMonitor.shared
+        monitor.clearAllHistoryInMemory()
+        let prevSaveImages = monitor.saveImagesEnabled
+        monitor.saveImagesEnabled = true
+        defer {
+            monitor.saveImagesEnabled = prevSaveImages
+            monitor.clearAllHistoryInMemory()
+            Task { try? await DatabaseManager.shared.clearAllHistory() }
+        }
+
+        // Создаём реальную уникальную картинку 64x48 (не 320x180)
+        let imgSize = NSSize(width: 64, height: 48)
+        let image = NSImage(size: imgSize)
+        image.lockFocus()
+        NSColor.systemGreen.setFill()
+        NSRect(origin: .zero, size: imgSize).fill()
+        image.unlockFocus()
+        let tiffData = try XCTUnwrap(image.tiffRepresentation)
+
+        monitor.captureImageItem(image, tiffData: tiffData, bundleId: "com.apple.screencaptureui", appName: "Screenshot")
+        let captured = try XCTUnwrap(monitor.items.first)
+        XCTAssertEqual(captured.effectiveContentType, .image)
+        XCTAssertNotNil(captured.fileURLPath)
+
+        // Ждём завершения асинхронной записи в SQLite
+        for _ in 0..<30 {
+            let dbRows = try await DatabaseManager.shared.queryItems(searchQuery: "", limit: 20)
+            if dbRows.contains(where: { $0.id == captured.id && $0.fileURLPath != nil }) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        let savedFileURL = try XCTUnwrap(
+            DatabaseManager.safeScreenshotFileURL(for: captured.fileURLPath, itemId: captured.id),
+            "Real PNG file must exist inside isolated Screenshots/ directory"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: savedFileURL.path))
+
+        // Симулируем перезапуск: очищаем RAM-кэш и перечитываем историю из SQLite + диска
+        monitor.clearAllHistoryInMemory()
+        await DatabaseManager.shared.closeForTesting()
+        try await DatabaseManager.shared.initializeDatabase()
+        await monitor.loadInitialHistory()
+
+        let reloaded = try XCTUnwrap(monitor.items.first(where: { $0.id == captured.id }))
+        let loadedImage = try XCTUnwrap(monitor.imageForItem(reloaded), "Reloaded screenshot must load real PNG from disk")
+        XCTAssertEqual(Int(loadedImage.size.width), 64)
+        XCTAssertEqual(Int(loadedImage.size.height), 48)
+
+        // Удаляем файл на диске и кэш -> imageForItem НЕ должен подставлять синтетическую картинку 320x180
+        try FileManager.default.removeItem(at: savedFileURL)
+        monitor.evictImage(for: reloaded.id)
+        XCTAssertNil(monitor.imageForItem(reloaded), "Missing PNG on disk must return nil rather than synthetic preview")
+
+        // Проверяем удаление PNG-файла при удалении карточки из БД
+        let image2 = NSImage(size: NSSize(width: 40, height: 30))
+        image2.lockFocus()
+        NSColor.systemOrange.setFill()
+        NSRect(x: 0, y: 0, width: 40, height: 30).fill()
+        image2.unlockFocus()
+        let tiff2 = try XCTUnwrap(image2.tiffRepresentation)
+        monitor.captureImageItem(image2, tiffData: tiff2, bundleId: "com.apple.screencaptureui", appName: "Screenshot")
+        let captured2 = try XCTUnwrap(monitor.items.first(where: { $0.id != captured.id }))
+        for _ in 0..<30 {
+            let dbRows = try await DatabaseManager.shared.queryItems(searchQuery: "", limit: 20)
+            if dbRows.contains(where: { $0.id == captured2.id }) { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let savedFileURL2 = try XCTUnwrap(DatabaseManager.safeScreenshotFileURL(for: captured2.fileURLPath, itemId: captured2.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: savedFileURL2.path))
+
+        try await DatabaseManager.shared.deleteItem(id: captured2.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: savedFileURL2.path), "Deleting clipboard item must delete its PNG from Screenshots/")
     }
 }

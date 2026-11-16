@@ -264,17 +264,17 @@ final class CardFileExporterTests: XCTestCase {
             "Версия 1.0.0 не должна определяться как более новая, чем 1.0.1"
         )
         XCTAssertTrue(
-            UpdateService.isVersion("1.1.0", newerThan: "1.0.1"),
-            "Версия 1.1.0 должна определяться как более новая, чем 1.0.1"
+            UpdateService.isVersion("1.1.1", newerThan: "1.0.1"),
+            "Версия 1.1.1 должна определяться как более новая, чем 1.0.1"
         )
         XCTAssertFalse(
-            UpdateService.isVersion("1.0.1", newerThan: "1.1.0"),
-            "Версия 1.0.1 не должна определяться как более новая, чем 1.1.0"
+            UpdateService.isVersion("1.0.1", newerThan: "1.1.1"),
+            "Версия 1.0.1 не должна определяться как более новая, чем 1.1.1"
         )
         XCTAssertEqual(
             UpdateService.shared.currentVersion,
-            "1.1.0",
-            "Текущая версия приложения в UpdateService должна быть 1.1.0"
+            "1.1.1",
+            "Текущая версия приложения в UpdateService должна быть 1.1.1"
         )
     }
 
