@@ -4,14 +4,15 @@
   <img src="Resources/Branding/AppIcon_1024.png" width="128" height="128" alt="PasteVault Icon" />
 </p>
 
-<h1 align="center">PasteVault</h1>
+<h1 align="center">PasteVault v1.1.1</h1>
 
 <p align="center">
   <strong>Быстрый, приватный и полностью локальный менеджер буфера обмена, редактор скриншотов, 3D-сниппеты и криптографический генератор паролей для macOS.</strong>
 </p>
 
 <p align="center">
-  <em>100% хранение на вашем Mac • Без облака, аналитики и телеметрии • SQLite FTS5 • Apple Vision OCR • Зашифрованный бэкап PVENC2</em>
+  <em>100% хранение на вашем Mac • Без облака, аналитики и телеметрии • SQLite FTS5 • Apple Vision OCR • Зашифрованный бэкап PVENC2</em><br />
+  <a href="https://github.com/GarbGhost/PasteVault/releases/download/v1.1.1/PasteVault_v1.1.1_Universal.dmg">Скачать PasteVault_v1.1.1_Universal.dmg (v1.1.1)</a>
 </p>
 
 <p align="center">
@@ -91,6 +92,8 @@ PasteVault непрерывно фиксирует всё, что вы копи�
 ## 6. Установка и совместимость
 
 Работает на macOS 14 и новее, на процессорах Apple Silicon (серия M) и Intel (Universal Binary).
+
+- **Готовый установщик (v1.1.1):** скачать [PasteVault_v1.1.1_Universal.dmg](https://github.com/GarbGhost/PasteVault/releases/download/v1.1.1/PasteVault_v1.1.1_Universal.dmg) и перенести `Paste Vault.app` в `/Applications`.
 
 ### Быстрый старт из исходников
 

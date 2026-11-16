@@ -1,5 +1,44 @@
 # Changelog / История изменений
 
+## [1.1.1] - 2026-11-15
+
+### 🇷🇺 Русский
+
+**Исправлено:**
+* **Сохранение картинок после перезапуска** — скриншоты и изображения сохраняются в `Screenshots/` и загружаются с диска при старте; синтетическая заглушка полностью удалена из рабочего кода.
+* **Полный экспорт и импорт настроек** — в резервные копии добавлены автозапуск при входе, тактильный клик и автопроверка обновлений; тема и шрифт применяются сразу с первой попытки.
+* **Автоперезапуск после обновления** — надёжный фоновый перезапуск с автоматическим открытием окна PasteVault после установки обновления.
+
+**Улучшено:**
+* **Иконка PasteVault на установочном `.dmg`-диске** — том `PasteVault v1.1.1` оформлен фирменной иконкой `.VolumeIcon.icns`.
+
+**Совместимость:** Работает на macOS 14 и новее, на процессорах Apple Silicon (серия M) и Intel (Universal Binary).
+
+<details>
+<summary><b>🇬🇧 English (click to expand)</b></summary>
+<br>
+
+**Fixed:**
+* **Persistent clipboard images across restarts** — screenshots and images are saved to `Screenshots/` and reloaded from disk on launch; synthetic preview fallback has been removed from production code.
+* **Complete settings export & import** — added Launch at Login, taptic audio clicks, and auto-check updates to backups; theme and font now apply immediately on the first try.
+* **In-app update relaunch** — detached background relaunch now cleanly restarts PasteVault and opens its main window automatically.
+
+**Improved:**
+* **Branded `.dmg` volume icon** — the `PasteVault v1.1.1` disk image volume includes `.VolumeIcon.icns`.
+
+**Compatibility:** Runs on macOS 14 and up, on Apple Silicon and Intel (Universal Binary).
+
+</details>
+
+### 🔐 Checksums (`SHA-256`)
+
+| File | Size | SHA-256 |
+| :--- | :--- | :--- |
+| **`PasteVault_v1.1.1_Universal.dmg`** | `16.4 MB` | `c7dad0f78d4180da45487fd5d7d5a1c12d6fc87ec165ea1cb0fc815bd9a3efb7` |
+| **`PasteVault_v1.1.1_Universal.zip`** | `11.4 MB` | `86d0a898b6544858fc1e3d4b3ffd0fefd5f53cc248414621280456e4f22f12c9` |
+
+---
+
 ## [1.1.0] - 2026-11-15
 
 ### 🇷🇺 Русский
