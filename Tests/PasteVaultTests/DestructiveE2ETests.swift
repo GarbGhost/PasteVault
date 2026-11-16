@@ -848,8 +848,8 @@ final class DestructiveE2ETests: XCTestCase {
         // проверяем также для clearHistory (опасное действие может быть привязано на одну букву 'A'!)
         let bareA = KeyCombo(keyCode: 0, modifiers: 0, displayString: "A")
         let togglePanelBare = sm.validate(combo: bareA, for: .togglePanel, in: .ru)
-        if case .systemReserved = togglePanelBare { } else {
-            XCTFail("Для togglePanel одиночная клавиша без модификаторов должна отклоняться")
+        if case .missingModifier("A") = togglePanelBare { } else {
+            XCTFail("Для togglePanel одиночная клавиша без модификаторов должна отклоняться как .missingModifier(\"A\"), получено: \(togglePanelBare)")
         }
         let clearHistoryBare = sm.validate(combo: bareA, for: .clearHistory, in: .ru)
         if case .valid = clearHistoryBare {
@@ -1075,8 +1075,14 @@ final class DestructiveE2ETests: XCTestCase {
         }
 
         // Проверяем: при включённом appLanguage == "en" не просачиваются ли русские строки в моделях/теговых хелперах
-        let enTags = SmartClassifier.tags(for: "#AABBCC", contentType: .color, isSensitive: false)
-        XCTAssertTrue(enTags.contains("Color"), "В EN тег цвета должен быть 'Color', получено: \(enTags)")
+        let colorTags = SmartClassifier.tags(for: "#AABBCC", contentType: .color, isSensitive: false, language: .en)
+        XCTAssertFalse(colorTags.contains("Color") || colorTags.contains("Цвет"), "У карточки цвета не должно быть дублирующего тега Color/Цвет: \(colorTags)")
+
+        let enUtmTags = SmartClassifier.tags(for: "https://example.com/?utm_source=1", contentType: .url, isSensitive: false, language: .en)
+        XCTAssertTrue(enUtmTags.contains("#UTM-tracker"), "В EN тег ссылки должен быть '#UTM-tracker', получено: \(enUtmTags)")
+
+        let enFileTags = SmartClassifier.tags(for: "[File: demo.pdf]", contentType: .file, isSensitive: false, language: .en)
+        XCTAssertTrue(enFileTags.contains("#File"), "В EN тег файла должен быть '#File', получено: \(enFileTags)")
 
         let macroExpandedEn = SnippetMacroEngine.expand(
             "App={{app}} Day={{weekday}}",

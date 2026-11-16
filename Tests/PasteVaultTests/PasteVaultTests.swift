@@ -910,10 +910,12 @@ final class PasteVaultTests: XCTestCase {
         XCTAssertEqual(cfg.quickPasteDigit(event: azertyDigit2Event), 2)
 
         let bareSpace = KeyCombo(keyCode: 49, modifiers: 0, displayString: "Space")
-        if case .systemReserved = ShortcutManager.shared.validate(combo: bareSpace, for: .togglePanel, in: .en) {
-            // Expected
+        let bareResult = ShortcutManager.shared.validate(combo: bareSpace, for: .togglePanel, in: .en)
+        if case .missingModifier("Space") = bareResult {
+            XCTAssertEqual(bareResult.message(in: .en), "[Space] requires a modifier key (⌘, ⌥, or ⌃)")
+            XCTAssertEqual(bareResult.message(in: .ru), "Клавиша [Space] не подходит — добавьте ⌘, ⌥ или ⌃")
         } else {
-            XCTFail("Global .togglePanel without modifiers must fail validation")
+            XCTFail("Global .togglePanel without modifiers must fail as .missingModifier(\"Space\"), got: \(bareResult)")
         }
     }
 
@@ -997,5 +999,223 @@ final class PasteVaultTests: XCTestCase {
 
         try await DatabaseManager.shared.deleteItem(id: captured2.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: savedFileURL2.path), "Deleting clipboard item must delete its PNG from Screenshots/")
+    }
+
+    // MARK: - Этап 5: Валидация, запись и гарантированный возврат глобального хоткея (v1.1.2)
+    @MainActor
+    func testShortcutValidationSeparatesMissingModifierSystemReservedAndConflicts() {
+        let sm = ShortcutManager.shared
+        sm.resetToDefaults()
+        defer { sm.resetToDefaults() }
+
+        // 1. Клавиши без модификатора (V / Space) НЕ должны помечаться «Зарезервировано macOS»
+        let bareV = KeyCombo(keyCode: 9, modifiers: 0, displayString: "V")
+        let resBareV = sm.validate(combo: bareV, for: .openPassGen, in: .ru)
+        XCTAssertEqual(resBareV, .missingModifier("V"))
+        XCTAssertEqual(resBareV.message(in: .ru), "Клавиша [V] не подходит — добавьте ⌘, ⌥ или ⌃")
+        XCTAssertEqual(resBareV.message(in: .en), "[V] requires a modifier key (⌘, ⌥, or ⌃)")
+        XCTAssertFalse(resBareV.message(in: .ru).contains("macOS"))
+
+        let bareSpace = KeyCombo(keyCode: 49, modifiers: 0, displayString: "Space")
+        let resBareSpace = sm.validate(combo: bareSpace, for: .openSnippets, in: .ru)
+        XCTAssertEqual(resBareSpace, .missingModifier("Space"))
+        XCTAssertEqual(resBareSpace.message(in: .ru), "Клавиша [Space] не подходит — добавьте ⌘, ⌥ или ⌃")
+
+        // 2. Реально зарезервированные комбинации macOS возвращаются с указанием конкретной комбинации
+        let reservedCases: [(UInt16, String)] = [
+            (49, "⌘Space"), (48, "⌘Tab"), (12, "⌘Q"), (13, "⌘W"), (4, "⌘H"), (46, "⌘M")
+        ]
+        for (code, display) in reservedCases {
+            let combo = KeyCombo(keyCode: code, modifiers: NSEvent.ModifierFlags.command.rawValue, displayString: display)
+            let res = sm.validate(combo: combo, for: .openSettings, in: .ru)
+            XCTAssertEqual(res, .systemReserved(display))
+            XCTAssertEqual(res.message(in: .ru), "Комбинация \(display) занята системой macOS")
+            XCTAssertEqual(res.message(in: .en), "\(display) is reserved by macOS")
+        }
+
+        // 3. Корректные сочетания с модификаторами (⌥Z, ⌃Space, ⌘⇧V) спокойно принимаются
+        let optZ = KeyCombo(keyCode: 6, modifiers: NSEvent.ModifierFlags.option.rawValue, displayString: "⌥Z")
+        XCTAssertEqual(sm.validate(combo: optZ, for: .togglePin, in: .ru), .valid)
+
+        let ctrlSpace = KeyCombo(keyCode: 49, modifiers: NSEvent.ModifierFlags.control.rawValue, displayString: "⌃Space")
+        XCTAssertEqual(sm.validate(combo: ctrlSpace, for: .togglePanel, in: .ru), .valid)
+
+        let cmdShiftV = KeyCombo(
+            keyCode: 9,
+            modifiers: NSEvent.ModifierFlags([.command, .shift]).rawValue,
+            displayString: "⌘⇧V"
+        )
+        XCTAssertEqual(sm.validate(combo: cmdShiftV, for: .togglePanel, in: .en), .valid)
+
+        // 4. Внутренний конфликт указывает и комбинацию, и занятую команду
+        let existingTogglePanel = sm.config.togglePanel
+        let conflictRes = sm.validate(combo: existingTogglePanel, for: .openPassGen, in: .ru)
+        XCTAssertEqual(
+            conflictRes,
+            .internalConflict(
+                combo: existingTogglePanel.displayString,
+                command: .togglePanel,
+                commandName: ShortcutCommand.togglePanel.title(in: .ru)
+            )
+        )
+        XCTAssertEqual(
+            conflictRes.message(in: .ru),
+            "Комбинация \(existingTogglePanel.displayString) уже используется для «\(ShortcutCommand.togglePanel.title(in: .ru))»"
+        )
+        let conflictResEn = sm.validate(combo: existingTogglePanel, for: .openPassGen, in: .en)
+        XCTAssertEqual(
+            conflictResEn,
+            .internalConflict(
+                combo: existingTogglePanel.displayString,
+                command: .togglePanel,
+                commandName: ShortcutCommand.togglePanel.title(in: .en)
+            )
+        )
+        XCTAssertEqual(
+            conflictResEn.message(in: .en),
+            "\(existingTogglePanel.displayString) is already assigned to \"\(ShortcutCommand.togglePanel.title(in: .en))\""
+        )
+    }
+
+    @MainActor
+    func testShortcutRecordingCapturesValidComboRejectsInvalidAndRestoresGlobalHotkeyOnCancel() throws {
+        let sm = ShortcutManager.shared
+        sm.resetToDefaults()
+        defer { sm.resetToDefaults() }
+
+        var startNotifications = 0
+        var stopNotifications = 0
+        let startObs = NotificationCenter.default.addObserver(
+            forName: ShortcutManager.recordingDidStartNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            startNotifications += 1
+        }
+        let stopObs = NotificationCenter.default.addObserver(
+            forName: ShortcutManager.recordingDidStopNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            stopNotifications += 1
+        }
+        defer {
+            NotificationCenter.default.removeObserver(startObs)
+            NotificationCenter.default.removeObserver(stopObs)
+        }
+
+        let originalToggleCombo = sm.config.togglePanel
+
+        // Запускаем запись для togglePanel
+        sm.startRecording(for: .togglePanel)
+        XCTAssertTrue(sm.isRecordingShortcut)
+        XCTAssertEqual(sm.recordingCommand, .togglePanel)
+        XCTAssertEqual(startNotifications, 1)
+
+        // 1. Нажатие одиночной 'V' без модификатора: остаёмся в режиме записи, ошибка .missingModifier("V")
+        let bareVEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "v",
+                charactersIgnoringModifiers: "v",
+                isARepeat: false,
+                keyCode: 9
+            )
+        )
+        XCTAssertNil(sm.handleRecordingMonitorEvent(bareVEvent))
+        XCTAssertTrue(sm.isRecordingShortcut, "Invalid combo without modifier must keep recording open")
+        XCTAssertEqual(sm.validationFeedback?.command, .togglePanel)
+        XCTAssertEqual(sm.validationFeedback?.result, .missingModifier("V"))
+
+        // 2. Нажатие Esc: отменяет запись, очищает ошибку и гарантированно уведомляет о возврате глобального хоткея
+        let escEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "\u{1b}",
+                charactersIgnoringModifiers: "\u{1b}",
+                isARepeat: false,
+                keyCode: 53
+            )
+        )
+        XCTAssertNil(sm.handleRecordingMonitorEvent(escEvent))
+        XCTAssertFalse(sm.isRecordingShortcut)
+        XCTAssertNil(sm.recordingCommand)
+        XCTAssertNil(sm.validationFeedback)
+        XCTAssertEqual(sm.config.togglePanel, originalToggleCombo)
+        XCTAssertEqual(stopNotifications, 1)
+
+        // 3. Повторно запускаем запись и пробуем зарезервированную ⌘Space, затем корректную ⌥Z
+        sm.startRecording(for: .togglePanel)
+        XCTAssertEqual(startNotifications, 2)
+
+        let cmdSpaceEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.command],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: " ",
+                charactersIgnoringModifiers: " ",
+                isARepeat: false,
+                keyCode: 49
+            )
+        )
+        XCTAssertNil(sm.handleRecordingMonitorEvent(cmdSpaceEvent))
+        XCTAssertTrue(sm.isRecordingShortcut)
+        XCTAssertEqual(sm.validationFeedback?.result, .systemReserved("⌘Space"))
+
+        let optZEvent = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.option],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "я",
+                charactersIgnoringModifiers: "я",
+                isARepeat: false,
+                keyCode: 6
+            )
+        )
+        XCTAssertNil(sm.handleRecordingMonitorEvent(optZEvent))
+        XCTAssertFalse(sm.isRecordingShortcut)
+        XCTAssertNil(sm.recordingCommand)
+        XCTAssertNil(sm.validationFeedback)
+        XCTAssertEqual(sm.config.togglePanel.keyCode, 6)
+        XCTAssertEqual(sm.config.togglePanel.modifierFlags, [.option])
+        XCTAssertEqual(sm.config.togglePanel.displayString, "⌥Z")
+        XCTAssertEqual(stopNotifications, 2)
+    }
+
+    @MainActor
+    func testColorCardsDoNotAddOrDisplayDuplicateColorTag() {
+        XCTAssertEqual(SmartClassifier.classify(text: "#778855", isSensitive: false), .color)
+        let ruTags = SmartClassifier.tags(for: "#778855", contentType: .color, isSensitive: false, language: .ru)
+        let enTags = SmartClassifier.tags(for: "#778855", contentType: .color, isSensitive: false, language: .en)
+        XCTAssertFalse(ruTags.contains("Цвет") || ruTags.contains("Color"))
+        XCTAssertFalse(enTags.contains("Color") || enTags.contains("Цвет"))
+
+        // Даже если в истории от предыдущих версий остался тег «Цвет» / «Color», карточка его не дублирует
+        let filteredRu = ClipboardRowCardView.visibleTags(for: ["Цвет", "Color"], contentType: .color, in: .ru)
+        let filteredEn = ClipboardRowCardView.visibleTags(for: ["Цвет", "Color"], contentType: .color, in: .en)
+        XCTAssertTrue(filteredRu.isEmpty)
+        XCTAssertTrue(filteredEn.isEmpty)
+
+        // Обычные полезные теги (#OCR, #Swift) сохраняются
+        let imageTags = ClipboardRowCardView.visibleTags(for: ["#OCR"], contentType: .image, in: .ru)
+        XCTAssertEqual(imageTags, ["#OCR"])
     }
 }
