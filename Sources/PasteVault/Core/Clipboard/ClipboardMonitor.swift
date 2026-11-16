@@ -125,9 +125,11 @@ public final class ClipboardMonitor: ObservableObject {
     }
 
     // MARK: - Автозапуск при входе (Launch at Login)
-    @Published public var isLaunchAtLoginEnabled: Bool = LaunchAtLoginManager.shared.isEnabled {
+    @Published public var isLaunchAtLoginEnabled: Bool = (DatabaseManager.isRunningTests ? false : LaunchAtLoginManager.shared.isEnabled) {
         didSet {
-            LaunchAtLoginManager.shared.isEnabled = isLaunchAtLoginEnabled
+            if !DatabaseManager.isRunningTests {
+                LaunchAtLoginManager.shared.isEnabled = isLaunchAtLoginEnabled
+            }
         }
     }
 
@@ -170,7 +172,7 @@ public final class ClipboardMonitor: ObservableObject {
         cachedStorageSize = formatter.string(fromByteCount: max(totalBytes, 1024))
     }
 
-    /// Получение изображения из кэша NSCache или декодирование с кэшированием
+    /// Получение изображения из кэша NSCache, памяти или файла на диске в Screenshots/
     public func imageForItem(_ item: ClipboardItemRow) -> NSImage? {
         let key = item.id as NSString
         if let cached = imageCache.object(forKey: key) {
@@ -184,10 +186,13 @@ public final class ClipboardMonitor: ObservableObject {
             imageCache.setObject(img, forKey: key)
             return img
         }
-        if item.effectiveContentType == .image {
-            let synth = Self.generateSyntheticScreenshotImage(label: item.textPreview)
-            imageCache.setObject(synth, forKey: key)
-            return synth
+        if item.effectiveContentType == .image || item.contentType == .image {
+            if let fileURL = DatabaseManager.safeScreenshotFileURL(for: item.fileURLPath, itemId: item.id),
+               let diskImg = NSImage(contentsOf: fileURL) {
+                imagePreviews[item.id] = diskImg
+                imageCache.setObject(diskImg, forKey: key)
+                return diskImg
+            }
         }
         return nil
     }
@@ -723,8 +728,11 @@ public final class ClipboardMonitor: ObservableObject {
                     imagePreviews[item.id] = icon
                 }
             } else if item.effectiveContentType == .image {
-                if imagePreviews[item.id] == nil {
-                    imagePreviews[item.id] = Self.generateSyntheticScreenshotImage(label: item.textPreview)
+                if imagePreviews[item.id] == nil,
+                   let fileURL = DatabaseManager.safeScreenshotFileURL(for: item.fileURLPath, itemId: item.id),
+                   let diskImage = NSImage(contentsOf: fileURL) {
+                    imagePreviews[item.id] = diskImage
+                    imageCache.setObject(diskImage, forKey: item.id as NSString)
                 }
             }
         }
@@ -1148,6 +1156,7 @@ public final class ClipboardMonitor: ObservableObject {
         let itemId = existingItem?.id ?? UUID().uuidString
         let isPinned = existingItem?.isPinned ?? false
         let cachedOCR = existingItem?.ocrText
+        let savedRelPath = DatabaseManager.saveClipboardScreenshotPNG(data: tiffData, itemId: itemId)
 
         let newRow = ClipboardItemRow(
             id: itemId,
@@ -1164,11 +1173,12 @@ public final class ClipboardMonitor: ObservableObject {
             expiresAt: nil,
             ocrText: cachedOCR,
             rawImageData: tiffData,
-            fileURLPath: nil,
+            fileURLPath: savedRelPath,
             useCount: existingItem?.useCount ?? 0
         )
 
         imagePreviews[itemId] = image
+        imageCache.setObject(image, forKey: itemId as NSString)
         items.removeAll { $0.contentHash == contentHash }
         items.insert(newRow, at: 0)
         applySortOrder()
@@ -1186,6 +1196,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isSensitive: false,
                 secretKind: nil,
                 ttlSeconds: nil,
+                fileURLPath: savedRelPath,
                 ocrText: cachedOCR
             )
             if cachedOCR == nil {
@@ -1230,6 +1241,7 @@ public final class ClipboardMonitor: ObservableObject {
         let sourceBundle = originalItem.sourceBundleId ?? "com.pastevault.app"
         let sourceApp = originalItem.sourceAppName ?? (isEn ? "Screenshot (Edited)" : "Снимок экрана (Разметка)")
         let ocr = originalItem.ocrText
+        let savedRelPath = DatabaseManager.saveClipboardScreenshotPNG(data: tiffData, itemId: itemId)
 
         let newRow = ClipboardItemRow(
             id: itemId,
@@ -1246,7 +1258,7 @@ public final class ClipboardMonitor: ObservableObject {
             expiresAt: nil,
             ocrText: ocr,
             rawImageData: tiffData,
-            fileURLPath: nil,
+            fileURLPath: savedRelPath,
             useCount: 0
         )
 
@@ -1291,7 +1303,9 @@ public final class ClipboardMonitor: ObservableObject {
                 sourceAppName: sourceApp,
                 isSensitive: false,
                 secretKind: nil,
-                ttlSeconds: nil
+                ttlSeconds: nil,
+                fileURLPath: savedRelPath,
+                ocrText: ocr
             )
         }
 
@@ -1371,7 +1385,7 @@ public final class ClipboardMonitor: ObservableObject {
             pasteboard.writeObjects(urls)
             let paths = item.fileURLs.map { $0.path }.joined(separator: "\n")
             pasteboard.setString(paths, forType: .string)
-        } else if let img = imagePreviews[item.id] ?? (item.contentType == .image ? (item.rawImageData.flatMap { NSImage(data: $0) }) : nil) {
+        } else if (item.effectiveContentType == .image || item.contentType == .image), let img = imageForItem(item) {
             // 2. Для картинок — помещаем данные изображения строго в формате .png (БЕЗ .tiff и БЕЗ writeObjects)
             var targetPNGData: Data? = nil
             if let rawData = item.rawImageData,
@@ -2016,6 +2030,7 @@ public final class ClipboardMonitor: ObservableObject {
     /// Заполняет историю эталонными записями всех 6 категорий и тегов и проверяет SmartClassifier + фильтрацию
     @discardableResult
     public func seedSyntheticSamples() -> String {
+        guard DatabaseManager.isRunningTests else { return "" }
         let now = Int64(Date().timeIntervalSince1970)
         let isEn = (AppDefaults.shared.string(forKey: "appLanguage") == "en")
 

@@ -4,9 +4,90 @@ import SQLite3
 import CryptoKit
 
 public enum AppDefaults {
+    nonisolated public static let testSuiteName: String? = {
+        guard DatabaseManager.isRunningTests else { return nil }
+        return "com.pastevault.tests.\(ProcessInfo.processInfo.processIdentifier)"
+    }()
+
+    nonisolated public static func preferencesDirectoryURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences", isDirectory: true)
+    }
+
+    nonisolated public static func removeTestPreferences(forSuiteName suiteName: String, preferencesDir: URL? = nil) {
+        guard suiteName.hasPrefix("com.pastevault.tests.") else { return }
+        if preferencesDir == nil {
+            if let suiteDefaults = UserDefaults(suiteName: suiteName) {
+                suiteDefaults.synchronize()
+                suiteDefaults.removePersistentDomain(forName: suiteName)
+                suiteDefaults.synchronize()
+            }
+            if let keys = CFPreferencesCopyKeyList(suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) {
+                CFPreferencesSetMultiple(nil, keys, suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+            }
+            CFPreferencesSynchronize(suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        }
+
+        let fm = FileManager.default
+        let prefsDir = preferencesDir ?? preferencesDirectoryURL()
+        let plistURL = prefsDir.appendingPathComponent("\(suiteName).plist")
+        if fm.fileExists(atPath: plistURL.path) {
+            try? fm.removeItem(at: plistURL)
+        }
+        if let entries = try? fm.contentsOfDirectory(at: prefsDir, includingPropertiesForKeys: nil) {
+            for entry in entries where entry.lastPathComponent.hasPrefix("\(suiteName).plist") {
+                try? fm.removeItem(at: entry)
+            }
+        }
+    }
+
+    nonisolated public static func cleanupOrphanedTestPreferences(
+        currentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        preferencesDir: URL? = nil
+    ) {
+        let fm = FileManager.default
+        let prefsDir = preferencesDir ?? preferencesDirectoryURL()
+        guard let entries = try? fm.contentsOfDirectory(at: prefsDir, includingPropertiesForKeys: nil) else { return }
+        for entry in entries {
+            let name = entry.lastPathComponent
+            guard name.hasPrefix("com.pastevault.tests."), name.hasSuffix(".plist") else { continue }
+            let suiteName = String(name.dropLast(".plist".count))
+            let pidString = String(suiteName.dropFirst("com.pastevault.tests.".count))
+            guard let oldPid = Int32(pidString), oldPid != currentPID else { continue }
+            if kill(oldPid, 0) != 0 && errno == ESRCH {
+                removeTestPreferences(forSuiteName: suiteName, preferencesDir: prefsDir)
+            }
+        }
+    }
+
+    private static let testDefaultsCleanupRegistered: Void = {
+        guard let suiteName = testSuiteName else { return }
+        cleanupOrphanedTestPreferences(currentPID: ProcessInfo.processInfo.processIdentifier)
+        atexit {
+            guard let suite = AppDefaults.testSuiteName else { return }
+            AppDefaults.removeTestPreferences(forSuiteName: suite)
+            let plistPath = AppDefaults.preferencesDirectoryURL().appendingPathComponent("\(suite).plist").path
+            let pidStr = "\(ProcessInfo.processInfo.processIdentifier)"
+            let reaper = Process()
+            reaper.executableURL = URL(fileURLWithPath: "/bin/sh")
+            reaper.arguments = [
+                "-c",
+                "nohup /bin/sh -c 'while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.05; done; /bin/sleep 0.25; /bin/rm -f \"$2\"*; /bin/sleep 2.0; /bin/rm -f \"$2\"*' _ \"$1\" \"$2\" >/dev/null 2>&1 </dev/null &",
+                "pv-test-prefs-reaper",
+                pidStr,
+                plistPath
+            ]
+            reaper.standardInput = FileHandle.nullDevice
+            reaper.standardOutput = FileHandle.nullDevice
+            reaper.standardError = FileHandle.nullDevice
+            try? reaper.run()
+        }
+        _ = suiteName
+    }()
+
     nonisolated public static let shared: UserDefaults = {
-        if DatabaseManager.isRunningTests {
-            let suiteName = "com.pastevault.tests.\(ProcessInfo.processInfo.processIdentifier)"
+        if let suiteName = testSuiteName {
+            _ = testDefaultsCleanupRegistered
             return UserDefaults(suiteName: suiteName) ?? .standard
         }
         return .standard
@@ -705,7 +786,95 @@ public actor DatabaseManager {
         _ = sqlite3_step(stmt)
     }
 
-    nonisolated private static func isSafeAllowedClipboardMediaURL(_ candidateURL: URL) -> Bool {
+    nonisolated public static func screenshotsDirectoryURL() throws -> URL {
+        let supportDir = try Self.pasteVaultSupportDirectory()
+        let screenshotsDir = supportDir.appendingPathComponent("Screenshots", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: screenshotsDir.path) {
+            try FileManager.default.createDirectory(
+                at: screenshotsDir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        return screenshotsDir
+    }
+
+    nonisolated private static func sanitizedClipboardMediaItemId(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains(".."),
+              !trimmed.contains("\0") else {
+            return nil
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        guard trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }), trimmed.count <= 128 else {
+            return nil
+        }
+        return trimmed
+    }
+
+    nonisolated public static func saveClipboardScreenshotPNG(data: Data, itemId: String) -> String? {
+        guard let safeId = sanitizedClipboardMediaItemId(itemId),
+              let screenshotsDir = try? screenshotsDirectoryURL() else {
+            return nil
+        }
+        let pngData: Data
+        let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        if data.count >= 8 && Array(data.prefix(8)) == pngSignature {
+            pngData = data
+        } else if let rep = NSBitmapImageRep(data: data),
+                  let converted = rep.representation(using: .png, properties: [:]) {
+            pngData = converted
+        } else {
+            return nil
+        }
+        let targetURL = screenshotsDir.appendingPathComponent("\(safeId).png")
+        guard isSafeAllowedClipboardMediaURL(targetURL) else { return nil }
+        do {
+            try pngData.write(to: targetURL, options: .atomic)
+            return "Screenshots/\(safeId).png"
+        } catch {
+            return nil
+        }
+    }
+
+    nonisolated public static func safeScreenshotFileURL(for fileURLPath: String?, itemId: String) -> URL? {
+        guard let supportDir = try? Self.pasteVaultSupportDirectory() else { return nil }
+        let fm = FileManager.default
+
+        if let rawPath = fileURLPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawPath.isEmpty,
+           !rawPath.contains("\0") {
+            let parts = rawPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            if !parts.contains("..") {
+                let candidateURL: URL
+                if rawPath.hasPrefix("/") {
+                    candidateURL = URL(fileURLWithPath: rawPath)
+                } else {
+                    candidateURL = supportDir.appendingPathComponent(rawPath)
+                }
+                if !candidateURL.pathComponents.contains(".."),
+                   isSafeAllowedClipboardMediaURL(candidateURL),
+                   fm.fileExists(atPath: candidateURL.path) {
+                    return candidateURL
+                }
+            }
+        }
+
+        if let safeId = sanitizedClipboardMediaItemId(itemId) {
+            let fallbackURL = supportDir
+                .appendingPathComponent("Screenshots", isDirectory: true)
+                .appendingPathComponent("\(safeId).png")
+            if isSafeAllowedClipboardMediaURL(fallbackURL), fm.fileExists(atPath: fallbackURL.path) {
+                return fallbackURL
+            }
+        }
+        return nil
+    }
+
+    nonisolated public static func isSafeAllowedClipboardMediaURL(_ candidateURL: URL) -> Bool {
         guard let supportDir = try? Self.pasteVaultSupportDirectory() else { return false }
         let fileName = candidateURL.lastPathComponent
         guard !fileName.isEmpty,
@@ -737,7 +906,9 @@ public actor DatabaseManager {
            !rawPath.contains("\0") {
             let parts = rawPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             if !parts.contains("..") {
-                let candidateURL = URL(fileURLWithPath: rawPath)
+                let candidateURL = rawPath.hasPrefix("/")
+                    ? URL(fileURLWithPath: rawPath)
+                    : supportDir.appendingPathComponent(rawPath)
                 if !candidateURL.pathComponents.contains(".."),
                    isSafeAllowedClipboardMediaURL(candidateURL),
                    fm.fileExists(atPath: candidateURL.path) {
