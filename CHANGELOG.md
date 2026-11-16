@@ -1,5 +1,40 @@
 # Changelog / История изменений
 
+## [1.1.2] - 2026-11-16
+
+### 🇷🇺 Русский
+
+**Исправлено:**
+* **Запись горячих клавиш с первого раза** — нажатия клавиш теперь сразу захватываются после нажатия «Задать» без необходимости сворачивать или заново открывать окно. При отмене по `Esc`, клике вне окна или переключении вкладок рабочие комбинации (включая глобальное сочетание вызова PasteVault) автоматически восстанавливаются.
+* **Понятные подсказки при выборе клавиш** — разделены предупреждения для клавиш без модификатора (`⌘`, `⌥`, `⌃`), системных сочетаний macOS и уже занятых команд в PasteVault с указанием конкретной комбинации.
+* **Читаемая вёрстка в «Настройки → Клавиши»** — название действия слева больше не обрезается при появлении предупреждения, а текст подсказки выводится целиком отдельной строкой под карточкой клавиши.
+* **Карточки цвета без дублирующего тега** — убран повторяющийся тег «Цвет» / «Color» на карточках цвета в истории буфера обмена.
+
+**Совместимость:** Работает на macOS 14 и новее, на процессорах Apple Silicon (серия M) и Intel (Universal Binary).
+
+<details>
+<summary><b>🇬🇧 English (click to expand)</b></summary>
+<br>
+
+**Fixed:**
+* **Reliable shortcut recording on the first try** — key presses are now captured immediately after clicking Record without needing to minimize or reopen the window. Cancelling with `Esc`, clicking outside, or switching tabs automatically restores working shortcuts, including the global PasteVault panel hotkey.
+* **Clear shortcut validation hints** — separated guidance for keys missing a required modifier (`⌘`, `⌥`, or `⌃`), macOS-reserved combinations, and conflicts with other PasteVault actions, always showing the exact keys pressed.
+* **Readable shortcut rows** — action titles in Settings → Shortcuts no longer shrink when a warning appears, and validation messages display in full on a dedicated line beneath the row.
+* **Single category badge on color items** — removed the duplicate "Color" tag badge from color entries in clipboard history.
+
+**Compatibility:** Runs on macOS 14 and up, on Apple Silicon and Intel (Universal Binary).
+
+</details>
+
+### 🔐 Checksums (`SHA-256`)
+
+| File | Size | SHA-256 |
+| :--- | :--- | :--- |
+| **`PasteVault_v1.1.2_Universal.dmg`** | `16.5 MB` | `7711d007111ba6c43da8ed384c994a95f3dbb183929bab0b08c9c980b56f9a50` |
+| **`PasteVault_v1.1.2_Universal.zip`** | `11.5 MB` | `13acf701f6ab9d287a4ea374c2fcf5f542f44d073def27f075065ebf87dc9307` |
+
+---
+
 ## [1.1.1] - 2026-11-15
 
 ### 🇷🇺 Русский
