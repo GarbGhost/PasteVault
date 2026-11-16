@@ -489,6 +489,7 @@ public struct SnippetDeckCardView: View {
     @State private var isPinHovered: Bool = false
     @State private var isHoveringCategoryBadge: Bool = false
     @State private var isHeaderImagePopoverPresented: Bool = false
+    @ObservedObject private var fontManager = FontManager.shared
 
     public init(
         snippet: QuickSnippetItem,
@@ -565,6 +566,7 @@ public struct SnippetDeckCardView: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         let isFront = (depth == 0)
         let isLightTheme = currentTheme.isLight
         let continuousLiftY: CGFloat = (isContinuousScrolling && depth > 0) ? -4 : 0

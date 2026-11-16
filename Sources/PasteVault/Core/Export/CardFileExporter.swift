@@ -488,6 +488,7 @@ public struct CardExportFormatPicker: View {
     public let language: AppLanguage
     public let recommendedFormat: CardExportFormat?
     public let onSelect: (CardExportFormat) -> Void
+    @ObservedObject private var fontManager = FontManager.shared
 
     public init(
         theme: AppTheme,
@@ -504,6 +505,7 @@ public struct CardExportFormatPicker: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.down.doc")

@@ -133,6 +133,30 @@ public struct BackupAppearanceAndStorage: Codable, Equatable, Sendable {
     public var saveFiles: Bool?
     public var saveImages: Bool?
     public var saveText: Bool?
+    public var soundEnabled: Bool?
+    public var autoCheckUpdates: Bool?
+    public var launchAtLogin: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case selectedThemeId, userGlassLevel, selectedFontId, appLanguage
+        case historyLimit, saveFiles, saveImages, saveText
+        case soundEnabled, autoCheckUpdates, launchAtLogin
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.selectedThemeId = try container.decodeIfPresent(String.self, forKey: .selectedThemeId)
+        self.userGlassLevel = try container.decodeIfPresent(Double.self, forKey: .userGlassLevel)
+        self.selectedFontId = try container.decodeIfPresent(String.self, forKey: .selectedFontId)
+        self.appLanguage = try container.decodeIfPresent(String.self, forKey: .appLanguage)
+        self.historyLimit = try container.decodeIfPresent(Int.self, forKey: .historyLimit)
+        self.saveFiles = try container.decodeIfPresent(Bool.self, forKey: .saveFiles)
+        self.saveImages = try container.decodeIfPresent(Bool.self, forKey: .saveImages)
+        self.saveText = try container.decodeIfPresent(Bool.self, forKey: .saveText)
+        self.soundEnabled = try container.decodeIfPresent(Bool.self, forKey: .soundEnabled)
+        self.autoCheckUpdates = try container.decodeIfPresent(Bool.self, forKey: .autoCheckUpdates)
+        self.launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin)
+    }
 
     public init(
         selectedThemeId: String? = nil,
@@ -142,7 +166,10 @@ public struct BackupAppearanceAndStorage: Codable, Equatable, Sendable {
         historyLimit: Int? = nil,
         saveFiles: Bool? = nil,
         saveImages: Bool? = nil,
-        saveText: Bool? = nil
+        saveText: Bool? = nil,
+        soundEnabled: Bool? = nil,
+        autoCheckUpdates: Bool? = nil,
+        launchAtLogin: Bool? = nil
     ) {
         self.selectedThemeId = selectedThemeId
         self.userGlassLevel = userGlassLevel
@@ -152,6 +179,9 @@ public struct BackupAppearanceAndStorage: Codable, Equatable, Sendable {
         self.saveFiles = saveFiles
         self.saveImages = saveImages
         self.saveText = saveText
+        self.soundEnabled = soundEnabled
+        self.autoCheckUpdates = autoCheckUpdates
+        self.launchAtLogin = launchAtLogin
     }
 }
 
@@ -174,7 +204,7 @@ public struct BackupSettingsPayload: Codable, Equatable, Sendable {
 public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
     public var version: Int = 1
     public var createdAt: Date = Date()
-    public var appVersion: String = "1.1.0"
+    public var appVersion: String = "1.1.1"
     public var clipboardItems: [BackupClipboardItem]?
     public var snippets: [QuickSnippetItem]?
     public var snippetCategories: [SnippetCategoryRecord]?
@@ -183,7 +213,7 @@ public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
     public init(
         version: Int = 1,
         createdAt: Date = Date(),
-        appVersion: String = "1.1.0",
+        appVersion: String = "1.1.1",
         clipboardItems: [BackupClipboardItem]? = nil,
         snippets: [QuickSnippetItem]? = nil,
         snippetCategories: [SnippetCategoryRecord]? = nil,
@@ -206,7 +236,7 @@ public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
-        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.1.0"
+        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.1.1"
         self.clipboardItems = try container.decodeIfPresent([BackupClipboardItem].self, forKey: .clipboardItems)
         self.snippets = try container.decodeIfPresent([QuickSnippetItem].self, forKey: .snippets)
         self.snippetCategories = try container.decodeIfPresent([SnippetCategoryRecord].self, forKey: .snippetCategories)
@@ -247,11 +277,8 @@ public enum BackupManager {
 
     private static func readDiskPNGData(for item: ClipboardItemRow) -> Data? {
         let fm = FileManager.default
-        if let filePath = item.fileURLPath?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !filePath.isEmpty,
-           !filePath.contains(".."),
-           fm.fileExists(atPath: filePath),
-           let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)),
+        if let safeURL = DatabaseManager.safeScreenshotFileURL(for: item.fileURLPath, itemId: item.id),
+           let data = try? Data(contentsOf: safeURL),
            !data.isEmpty {
             return data
         }
@@ -268,6 +295,58 @@ public enum BackupManager {
             }
         }
         return nil
+    }
+
+    @MainActor
+    public static func captureSettings(
+        monitor: ClipboardMonitor,
+        includeBlacklist: Bool,
+        includeShortcuts: Bool,
+        includeAppearance: Bool
+    ) -> BackupSettingsPayload? {
+        guard includeBlacklist || includeShortcuts || includeAppearance else { return nil }
+        var payload = BackupSettingsPayload()
+        if includeBlacklist {
+            payload.blacklistedBundleIDs = monitor.blacklistedBundleIDs
+        }
+        if includeShortcuts {
+            payload.shortcutsData = try? JSONEncoder().encode(ShortcutManager.shared.config)
+        }
+        if includeAppearance {
+            let defaults = AppDefaults.shared
+            let theme = defaults.string(forKey: "selectedThemeId")
+                ?? defaults.string(forKey: "pasteVaultTheme")
+                ?? AppTheme.obsidian.rawValue
+            let glass = defaults.object(forKey: "userGlassLevel") != nil
+                ? defaults.double(forKey: "userGlassLevel")
+                : 0.70
+            let font = defaults.string(forKey: "selectedFontId") ?? AppFont.default.rawValue
+            let lang = defaults.string(forKey: "appLanguage") ?? AppLanguage.ru.rawValue
+            let sound = defaults.object(forKey: "tapticAudioFeedbackEnabled") != nil
+                ? defaults.bool(forKey: "tapticAudioFeedbackEnabled")
+                : true
+            let autoUpdates = defaults.object(forKey: "autoCheckUpdates") != nil
+                ? defaults.bool(forKey: "autoCheckUpdates")
+                : UpdateService.shared.autoCheckUpdates
+            let launch = DatabaseManager.isRunningTests
+                ? monitor.isLaunchAtLoginEnabled
+                : LaunchAtLoginManager.shared.isEnabled
+
+            payload.appearanceAndStorage = BackupAppearanceAndStorage(
+                selectedThemeId: theme,
+                userGlassLevel: glass,
+                selectedFontId: font,
+                appLanguage: lang,
+                historyLimit: monitor.maxHistoryLimit,
+                saveFiles: monitor.saveFilesEnabled,
+                saveImages: monitor.saveImagesEnabled,
+                saveText: monitor.saveTextEnabled,
+                soundEnabled: sound,
+                autoCheckUpdates: autoUpdates,
+                launchAtLogin: launch
+            )
+        }
+        return payload
     }
 
     /// Формирует архив резервной копии на основе выбранных пользователем категорий
@@ -305,7 +384,7 @@ public enum BackupManager {
                         } else {
                             base64Img = diskData.base64EncodedString()
                         }
-                    } else if let img = monitor.imagePreviews[item.id] ?? monitor.imageForItem(item),
+                    } else if let img = monitor.imagePreviews[item.id],
                               let tiff = img.tiffRepresentation,
                               let bitmap = NSBitmapImageRep(data: tiff),
                               let png = bitmap.representation(using: .png, properties: [:]) {
@@ -330,34 +409,17 @@ public enum BackupManager {
             archiveCategories = snippetCategories
         }
 
-        var settingsPayload: BackupSettingsPayload? = nil
-        if includeBlacklist || includeShortcuts || includeAppearance {
-            var payload = BackupSettingsPayload()
-            if includeBlacklist {
-                payload.blacklistedBundleIDs = monitor.blacklistedBundleIDs
-            }
-            if includeShortcuts {
-                payload.shortcutsData = try? JSONEncoder().encode(ShortcutManager.shared.config)
-            }
-            if includeAppearance {
-                payload.appearanceAndStorage = BackupAppearanceAndStorage(
-                    selectedThemeId: AppDefaults.shared.string(forKey: "selectedThemeId"),
-                    userGlassLevel: AppDefaults.shared.double(forKey: "userGlassLevel"),
-                    selectedFontId: AppDefaults.shared.string(forKey: "selectedFontId"),
-                    appLanguage: AppDefaults.shared.string(forKey: "appLanguage"),
-                    historyLimit: monitor.maxHistoryLimit,
-                    saveFiles: monitor.saveFilesEnabled,
-                    saveImages: monitor.saveImagesEnabled,
-                    saveText: monitor.saveTextEnabled
-                )
-            }
-            settingsPayload = payload
-        }
+        let settingsPayload = captureSettings(
+            monitor: monitor,
+            includeBlacklist: includeBlacklist,
+            includeShortcuts: includeShortcuts,
+            includeAppearance: includeAppearance
+        )
 
         return PasteVaultBackupArchive(
             version: 2,
             createdAt: Date(),
-            appVersion: (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0",
+            appVersion: (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.1",
             clipboardItems: archiveItems,
             snippets: archiveSnippets,
             snippetCategories: archiveCategories,
@@ -563,10 +625,10 @@ public enum BackupManager {
             }
         }
 
-        // 3. Восстановление настроек и чёрного списка
+        // 3. Восстановление настроек и чёрного списка (строго на @MainActor)
         if restoreSettings, let settings = archive.settings {
-            if let blacklist = settings.blacklistedBundleIDs {
-                await MainActor.run {
+            await MainActor.run {
+                if let blacklist = settings.blacklistedBundleIDs {
                     if mergeMode {
                         let combined = Array(Set(monitor.blacklistedBundleIDs).union(blacklist))
                         monitor.blacklistedBundleIDs = combined
@@ -574,28 +636,29 @@ public enum BackupManager {
                         monitor.blacklistedBundleIDs = blacklist
                     }
                 }
-            }
 
-            if let shortcutsData = settings.shortcutsData,
-               let config = try? JSONDecoder().decode(ShortcutConfig.self, from: shortcutsData) {
-                await MainActor.run {
+                if let shortcutsData = settings.shortcutsData,
+                   let config = try? JSONDecoder().decode(ShortcutConfig.self, from: shortcutsData) {
                     ShortcutManager.shared.config = config
+                    ShortcutManager.shared.objectWillChange.send()
                 }
-            }
 
-            if let appearance = settings.appearanceAndStorage {
-                await MainActor.run {
+                if let appearance = settings.appearanceAndStorage {
                     if let theme = appearance.selectedThemeId {
                         AppDefaults.shared.set(theme, forKey: "selectedThemeId")
                         AppDefaults.shared.set(theme, forKey: "pasteVaultTheme")
                         let isLight = (theme == "frost" || theme == "solarizedPaper")
-                        NSApp.windows.first(where: { $0 is NSPanel })?.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
+                        let targetAppearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
+                        for panel in NSApp.windows.compactMap({ $0 as? FloatingPanel<MainPanelView> }) {
+                            panel.appearance = targetAppearance
+                        }
                     }
                     if let glass = appearance.userGlassLevel {
                         AppDefaults.shared.set(glass, forKey: "userGlassLevel")
                     }
                     if let font = appearance.selectedFontId {
-                        AppDefaults.shared.set(font, forKey: "selectedFontId")
+                        let normalizedFont = (font == "jetbrains") ? AppFont.jetBrainsMono.rawValue : font
+                        AppDefaults.shared.set(normalizedFont, forKey: "selectedFontId")
                     }
                     if let lang = appearance.appLanguage {
                         AppDefaults.shared.set(lang, forKey: "appLanguage")
@@ -613,7 +676,24 @@ public enum BackupManager {
                     if let saveText = appearance.saveText {
                         monitor.saveTextEnabled = saveText
                     }
+                    if let sound = appearance.soundEnabled {
+                        AppDefaults.shared.set(sound, forKey: "tapticAudioFeedbackEnabled")
+                    }
+                    if let autoUpdates = appearance.autoCheckUpdates {
+                        AppDefaults.shared.set(autoUpdates, forKey: "autoCheckUpdates")
+                        UpdateService.shared.autoCheckUpdates = autoUpdates
+                        UpdateService.shared.objectWillChange.send()
+                    }
+                    if let launchAtLogin = appearance.launchAtLogin {
+                        if !DatabaseManager.isRunningTests {
+                            LaunchAtLoginManager.shared.setLaunchAtLogin(launchAtLogin)
+                        }
+                        monitor.isLaunchAtLoginEnabled = launchAtLogin
+                    }
                 }
+
+                AppDefaults.shared.synchronize()
+                monitor.objectWillChange.send()
             }
         }
     }

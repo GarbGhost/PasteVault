@@ -483,22 +483,26 @@ public enum AppFont: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// Локальный системный fallback macOS, если веб-шрифт ещё скачивается
+    /// Безопасный локальный sans-serif / mono fallback macOS (никогда не возвращает serif-шрифты)
     private var macOSFallbackFamily: String? {
         switch self {
         case .inter: return "Helvetica Neue"
-        case .manrope: return "Avenir Next"
+        case .manrope, .jura, .tektur, .comfortaa: return "Avenir Next"
         case .jetBrainsMono: return "Menlo"
-        case .jura: return "Didot"
-        case .tektur: return "Copperplate"
-        case .comfortaa: return "Avenir Next"
         }
     }
 
     @MainActor
     public func font(size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        if let psName = FontManager.shared.resolvedPostScriptNames[self] {
-            return Font.custom(psName, size: size).weight(weight)
+        let mgr = FontManager.shared
+        if !mgr.hasCompletedLoad {
+            mgr.registerBundledFontsSynchronouslyIfNeeded()
+        }
+        if let exactPS = mgr.resolvedFontName(for: self, weight: weight) {
+            return Font.custom(exactPS, size: size)
+        }
+        if let familyName = mgr.resolvedPostScriptNames[self] {
+            return Font.custom(familyName, size: size).weight(weight)
         }
         if let fallback = macOSFallbackFamily {
             return Font.custom(fallback, size: size).weight(weight)
@@ -508,8 +512,11 @@ public enum AppFont: String, CaseIterable, Identifiable, Sendable {
 
     @MainActor
     public func nsFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
-        if let psName = FontManager.shared.resolvedPostScriptNames[self],
-           let customFont = NSFont(name: psName, size: size) {
+        let mgr = FontManager.shared
+        if !mgr.hasCompletedLoad {
+            mgr.registerBundledFontsSynchronouslyIfNeeded()
+        }
+        if let customFont = mgr.resolvedNSFont(for: self, size: size, weight: weight) {
             return customFont
         }
         if let fallback = macOSFallbackFamily,
@@ -525,6 +532,7 @@ public final class FontManager: ObservableObject {
     public static let shared = FontManager()
 
     @Published public var resolvedPostScriptNames: [AppFont: String] = [:]
+    @Published public private(set) var resolvedWeightedPostScriptNames: [AppFont: [CGFloat: String]] = [:]
 
     public struct BundledFontSpec: Sendable {
         public let appFont: AppFont
@@ -541,11 +549,56 @@ public final class FontManager: ObservableObject {
         BundledFontSpec(appFont: .comfortaa, filename: "Comfortaa.ttf", resourceBaseName: "Comfortaa")
     ]
 
+    private nonisolated static let supportedNSWeights: [NSFont.Weight] = [
+        .ultraLight, .thin, .light, .regular, .medium, .semibold, .bold, .heavy, .black
+    ]
+
     private var isLoadingFonts: Bool = false
     public private(set) var hasCompletedLoad: Bool = false
+    private var pendingCompletions: [@MainActor () -> Void] = []
 
     private init() {
-        ensureFontsInstalled()
+        registerBundledFontsSynchronouslyIfNeeded()
+    }
+
+    private static func nsWeight(from weight: Font.Weight) -> NSFont.Weight {
+        switch weight {
+        case .ultraLight: return .ultraLight
+        case .thin: return .thin
+        case .light: return .light
+        case .medium: return .medium
+        case .semibold: return .semibold
+        case .bold: return .bold
+        case .heavy: return .heavy
+        case .black: return .black
+        default: return .regular
+        }
+    }
+
+    public func resolvedFontName(for appFont: AppFont, weight: Font.Weight) -> String? {
+        let targetNSWeight = Self.nsWeight(from: weight)
+        if let exact = resolvedWeightedPostScriptNames[appFont]?[targetNSWeight.rawValue] {
+            return exact
+        }
+        return resolvedWeightedPostScriptNames[appFont]?[NSFont.Weight.regular.rawValue]
+    }
+
+    public func resolvedNSFont(for appFont: AppFont, size: CGFloat, weight: NSFont.Weight) -> NSFont? {
+        if let exactPS = resolvedWeightedPostScriptNames[appFont]?[weight.rawValue],
+           let font = NSFont(name: exactPS, size: size) {
+            return font
+        }
+        if let familyName = resolvedPostScriptNames[appFont] {
+            let descriptor = NSFontDescriptor(fontAttributes: [.family: familyName])
+                .addingAttributes([.traits: [NSFontDescriptor.TraitKey.weight: weight]])
+            if let descriptorFont = NSFont(descriptor: descriptor, size: size) {
+                return descriptorFont
+            }
+            if let fallbackFamily = NSFont(name: familyName, size: size) {
+                return fallbackFamily
+            }
+        }
+        return nil
     }
 
     nonisolated private static func registerAndExtractPostScriptName(at fileURL: URL) -> String? {
@@ -568,6 +621,21 @@ public final class FontManager: ObservableObject {
             return nil
         }
         return psName
+    }
+
+    nonisolated private static func resolveWeightedPostScriptNames(for familyOrPSName: String) -> [CGFloat: String] {
+        var result: [CGFloat: String] = [:]
+        for w in supportedNSWeights {
+            let descriptor = NSFontDescriptor(fontAttributes: [.family: familyOrPSName])
+                .addingAttributes([.traits: [NSFontDescriptor.TraitKey.weight: w]])
+            if let font = NSFont(descriptor: descriptor, size: 13),
+               NSFont(name: font.fontName, size: 13) != nil {
+                result[w.rawValue] = font.fontName
+            } else if let direct = NSFont(name: familyOrPSName, size: 13) {
+                result[w.rawValue] = direct.fontName
+            }
+        }
+        return result
     }
 
     /// Безопасно ищет директории встроенных шрифтов (Bundle.main, Contents/Resources/Fonts, вложенный бандл ресурсов SwiftPM и исходники)
@@ -630,32 +698,47 @@ public final class FontManager: ObservableObject {
         return found
     }
 
-    /// Асинхронная офлайн-регистрация встроенных шрифтов без блокировки главного потока и без сетевых обращений
-    public func ensureFontsInstalled() {
-        guard !isLoadingFonts, !hasCompletedLoad else { return }
+    /// Синхронная офлайн-регистрация встроенных локальных шрифтов до первого рендера UI (0 сетевых обращений)
+    public func registerBundledFontsSynchronouslyIfNeeded() {
+        guard !hasCompletedLoad else { return }
         isLoadingFonts = true
 
-        Task.detached(priority: .utility) {
-            let discovered = Self.discoverBundledFontURLs()
-            var resolvedMap: [AppFont: String] = [:]
-            for spec in Self.fontSpecs {
-                if let fileURL = discovered[spec.appFont],
-                   let psName = Self.registerAndExtractPostScriptName(at: fileURL) {
-                    resolvedMap[spec.appFont] = psName
-                }
-            }
-
-            let finalResolvedMap = resolvedMap
-            await MainActor.run {
-                let shared = FontManager.shared
-                shared.isLoadingFonts = false
-                shared.hasCompletedLoad = (finalResolvedMap.count == Self.fontSpecs.count)
-                if shared.resolvedPostScriptNames != finalResolvedMap {
-                    shared.resolvedPostScriptNames = finalResolvedMap
-                    NotificationCenter.default.post(name: Notification.Name("pasteVaultFontsUpdated"), object: nil)
-                }
+        let discovered = Self.discoverBundledFontURLs()
+        var resolvedMap: [AppFont: String] = [:]
+        var weightedMap: [AppFont: [CGFloat: String]] = [:]
+        for spec in Self.fontSpecs {
+            if let fileURL = discovered[spec.appFont],
+               let familyOrPS = Self.registerAndExtractPostScriptName(at: fileURL) {
+                resolvedMap[spec.appFont] = familyOrPS
+                weightedMap[spec.appFont] = Self.resolveWeightedPostScriptNames(for: familyOrPS)
             }
         }
+
+        isLoadingFonts = false
+        hasCompletedLoad = (resolvedMap.count == Self.fontSpecs.count)
+        let changed = (resolvedPostScriptNames != resolvedMap) || (resolvedWeightedPostScriptNames != weightedMap)
+        if changed {
+            resolvedPostScriptNames = resolvedMap
+            resolvedWeightedPostScriptNames = weightedMap
+            NotificationCenter.default.post(name: Notification.Name("pasteVaultFontsUpdated"), object: nil)
+        }
+        let callbacks = pendingCompletions
+        pendingCompletions.removeAll()
+        for cb in callbacks {
+            cb()
+        }
+    }
+
+    /// Гарантированная офлайн-регистрация встроенных шрифтов без сетевых обращений
+    public func ensureFontsInstalled(completion: (@MainActor () -> Void)? = nil) {
+        if hasCompletedLoad {
+            completion?()
+            return
+        }
+        if let completion {
+            pendingCompletions.append(completion)
+        }
+        registerBundledFontsSynchronouslyIfNeeded()
     }
 }
 
@@ -667,6 +750,7 @@ public struct QRCodePopoverView: View {
     public let theme: AppTheme
     public let language: AppLanguage
     @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
+    @ObservedObject private var fontManager = FontManager.shared
 
     private var currentFont: AppFont {
         AppFont(fromRaw: selectedFontId)
@@ -688,6 +772,7 @@ public struct QRCodePopoverView: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         VStack(spacing: 12) {
             Text(tr("Сканируйте QR-код", "Scan QR Code", lang: language))
                 .font(currentFont.font(size: 13, weight: .bold))
@@ -1499,6 +1584,7 @@ public struct InfoTooltipBadge: View {
     @State private var isHovering: Bool = false
     @State private var hoverTask: Task<Void, Never>? = nil
     @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
+    @ObservedObject private var fontManager = FontManager.shared
 
     private var currentFont: AppFont {
         AppFont(fromRaw: selectedFontId)
@@ -1511,6 +1597,7 @@ public struct InfoTooltipBadge: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         Button {
             hoverTask?.cancel()
             isShowingPopover.toggle()
@@ -2434,6 +2521,7 @@ public struct ClipboardRowCardView: View {
     @State private var isPasteHovered: Bool = false
     @State private var isDeleteHovered: Bool = false
     @State private var isRowTimerPopoverPresented: Bool = false
+    @ObservedObject private var fontManager = FontManager.shared
 
     private var isSecretItem: Bool {
         item.isSensitive || item.effectiveContentType == .secret
@@ -2557,6 +2645,7 @@ public struct ClipboardRowCardView: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         HStack(alignment: .top, spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -4434,8 +4523,10 @@ public struct MainPanelView: View {
         let action: () -> Void
 
         @State private var isHovered: Bool = false
+        @ObservedObject private var fontManager = FontManager.shared
 
         var body: some View {
+            let _ = fontManager.resolvedPostScriptNames.count
             Button {
                 TapticSoundAndHaptics.shared.performDialTick()
                 action()
@@ -4486,8 +4577,10 @@ public struct MainPanelView: View {
         let theme: AppTheme
         let font: AppFont
         @State private var isHovered: Bool = false
+        @ObservedObject private var fontManager = FontManager.shared
 
         var body: some View {
+            let _ = fontManager.resolvedPostScriptNames.count
             HStack(spacing: 5) {
                 Image(systemName: icon)
                     .symbolRenderingMode(.monochrome)
@@ -5218,26 +5311,98 @@ public struct MainPanelView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
                             if currentItem.effectiveContentType == .image {
-                                let img = monitor.imageForItem(currentItem) ?? (currentItem.rawImageData.flatMap { NSImage(data: $0) }) ?? ClipboardMonitor.generateSyntheticScreenshotImage(label: currentItem.textPreview)
+                                if let img = monitor.imageForItem(currentItem) ?? (currentItem.rawImageData.flatMap { NSImage(data: $0) }) {
+                                    HStack(spacing: 8) {
+                                        Spacer()
 
-                                HStack(spacing: 8) {
-                                    Spacer()
-
-                                    Button {
-                                        saveImageToDisk(img: img, defaultName: "Screenshot-\(currentItem.id.prefix(8)).png")
-                                    } label: {
-                                        HStack(spacing: 5) {
-                                            Image(systemName: "square.and.arrow.down")
-                                                .symbolRenderingMode(.monochrome)
-                                            Text(tr("Сохранить PNG", "Save PNG"))
+                                        Button {
+                                            saveImageToDisk(img: img, defaultName: "Screenshot-\(currentItem.id.prefix(8)).png")
+                                        } label: {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "square.and.arrow.down")
+                                                    .symbolRenderingMode(.monochrome)
+                                                Text(tr("Сохранить PNG", "Save PNG"))
+                                            }
+                                            .frame(height: 28)
                                         }
-                                        .frame(height: 28)
-                                    }
-                                    .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
-                                    .contentShape(Rectangle())
-                                    .pointingHandCursor()
+                                        .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedHeight: 28)
+                                        .contentShape(Rectangle())
+                                        .pointingHandCursor()
 
-                                    Button {
+                                        Button {
+                                            zoomedImage = img
+                                            zoomedItem = currentItem
+                                            lightboxScaleToFit = true
+                                            lightboxZoomScale = 1.0
+                                            editorPanOffset = .zero
+                                            screenshotEditorEngine.clearAll()
+                                            isScreenshotEditingMode = true
+                                            isImageLightboxPresented = true
+                                        } label: {
+                                            HStack(spacing: 5) {
+                                                Text("✎")
+                                                    .font(.system(size: 13, weight: .bold))
+                                                Text(tr("Редактировать", "Edit"))
+                                            }
+                                            .frame(height: 28)
+                                        }
+                                        .pvButton(variant: .primary, size: .small, theme: currentTheme, fixedHeight: 28)
+                                        .contentShape(Rectangle())
+                                        .pointingHandCursor()
+
+                                        Button {
+                                            pendingSnippetSourceItemId = currentItem.id
+                                            createSnippetFromClipboardItem(currentItem)
+                                        } label: {
+                                            Image(systemName: "bolt.fill")
+                                                .symbolRenderingMode(.monochrome)
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(currentTheme.primaryText)
+                                                .frame(width: 28, height: 28)
+                                        }
+                                        .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedWidth: 28, fixedHeight: 28)
+                                        .frame(width: 28, height: 28)
+                                        .contentShape(Rectangle())
+                                        .help(tr("Создать фрагмент", "Create snippet"))
+                                        .pointingHandCursor()
+                                    }
+
+                                    // Контейнер-холст предпросмотра скриншота с чёткой контрастной рамкой вокруг самой картинки
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .fill(Color.black.opacity(currentTheme.isLight ? 0.06 : 0.35))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                    .strokeBorder(currentTheme.borderColor, lineWidth: 1)
+                                            )
+
+                                        Image(nsImage: img)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(maxHeight: 220)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                    .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
+                                            )
+                                            .shadow(color: Color.black.opacity(0.55), radius: 10, x: 0, y: 4)
+                                            .padding(12)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .onHover { hovering in
+                                        guard !isImageLightboxPresented else { return }
+                                        if hovering {
+                                            NSCursor.pointingHand.set()
+                                        } else {
+                                            NSCursor.arrow.set()
+                                        }
+                                    }
+                                    .onDisappear {
+                                        NSCursor.arrow.set()
+                                    }
+                                    .onTapGesture {
+                                        NSCursor.arrow.set()
                                         zoomedImage = img
                                         zoomedItem = currentItem
                                         lightboxScaleToFit = true
@@ -5246,79 +5411,27 @@ public struct MainPanelView: View {
                                         screenshotEditorEngine.clearAll()
                                         isScreenshotEditingMode = true
                                         isImageLightboxPresented = true
-                                    } label: {
-                                        HStack(spacing: 5) {
-                                            Text("✎")
-                                                .font(.system(size: 13, weight: .bold))
-                                            Text(tr("Редактировать", "Edit"))
-                                        }
-                                        .frame(height: 28)
                                     }
-                                    .pvButton(variant: .primary, size: .small, theme: currentTheme, fixedHeight: 28)
-                                    .contentShape(Rectangle())
-                                    .pointingHandCursor()
-
-                                    Button {
-                                        pendingSnippetSourceItemId = currentItem.id
-                                        createSnippetFromClipboardItem(currentItem)
-                                    } label: {
-                                        Image(systemName: "bolt.fill")
+                                } else {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "photo")
                                             .symbolRenderingMode(.monochrome)
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(currentTheme.primaryText)
-                                            .frame(width: 28, height: 28)
+                                            .font(.system(size: 26, weight: .regular))
+                                            .foregroundStyle(currentTheme.secondaryText.opacity(0.75))
+                                        Text(tr("Изображение недоступно", "Image unavailable"))
+                                            .font(currentFont.font(size: 12, weight: .medium))
+                                            .foregroundStyle(currentTheme.secondaryText)
                                     }
-                                    .pvButton(variant: .secondary, size: .small, theme: currentTheme, fixedWidth: 28, fixedHeight: 28)
-                                    .frame(width: 28, height: 28)
-                                    .contentShape(Rectangle())
-                                    .help(tr("Создать фрагмент", "Create snippet"))
-                                    .pointingHandCursor()
-                                }
-
-                                // Контейнер-холст предпросмотра скриншота с чёткой контрастной рамкой вокруг самой картинки
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(Color.black.opacity(currentTheme.isLight ? 0.06 : 0.35))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                                .strokeBorder(currentTheme.borderColor, lineWidth: 1)
-                                        )
-
-                                    Image(nsImage: img)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(maxHeight: 220)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
-                                        )
-                                        .shadow(color: Color.black.opacity(0.55), radius: 10, x: 0, y: 4)
-                                        .padding(12)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .onHover { hovering in
-                                    guard !isImageLightboxPresented else { return }
-                                    if hovering {
-                                        NSCursor.pointingHand.set()
-                                    } else {
-                                        NSCursor.arrow.set()
-                                    }
-                                }
-                                .onDisappear {
-                                    NSCursor.arrow.set()
-                                }
-                                .onTapGesture {
-                                    NSCursor.arrow.set()
-                                    zoomedImage = img
-                                    zoomedItem = currentItem
-                                    lightboxScaleToFit = true
-                                    lightboxZoomScale = 1.0
-                                    editorPanOffset = .zero
-                                    screenshotEditorEngine.clearAll()
-                                    isScreenshotEditingMode = true
-                                    isImageLightboxPresented = true
+                                    .frame(maxWidth: .infinity, minHeight: 140)
+                                    .padding(16)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .fill(Color.black.opacity(currentTheme.isLight ? 0.04 : 0.25))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                    .strokeBorder(currentTheme.borderColor, lineWidth: 1)
+                                            )
+                                    )
                                 }
 
                                 if let ocr = currentItem.ocrText, !ocr.isEmpty {
@@ -7847,7 +7960,10 @@ public struct MainPanelView: View {
                         currentFont: fontOption
                     ) {
                         selectedFontId = fontOption.rawValue
-                        FontManager.shared.ensureFontsInstalled()
+                        fontRefreshTick += 1
+                        FontManager.shared.ensureFontsInstalled {
+                            self.fontRefreshTick += 1
+                        }
                         isFontDropdownExpanded = false
                     }
                 }
@@ -8051,8 +8167,10 @@ public struct MainPanelView: View {
         let theme: AppTheme
         let font: AppFont
         @State private var isHovered: Bool = false
+        @ObservedObject private var fontManager = FontManager.shared
 
         var body: some View {
+            let _ = fontManager.resolvedPostScriptNames.count
             HStack(spacing: 7) {
                 Image(systemName: "plus.square.on.square")
                     .symbolRenderingMode(.monochrome)
@@ -8282,8 +8400,10 @@ public struct MainPanelView: View {
         @Binding var isOn: Bool
         let currentTheme: AppTheme
         let currentFont: AppFont
+        @ObservedObject private var fontManager = FontManager.shared
 
         var body: some View {
+            let _ = fontManager.resolvedPostScriptNames.count
             Button {
                 isOn.toggle()
             } label: {
@@ -8322,7 +8442,7 @@ public struct MainPanelView: View {
             selectedThemeId = theme.rawValue
             AppDefaults.shared.set(theme.rawValue, forKey: "selectedThemeId")
             AppDefaults.shared.set(theme.rawValue, forKey: "pasteVaultTheme")
-            NSApp.windows.first(where: { $0 is NSPanel })?.appearance = NSAppearance(named: theme.isLight ? .aqua : .darkAqua)
+            syncWindowAppearance()
         } label: {
             VStack(spacing: 5) {
                 HStack(spacing: -6) {
@@ -8741,8 +8861,8 @@ public struct MainPanelView: View {
     // MARK: - Helpers
     private func syncWindowAppearance() {
         let appearance = NSAppearance(named: currentTheme.isLight ? .aqua : .darkAqua)
-        for window in NSApp.windows where window is NSPanel {
-            window.appearance = appearance
+        for panel in NSApp.windows.compactMap({ $0 as? FloatingPanel<MainPanelView> }) {
+            panel.appearance = appearance
         }
     }
 
@@ -9429,14 +9549,8 @@ public struct MainPanelView: View {
         snippetDraftImagePath = nil
         if item.effectiveContentType == .image || item.contentType == .image {
             // Картинка из карточки буфера сразу прикрепляется как макет (28×28), текстовое поле остаётся чистым
-            var sourceImage: NSImage? = nil
-            if let img = monitor.imagePreviews[item.id] {
-                sourceImage = img
-            } else if let rawData = item.rawImageData, let img = NSImage(data: rawData) {
-                sourceImage = img
-            } else if let path = item.fileURLPath, let img = NSImage(contentsOfFile: path) {
-                sourceImage = img
-            }
+            let sourceImage = monitor.imageForItem(item)
+                ?? (item.rawImageData.flatMap { NSImage(data: $0) })
             if let sourceImage, let savedPath = DatabaseManager.saveSnippetImage(sourceImage) {
                 snippetDraftImage = sourceImage
                 snippetDraftImagePath = savedPath
@@ -9848,6 +9962,7 @@ public struct MainPanelView: View {
         let content: () -> Content
         @State private var isHovered: Bool = false
         @AppStorage("selectedFontId", store: AppDefaults.shared) private var selectedFontId: String = AppFont.default.rawValue
+        @ObservedObject private var fontManager = FontManager.shared
 
         private var currentFont: AppFont {
             AppFont(fromRaw: selectedFontId)
@@ -9866,6 +9981,7 @@ public struct MainPanelView: View {
         }
 
         var body: some View {
+            let _ = fontManager.resolvedPostScriptNames.count
             Button(action: action) {
                 content()
                     .font(currentFont.font(size: 11.5, weight: isActive ? .semibold : .medium))
@@ -10970,6 +11086,30 @@ public struct MainPanelView: View {
                 await MainActor.run {
                     self.snippetCategories = restoredCats
                     self.refreshPinnedSortSnapshot()
+
+                    let defaults = AppDefaults.shared
+                    self.selectedThemeId = defaults.string(forKey: "selectedThemeId") ?? AppTheme.obsidian.rawValue
+                    if defaults.object(forKey: "userGlassLevel") != nil {
+                        self.userGlassLevel = defaults.double(forKey: "userGlassLevel")
+                    }
+                    let rawFont = defaults.string(forKey: "selectedFontId") ?? AppFont.default.rawValue
+                    self.selectedFontId = (rawFont == "jetbrains") ? AppFont.jetBrainsMono.rawValue : rawFont
+                    self.appLanguageRaw = defaults.string(forKey: "appLanguage") ?? AppLanguage.ru.rawValue
+                    if defaults.object(forKey: "tapticAudioFeedbackEnabled") != nil {
+                        self.tapticAudioFeedbackEnabled = defaults.bool(forKey: "tapticAudioFeedbackEnabled")
+                    }
+                    if defaults.object(forKey: "autoCheckUpdates") != nil {
+                        self.autoCheckUpdates = defaults.bool(forKey: "autoCheckUpdates")
+                    }
+
+                    self.monitor.objectWillChange.send()
+                    self.updateService.objectWillChange.send()
+                    self.shortcutManager.objectWillChange.send()
+                    self.syncWindowAppearance()
+                    self.fontRefreshTick += 1
+                    FontManager.shared.ensureFontsInstalled {
+                        self.fontRefreshTick += 1
+                    }
                     showBackupToast(tr("Данные успешно восстановлены", "Data successfully restored"))
                 }
             } catch {

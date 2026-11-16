@@ -6,6 +6,7 @@ import Carbon
 @MainActor
 public struct PasteVaultApp {
     public static func main() {
+        AppDelegate.registerMenuBarDefaults(in: AppDefaults.shared)
         AppDefaults.shared.set(180, forKey: "NSInitialToolTipDelay")
         AppDelegate.main()
     }
@@ -432,6 +433,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             print("[SYNTHETIC_STORAGE_AND_TYPES_TEST] Storage size formatting, file pasteboard, content toggles, history limits, sorting & zero storage on clear passed")
 
             // 10. Тестируем NSCache для изображений и генерацию/сохранение PNG
+            let synthSampleTIFF = ClipboardMonitor.generateSyntheticScreenshotImage(label: "Test Screenshot 1").tiffRepresentation
             let testImageItem = ClipboardItemRow(
                 id: "test-image-item-id-1",
                 rowid: 1001,
@@ -446,7 +448,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 createdAt: Int64(Date().timeIntervalSince1970),
                 expiresAt: nil,
                 ocrText: "Sample OCR Test Text",
-                rawImageData: nil,
+                rawImageData: synthSampleTIFF,
                 fileURLPath: nil,
                 useCount: 1
             )
@@ -594,12 +596,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activityToken: NSObjectProtocol?
     private var spaceChangeObserver: NSObjectProtocol?
 
-    public static func registerMenuBarDefaults(in defaults: UserDefaults = .standard) {
+    public static func registerMenuBarDefaults(in defaults: UserDefaults = AppDefaults.shared) {
         defaults.register(defaults: [
             "showMenuBarIcon": true,
             "showInMenuBar": true,
             "NSStatusItem Visible Item-0": true,
             "NSStatusItem Visible PasteVaultStatusItem": true,
+            "selectedThemeId": AppTheme.obsidian.rawValue,
+            "pasteVaultTheme": AppTheme.obsidian.rawValue,
+            "selectedFontId": AppFont.default.rawValue,
+            "userGlassLevel": 0.70,
+            "appLanguage": AppLanguage.ru.rawValue,
             "autoCheckUpdates": false,
             "tapticAudioFeedbackEnabled": true,
             "NSInitialToolTipDelay": 180
@@ -608,9 +615,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         AppDefaults.shared.set(180, forKey: "NSInitialToolTipDelay")
-        Self.registerMenuBarDefaults()
+        Self.registerMenuBarDefaults(in: AppDefaults.shared)
         Self.enforceSingleInstance()
         LaunchAtLoginManager.cleanupLegacyLaunchAgent()
+
+        let shouldForceOpenAfterUpdate = AppDefaults.shared.bool(forKey: UpdateService.openPanelOnNextLaunchKey)
+        if shouldForceOpenAfterUpdate {
+            AppDefaults.shared.set(false, forKey: UpdateService.openPanelOnNextLaunchKey)
+            AppDefaults.shared.synchronize()
+        }
 
         _ = AccessibilityService.isAccessibilityTrusted()
 
@@ -628,8 +641,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupApplicationMenu()
 
-        // Автоматическая проверка и подключение 10 бесплатных шрифтов (SIL OFL / системных) в фоне
-        FontManager.shared.ensureFontsInstalled()
+        // Синхронная офлайн-регистрация всех 6 встроенных шрифтов строго ДО первого кадра UI
+        FontManager.shared.registerBundledFontsSynchronouslyIfNeeded()
 
         setupFloatingPanel()
         setupStatusBarItem()
@@ -670,6 +683,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // Открываем окно сразу при запуске рядом с активным окном (без навязчивого системного prompt)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.presentFloatingPanel()
+            if shouldForceOpenAfterUpdate {
+                NSApp.activate(ignoringOtherApps: true)
+                self?.panel?.makeKeyAndOrderFront(nil)
+            }
         }
     }
 

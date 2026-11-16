@@ -589,8 +589,10 @@ public struct SnippetCategoryDropdownMenu: View {
     }
 
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var fontManager = FontManager.shared
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         VStack(spacing: 0) {
             // 1. Верхний пункт «Все категории» (ТОЛЬКО для режима фильтра)
             if isFilterMode {

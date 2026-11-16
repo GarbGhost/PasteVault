@@ -3628,6 +3628,7 @@ public struct ScreenshotEditorWorkspaceView: View {
     @StateObject private var viewportState = ViewportMonitorState()
     @State private var currentCanvasCursor: NSCursor = .crosshair
     @State private var isFontDropdownExpanded: Bool = false
+    @ObservedObject private var fontManager = FontManager.shared
 
     // Состояния инструмента «✋ Рука» и интерактивных ручек
     @State private var activeDragHandle: HandlePosition? = nil
@@ -3669,6 +3670,7 @@ public struct ScreenshotEditorWorkspaceView: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         GeometryReader { geo in
             let availableSize = CGSize(
                 width: max(120, geo.size.width - 110),
@@ -5349,6 +5351,7 @@ public struct ScreenshotEditorBottomShortcutBar: View {
     public var onSaveCopy: () -> Void
     public var onEscape: () -> Void
     public var onRedo: (() -> Void)?
+    @ObservedObject private var fontManager = FontManager.shared
 
     public init(
         engine: ScreenshotEditorEngine,
@@ -5377,6 +5380,7 @@ public struct ScreenshotEditorBottomShortcutBar: View {
     }
 
     public var body: some View {
+        let _ = fontManager.resolvedPostScriptNames.count
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .center, spacing: 11) {
                 Spacer(minLength: 4)
