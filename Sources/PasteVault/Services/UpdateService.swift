@@ -66,13 +66,15 @@ public final class UpdateService: ObservableObject {
         }
     }
 
+    nonisolated public static let openPanelOnNextLaunchKey = "pv_open_panel_on_next_launch"
+
     public var currentVersion: String {
         if let bundleID = Bundle.main.bundleIdentifier, bundleID != "com.pastevault.app" {
-            return "1.1.0"
+            return "1.1.1"
         }
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.0"
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.1"
         if Bundle.main.bundlePath.contains("xctest") || raw.isEmpty {
-            return "1.1.0"
+            return "1.1.1"
         }
         return raw
     }
@@ -372,6 +374,33 @@ public final class UpdateService: ObservableObject {
         return false
     }
 
+    nonisolated public static func buildDetachedRelaunchCommand(waitingForPID pid: Int32, appPath: String) -> String {
+        let escapedPath = appPath.replacingOccurrences(of: "'", with: "'\\''")
+        return "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.1; done; /usr/bin/xattr -dr com.apple.quarantine '\(escapedPath)' 2>/dev/null || true; /usr/bin/open -a '\(escapedPath)'"
+    }
+
+    public static func launchDetachedRelaunch(
+        appURL: URL,
+        currentPID: Int32 = ProcessInfo.processInfo.processIdentifier
+    ) {
+        AppDefaults.shared.set(true, forKey: openPanelOnNextLaunchKey)
+        AppDefaults.shared.synchronize()
+
+        let innerCommand = buildDetachedRelaunchCommand(waitingForPID: currentPID, appPath: appURL.path)
+        let launcher = Process()
+        launcher.executableURL = URL(fileURLWithPath: "/bin/sh")
+        launcher.arguments = [
+            "-c",
+            "nohup /bin/sh -c \"$1\" >/dev/null 2>&1 </dev/null &",
+            "pastevault-relaunch",
+            innerCommand
+        ]
+        launcher.standardInput = FileHandle.nullDevice
+        launcher.standardOutput = FileHandle.nullDevice
+        launcher.standardError = FileHandle.nullDevice
+        try? launcher.run()
+    }
+
     nonisolated private static func runProcessAsync(executablePath: String, arguments: [String]) async throws -> (status: Int32, stderr: String) {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -556,11 +585,8 @@ public final class UpdateService: ObservableObject {
 
             if !silent {
                 dismissModal()
-                let relaunch = Process()
-                relaunch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                relaunch.arguments = ["-a", targetAppURL.path]
-                try? relaunch.run()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                Self.launchDetachedRelaunch(appURL: targetAppURL)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     NSApplication.shared.terminate(nil)
                 }
             }
