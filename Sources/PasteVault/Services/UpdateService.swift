@@ -70,11 +70,11 @@ public final class UpdateService: ObservableObject {
 
     public var currentVersion: String {
         if let bundleID = Bundle.main.bundleIdentifier, bundleID != "com.pastevault.app" {
-            return "1.1.1"
+            return "1.1.2"
         }
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.1"
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.2"
         if Bundle.main.bundlePath.contains("xctest") || raw.isEmpty {
-            return "1.1.1"
+            return "1.1.2"
         }
         return raw
     }

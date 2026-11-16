@@ -2633,14 +2633,30 @@ public struct ClipboardRowCardView: View {
     }
 
     private var typeBadgeLabel: String {
-        switch item.effectiveContentType {
-        case .file: return tr("Файл", "File", lang: language)
-        case .text: return tr("Текст", "Text", lang: language)
-        case .url: return tr("Ссылка", "Link", lang: language)
-        case .code: return tr("Код", "Code", lang: language)
-        case .image: return tr("Скриншот", "Image", lang: language)
-        case .secret: return tr("Пароль", "Secret", lang: language)
-        case .color: return tr("Цвет", "Color", lang: language)
+        Self.categoryBadgeLabel(for: item.effectiveContentType, in: language)
+    }
+
+    public static func categoryBadgeLabel(for kind: ContentKind, in lang: AppLanguage) -> String {
+        switch kind {
+        case .file: return tr("Файл", "File", lang: lang)
+        case .text: return tr("Текст", "Text", lang: lang)
+        case .url: return tr("Ссылка", "Link", lang: lang)
+        case .code: return tr("Код", "Code", lang: lang)
+        case .image: return tr("Скриншот", "Image", lang: lang)
+        case .secret: return tr("Пароль", "Secret", lang: lang)
+        case .color: return tr("Цвет", "Color", lang: lang)
+        }
+    }
+
+    /// Убирает теги, дублирующие бейдж категории карточки (включая устаревшие «Цвет» / «Color» у записей цвета).
+    public static func visibleTags(for tags: [String], contentType: ContentKind, in lang: AppLanguage) -> [String] {
+        let badgeLabel = categoryBadgeLabel(for: contentType, in: lang)
+        return tags.filter { tag in
+            if contentType == .color && (tag == "Цвет" || tag == "Color" || tag == "#Цвет" || tag == "#Color") {
+                return false
+            }
+            let localized = ClipboardFilterSelection.localizedTag(tag, in: lang)
+            return localized.caseInsensitiveCompare(badgeLabel) != .orderedSame
         }
     }
 
@@ -2874,7 +2890,7 @@ public struct ClipboardRowCardView: View {
                         .foregroundStyle(currentTheme.secondaryText)
                         .clipShape(Capsule())
 
-                    ForEach(item.detectedTags, id: \.self) { tag in
+                    ForEach(Self.visibleTags(for: item.detectedTags, contentType: item.effectiveContentType, in: language), id: \.self) { tag in
                         Text(ClipboardFilterSelection.localizedTag(tag, in: language))
                             .font(currentFont.font(size: 9, weight: .semibold))
                             .lineLimit(1)
@@ -3744,6 +3760,9 @@ public struct MainPanelView: View {
         .onChange(of: selectedTab) { _, newTab in
             revealedSecretItemId = nil
             stopContinuousDeckScroll()
+            if ShortcutManager.shared.isRecordingShortcut || ShortcutManager.shared.validationFeedback != nil {
+                ShortcutManager.shared.stopRecording(clearFeedback: true)
+            }
             if newTab == .settings {
                 updateService.onSettingsTabOpened()
             }
@@ -7469,6 +7488,12 @@ public struct MainPanelView: View {
             .clipped()
             .scrollContentBackground(.hidden)
         }
+        .onChange(of: selectedSettingsSection) { _, newSection in
+            if newSection != .hotkeys,
+               ShortcutManager.shared.isRecordingShortcut || ShortcutManager.shared.validationFeedback != nil {
+                ShortcutManager.shared.stopRecording(clearFeedback: true)
+            }
+        }
     }
 
     // MARK: - Settings Left Sidebar Navigation (215pt)
@@ -8392,6 +8417,11 @@ public struct MainPanelView: View {
         VStack(alignment: .leading, spacing: 18) {
             shortcutsConfigurationSection
         }
+        .onDisappear {
+            if ShortcutManager.shared.isRecordingShortcut || ShortcutManager.shared.validationFeedback != nil {
+                ShortcutManager.shared.stopRecording(clearFeedback: true)
+            }
+        }
     }
 
     private struct CapsuleTypeToggleButton: View {
@@ -8643,6 +8673,12 @@ public struct MainPanelView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 14)
+        .onChange(of: isShortcutsExpanded) { _, expanded in
+            if !expanded,
+               ShortcutManager.shared.isRecordingShortcut || ShortcutManager.shared.validationFeedback != nil {
+                ShortcutManager.shared.stopRecording(clearFeedback: true)
+            }
+        }
     }
 
     private func shortcutRow(command: ShortcutCommand) -> some View {
@@ -8650,62 +8686,79 @@ public struct MainPanelView: View {
         let isRecordingThis = shortcutManager.recordingCommand == command
         let validation = (shortcutManager.validationFeedback?.command == command) ? shortcutManager.validationFeedback?.result : nil
 
-        return HStack(spacing: 8) {
-            // Название команды
-            Text(command.title(in: currentLanguage))
-                .font(currentFont.font(size: 11, weight: .medium))
-                .foregroundStyle(currentTheme.primaryText)
-                .lineLimit(1)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                // Название команды — всегда читаемое, не сжимается сообщением об ошибке
+                Text(command.title(in: currentLanguage))
+                    .font(currentFont.font(size: 11, weight: .medium))
+                    .foregroundStyle(currentTheme.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
 
-            // Индикация конфликта
+                Spacer(minLength: 8)
+
+                // 1. Чистый аккуратный бейдж текущей установленной комбинации (без Menu и без стрелочек)
+                Text(combo.displayString)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(currentTheme.primaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 6)
+                    .fixedSize()
+
+                // 2. Интерактивная кнопка [ Задать ] (при записи: ● [ Нажмите клавиши... ])
+                Button {
+                    if isRecordingThis {
+                        shortcutManager.stopRecording(clearFeedback: true)
+                    } else {
+                        isSearchFocused = false
+                        isSnippetsSearchFocused = false
+                        NSTextInputContext.current?.discardMarkedText()
+                        shortcutManager.startRecording(for: command)
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: isRecordingThis ? "circle.fill" : "record.circle")
+                            .symbolRenderingMode(.monochrome)
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(isRecordingThis ? tr("Нажмите клавиши...", "Press keys...") : tr("Задать", "Record"))
+                    }
+                }
+                .pvButton(variant: .toggle(isActive: isRecordingThis), size: .small, theme: currentTheme)
+                .fixedSize()
+                .help(isRecordingThis ? tr("Нажмите любое сочетание клавиш или Esc для отмены", "Press any key combo or Esc to cancel") : tr("Записать новое сочетание клавиш для этой команды", "Record a new shortcut combo for this command"))
+            }
+
             if let validation, validation != .valid {
-                HStack(spacing: 3) {
+                HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .symbolRenderingMode(.monochrome)
-                        .font(.system(size: 9))
-                    Text(validation.message(in: currentLanguage))
-                        .font(currentFont.font(size: 10, weight: .semibold))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(currentTheme.primaryText)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(currentTheme.primaryText.opacity(0.08))
-                .clipShape(Capsule())
-                .help(validation.message(in: currentLanguage))
-            }
-
-            Spacer(minLength: 8)
-
-            // 1. Чистый аккуратный бейдж текущей установленной комбинации (без Menu и без стрелочек)
-            Text(combo.displayString)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(currentTheme.primaryText)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 6)
-                .fixedSize()
-
-            // 2. Интерактивная кнопка [ Задать ] (при записи: ● [ Нажмите клавиши... ])
-            Button {
-                if isRecordingThis {
-                    shortcutManager.stopRecording()
-                } else {
-                    shortcutManager.startRecording(for: command)
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: isRecordingThis ? "circle.fill" : "record.circle")
-                        .symbolRenderingMode(.monochrome)
                         .font(.system(size: 10, weight: .semibold))
-                    Text(isRecordingThis ? tr("Нажмите клавиши...", "Press keys...") : tr("Задать", "Record"))
+                        .foregroundStyle(currentTheme.accentColor)
+                        .padding(.top, 1)
+
+                    Text(validation.message(in: currentLanguage))
+                        .font(currentFont.font(size: 10.5, weight: .semibold))
+                        .foregroundStyle(currentTheme.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(currentTheme.accentColor.opacity(currentTheme.isLight ? 0.12 : 0.14))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(currentTheme.accentColor.opacity(0.35), lineWidth: 0.8)
+                )
             }
-            .pvButton(variant: .toggle(isActive: isRecordingThis), size: .small, theme: currentTheme)
-            .help(isRecordingThis ? tr("Нажмите любое сочетание клавиш или Esc для отмены", "Press any key combo or Esc to cancel") : tr("Записать новое сочетание клавиш для этой команды", "Record a new shortcut combo for this command"))
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.vertical, 6)
         .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 8)
     }
 
