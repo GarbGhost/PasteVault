@@ -11,6 +11,9 @@ public final class FloatingPanel<Content: View>: NSPanel {
     private nonisolated(unsafe) var workspaceAppObserver: NSObjectProtocol?
     private nonisolated(unsafe) var workspaceSpaceObserver: NSObjectProtocol?
     private nonisolated(unsafe) var dismissObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var resignKeyObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var resignActiveObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var willCloseObserver: NSObjectProtocol?
     private weak var previousApp: NSRunningApplication?
     public private(set) var lastPresentTimestamp: TimeInterval = 0
     public private(set) var lastDismissTimestamp: TimeInterval = 0
@@ -128,6 +131,9 @@ public final class FloatingPanel<Content: View>: NSPanel {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self, self.isVisible else { return }
+                if ShortcutManager.shared.isRecordingShortcut {
+                    ShortcutManager.shared.stopRecording(clearFeedback: true)
+                }
                 self.removeEventMonitors()
                 self.lastDismissTimestamp = ProcessInfo.processInfo.systemUptime
                 self.orderOut(nil)
@@ -141,6 +147,42 @@ public final class FloatingPanel<Content: View>: NSPanel {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.dismissPanel(restorePreviousApp: true)
+            }
+        }
+
+        resignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: self,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                if ShortcutManager.shared.isRecordingShortcut {
+                    ShortcutManager.shared.stopRecording(clearFeedback: true)
+                }
+            }
+        }
+
+        resignActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                if ShortcutManager.shared.isRecordingShortcut {
+                    ShortcutManager.shared.stopRecording(clearFeedback: true)
+                }
+            }
+        }
+
+        willCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: self,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                if ShortcutManager.shared.isRecordingShortcut {
+                    ShortcutManager.shared.stopRecording(clearFeedback: true)
+                }
             }
         }
     }
@@ -164,32 +206,58 @@ public final class FloatingPanel<Content: View>: NSPanel {
         if let observer = dismissObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = resignKeyObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = resignActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = willCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     override public var canBecomeKey: Bool { true }
     override public var canBecomeMain: Bool { false }
 
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if ShortcutManager.shared.isRecordingShortcut {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override public func miniaturize(_ sender: Any?) {
+        if ShortcutManager.shared.isRecordingShortcut {
+            ShortcutManager.shared.stopRecording(clearFeedback: true)
+        }
+        super.miniaturize(sender)
+    }
+
     override public func close() {
+        if ShortcutManager.shared.isRecordingShortcut {
+            ShortcutManager.shared.stopRecording(clearFeedback: true)
+        }
         dismissPanel(restorePreviousApp: true)
     }
 
     override public func cancelOperation(_ sender: Any?) {
         if ShortcutManager.shared.isRecordingShortcut {
-            ShortcutManager.shared.stopRecording()
+            ShortcutManager.shared.stopRecording(clearFeedback: true)
             return
         }
         dismissPanel(restorePreviousApp: true)
     }
 
     public func dismissPanel(restorePreviousApp: Bool = true) {
-        if ShortcutManager.shared.isRecordingShortcut {
-            return
-        }
         let hasActiveSaveOrOpenPanel = NSApp.windows.contains {
             $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel"))
         }
         if self.attachedSheet != nil || NSApp.modalWindow != nil || hasActiveSaveOrOpenPanel || ClipboardMonitor.shared.isShowingFilePanel {
             return
+        }
+        if ShortcutManager.shared.isRecordingShortcut {
+            ShortcutManager.shared.stopRecording(clearFeedback: true)
         }
         removeEventMonitors()
 
@@ -372,7 +440,7 @@ public final class FloatingPanel<Content: View>: NSPanel {
 
     public func toggleOrPresent(preferCursor: Bool = false) {
         if ShortcutManager.shared.isRecordingShortcut {
-            return
+            ShortcutManager.shared.stopRecording(clearFeedback: true)
         }
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastPresentTimestamp < 0.18 || now - lastDismissTimestamp < 0.18 {
@@ -469,6 +537,12 @@ public final class FloatingPanel<Content: View>: NSPanel {
         localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self = self else { return event }
 
+            // Во время записи хоткея пропускаем все клавиатурные события напрямую в локальный монитор ShortcutManager
+            // без перехвата и без поглощения, независимо от порядка регистрации мониторов.
+            if ShortcutManager.shared.isRecordingShortcut {
+                return event
+            }
+
             let hasActiveSaveOrOpenPanel = NSApp.windows.contains {
                 $0.isVisible && ($0 is NSSavePanel || $0 is NSOpenPanel || $0.className.contains("SavePanel") || $0.className.contains("OpenPanel"))
             }
@@ -493,11 +567,6 @@ public final class FloatingPanel<Content: View>: NSPanel {
                     NotificationCenter.default.post(name: Notification.Name("pasteVaultMoveSelectionStop"), object: nil)
                 }
                 return event
-            }
-
-            // Если прямо сейчас идёт запись горячей клавиши в Настройках — поглощаем событие, чтобы окно не закрывалось
-            if ShortcutManager.shared.isRecordingShortcut {
-                return nil
             }
 
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

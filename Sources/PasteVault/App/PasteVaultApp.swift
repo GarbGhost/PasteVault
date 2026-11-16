@@ -591,7 +591,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: FloatingPanel<MainPanelView>?
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
-    private var shortcutsObserver: NSObjectProtocol?
+    private var shortcutsObservers: [NSObjectProtocol] = []
     public private(set) var statusItem: NSStatusItem?
     private var activityToken: NSObjectProtocol?
     private var spaceChangeObserver: NSObjectProtocol?
@@ -1051,22 +1051,61 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupHotKeys() {
         registerCarbonHotKey()
-        if let existingObserver = shortcutsObserver {
-            NotificationCenter.default.removeObserver(existingObserver)
-            shortcutsObserver = nil
-        }
-        shortcutsObserver = NotificationCenter.default.addObserver(
+        shortcutsObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        shortcutsObservers.removeAll()
+
+        let didChangeObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name("pasteVaultShortcutsDidChange"),
             object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.registerCarbonHotKey()
+            queue: nil
+        ) { _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    AppDelegate.shared?.registerCarbonHotKey()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    AppDelegate.shared?.registerCarbonHotKey()
+                }
             }
         }
+
+        let didStartRecordingObserver = NotificationCenter.default.addObserver(
+            forName: ShortcutManager.recordingDidStartNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    AppDelegate.shared?.unregisterCarbonHotKey()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    AppDelegate.shared?.unregisterCarbonHotKey()
+                }
+            }
+        }
+
+        let didStopRecordingObserver = NotificationCenter.default.addObserver(
+            forName: ShortcutManager.recordingDidStopNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    AppDelegate.shared?.registerCarbonHotKey()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    AppDelegate.shared?.registerCarbonHotKey()
+                }
+            }
+        }
+
+        shortcutsObservers = [didChangeObserver, didStartRecordingObserver, didStopRecordingObserver]
     }
 
-    private func registerCarbonHotKey() {
+    private func unregisterCarbonHotKey() {
         if let existing = hotKeyRef {
             UnregisterEventHotKey(existing)
             hotKeyRef = nil
@@ -1075,6 +1114,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             RemoveEventHandler(existingHandler)
             eventHandlerRef = nil
         }
+    }
+
+    private func registerCarbonHotKey() {
+        unregisterCarbonHotKey()
+        guard !ShortcutManager.shared.isRecordingShortcut else { return }
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),

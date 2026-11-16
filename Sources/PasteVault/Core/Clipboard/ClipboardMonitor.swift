@@ -2110,7 +2110,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .color,
-                expectedTag: isEn ? "Color" : "Цвет"
+                expectedTag: nil
             ),
             SampleSpec(
                 text: "rgb(16, 185, 129)",
@@ -2119,7 +2119,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .color,
-                expectedTag: isEn ? "Color" : "Цвет"
+                expectedTag: nil
             ),
             SampleSpec(
                 text: isEn ? "[File: Security_Architecture.pdf]" : "[Файл: Архитектура_Безопасности.pdf]",
