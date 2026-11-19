@@ -24,8 +24,8 @@
 
 | File | Size | SHA-256 |
 | :--- | :--- | :--- |
-| **`PasteVault_v1.1.3_Universal.dmg`** | `11.4 MB` | `8830ea162021a6450f5c93ef5e7379021e855458c8e165a1387cc86bf24579fd` |
-| **`PasteVault_v1.1.3_Universal.zip`** | `7.7 MB` | `d1a4972cd51d1bb9a32248f24460912e6aa8f33cb99828bd307d870dd3849f39` |
+| **`PasteVault_v1.1.3_Universal.dmg`** | `16.8 MB` | `5eab53fc8e94afaec06915ae416b28f840e147124499a783971467669fa68423` |
+| **`PasteVault_v1.1.3_Universal.zip`** | `11.7 MB` | `df6acd45618a56f4a5bfe6d350898f3690ee0cc108c111a4d7eb9ec0c77281b6` |
 
 ---
 
