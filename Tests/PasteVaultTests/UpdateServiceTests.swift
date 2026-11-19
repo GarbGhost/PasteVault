@@ -31,10 +31,10 @@ final class UpdateServiceTests: XCTestCase {
     @MainActor
     func testPrivateOrOfflineStateDistinctFromUpToDate() {
         let releasesURL = UpdateService.releasesPageURL
-        let offline = UpdateService.UpdateState.privateOrOffline(currentVersion: "1.1.2", releasesURL: releasesURL)
-        let upToDate = UpdateService.UpdateState.upToDate(currentVersion: "1.1.2")
+        let offline = UpdateService.UpdateState.privateOrOffline(currentVersion: "1.1.3", releasesURL: releasesURL)
+        let upToDate = UpdateService.UpdateState.upToDate(currentVersion: "1.1.3")
         XCTAssertNotEqual(offline, upToDate, "404/offline state must stay distinct from verified upToDate state")
-        XCTAssertEqual(UpdateService.shared.currentVersion, "1.1.2")
+        XCTAssertEqual(UpdateService.shared.currentVersion, "1.1.3")
     }
 
     func testDetachedRelaunchCommandAndOpenPanelFlag() {

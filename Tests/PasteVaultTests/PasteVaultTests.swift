@@ -314,6 +314,383 @@ final class PasteVaultTests: XCTestCase {
         XCTAssertEqual(monitor.pasteboard.string(forType: .string), chosenFormat, "copyToClipboard must place the chosen format into pasteboard")
     }
 
+    func testManualColorEditInvalidatesCanonicalCacheAndUpdatesFormatsAndContent() {
+        let monitor = ClipboardMonitor.shared
+        let testId = "color-manual-edit-\(UUID().uuidString)"
+        let initialHex = "#FF0000"
+
+        let row = ClipboardItemRow(
+            id: testId,
+            rowid: 9997,
+            contentType: .color,
+            textPreview: initialHex,
+            contentHash: "hash-\(testId)",
+            sourceBundleId: "com.apple.test",
+            sourceAppName: "TestApp",
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: false,
+            createdAt: Int64(Date().timeIntervalSince1970),
+            expiresAt: nil
+        )
+        monitor.items.insert(row, at: 0)
+        defer {
+            monitor.items.removeAll { $0.id == testId }
+            monitor.evictCanonicalColor(for: testId)
+        }
+
+        // 1. Прогреваем кэш canonicalColorsByItemId исходным красным цветом
+        guard let initialFormats = monitor.colorFormats(for: row) else {
+            XCTFail("Expected initial colorFormats for #FF0000")
+            return
+        }
+        XCTAssertEqual(initialFormats.hex, "#FF0000")
+        XCTAssertEqual(initialFormats.rgb, "rgb(255, 0, 0)")
+
+        // 2. Ручное редактирование в новый HEX (#00AAFF) — кэш должен сброситься и пересчитаться
+        monitor.updateItemText(id: testId, newText: "#00AAFF")
+        guard let editedHexRow = monitor.items.first(where: { $0.id == testId }),
+              let editedHexFormats = monitor.colorFormats(for: editedHexRow) else {
+            XCTFail("Expected updated item and colorFormats after editing to #00AAFF")
+            return
+        }
+        XCTAssertEqual(editedHexRow.textPreview, "#00AAFF")
+        XCTAssertEqual(editedHexRow.content, "#00AAFF")
+        XCTAssertEqual(editedHexRow.effectiveContentType, .color)
+        XCTAssertEqual(editedHexFormats.hex, "#00AAFF", "HEX must reflect newly edited color, not old cached #FF0000")
+        XCTAssertEqual(editedHexFormats.rgb, "rgb(0, 170, 255)", "RGB must reflect newly edited color")
+        XCTAssertEqual(editedHexFormats.hsl, "hsl(200, 100%, 50%)", "HSL must reflect newly edited color")
+
+        // 3. Ручное редактирование в новый RGB — снова пересчитывается и кэшируется новый цвет
+        monitor.updateItemText(id: testId, newText: "rgb(16, 185, 129)")
+        guard let editedRgbRow = monitor.items.first(where: { $0.id == testId }),
+              let editedRgbFormats = monitor.colorFormats(for: editedRgbRow) else {
+            XCTFail("Expected updated item and colorFormats after editing to rgb(16, 185, 129)")
+            return
+        }
+        XCTAssertEqual(editedRgbRow.textPreview, "rgb(16, 185, 129)")
+        XCTAssertEqual(editedRgbRow.content, "rgb(16, 185, 129)")
+        XCTAssertEqual(editedRgbFormats.hex, "#10B981")
+        XCTAssertEqual(editedRgbFormats.rgb, "rgb(16, 185, 129)")
+
+        // 4. Попытка сохранить невалидный цвет (#3883, #32345123, notacolor) для существующей .color карточки:
+        // карточка НЕ должна превращаться в .text / .code / .secret, сохраняя тип .color и последний валидный цвет
+        for invalidColor in ["#3883", "#32345123", "#GGGGGG", "rgb(300, 10, 10)", "hsl(400, 50%, 50%)", "notacolor"] {
+            monitor.updateItemText(id: testId, newText: invalidColor)
+            guard let unchangedColorRow = monitor.items.first(where: { $0.id == testId }),
+                  let unchangedFormats = monitor.colorFormats(for: unchangedColorRow) else {
+                XCTFail("Color item must remain valid .color after rejecting '\(invalidColor)'")
+                return
+            }
+            XCTAssertEqual(unchangedColorRow.contentType, .color, "Color card must never turn into .text/.code/.secret on invalid edit '\(invalidColor)'")
+            XCTAssertEqual(unchangedColorRow.effectiveContentType, .color)
+            XCTAssertEqual(unchangedColorRow.textPreview, "rgb(16, 185, 129)")
+            XCTAssertEqual(unchangedFormats.hex, "#10B981")
+        }
+
+        // 5. Обычная карточка .text редактируется свободно без цветовых ограничений
+        let textId = "plain-text-edit-\(UUID().uuidString)"
+        let textRow = ClipboardItemRow(
+            id: textId,
+            rowid: 9996,
+            contentType: .text,
+            textPreview: "Initial plain text",
+            contentHash: "hash-\(textId)",
+            sourceBundleId: "com.apple.test",
+            sourceAppName: "TestApp",
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: false,
+            createdAt: Int64(Date().timeIntervalSince1970),
+            expiresAt: nil
+        )
+        monitor.items.insert(textRow, at: 0)
+        defer { monitor.items.removeAll { $0.id == textId } }
+
+        monitor.updateItemText(id: textId, newText: "Updated arbitrary text #3883")
+        let updatedTextRow = monitor.items.first(where: { $0.id == textId })
+        XCTAssertEqual(updatedTextRow?.textPreview, "Updated arbitrary text #3883")
+    }
+
+    func testLivePreviewColorFormatsRejectsPartialOrInvalidAndAcceptsValidFormats() {
+        // Частичный или невалидный ввод (включая 4/5/7/8-символьный HEX и выход за диапазоны RGB/HSL) должен строго отклоняться
+        let invalidDrafts = [
+            "",
+            "   ",
+            "#",
+            "#1",
+            "#12",
+            "#3883",
+            "#1234",
+            "#12345",
+            "#1234567",
+            "#32345123",
+            "#1E90FF80",
+            "#GGGGGG",
+            "#123xyz",
+            "rgb(",
+            "rgb(10, 20",
+            "rgb(10, 20)",
+            "rgb(300, 10, 10)",
+            "rgb(-5, 10, 10)",
+            "rgb(10, 20, 30, 0.5)",
+            "rgba(30, 144, 255, 0.5)",
+            "rgb(a, b, c)",
+            "hsl(120, 50%",
+            "hsl(120, 50%)",
+            "hsl(400, 50%, 50%)",
+            "hsl(200, 120%, 50%)",
+            "hsl(200, 50, 50)",
+            "hsla(200, 100%, 50%, 0.75)",
+            "hsl(abc, def, ghi)",
+            "notacolor",
+            "plain text"
+        ]
+        for draft in invalidDrafts {
+            XCTAssertFalse(
+                ClipboardMonitor.isValidStrictColorInput(draft),
+                "Strict color validator must reject '\(draft)'"
+            )
+            XCTAssertNil(
+                ClipboardMonitor.livePreviewColorFormats(for: draft),
+                "Partial/invalid draft '\(draft)' must return nil for live preview"
+            )
+        }
+
+        // Строго валидные форматы: #FFF, #3234FF, rgb(50, 52, 81), hsl(237, 24%, 26%)
+        let validSamples = ["#FFF", "#3234FF", "rgb(50, 52, 81)", "hsl(237, 24%, 26%)"]
+        for sample in validSamples {
+            XCTAssertTrue(
+                ClipboardMonitor.isValidStrictColorInput(sample),
+                "Strict color validator must accept '\(sample)'"
+            )
+            XCTAssertNotNil(
+                ClipboardMonitor.strictColorFormats(from: sample),
+                "strictColorFormats must return non-nil for '\(sample)'"
+            )
+        }
+
+        guard let shortHex = ClipboardMonitor.livePreviewColorFormats(for: "#FFF") else {
+            XCTFail("Expected valid live preview for #FFF")
+            return
+        }
+        XCTAssertEqual(shortHex.hex, "#FFF")
+        XCTAssertEqual(shortHex.rgb, "rgb(255, 255, 255)")
+
+        guard let fullHex = ClipboardMonitor.livePreviewColorFormats(for: " #3234FF ") else {
+            XCTFail("Expected valid live preview for #3234FF")
+            return
+        }
+        XCTAssertEqual(fullHex.hex, "#3234FF")
+        XCTAssertEqual(fullHex.rgb, "rgb(50, 52, 255)")
+        XCTAssertEqual(fullHex.hsl, "hsl(239, 100%, 60%)")
+        if let strictBlue = ClipboardMonitor.strictColorFormats(from: "#3234FF") {
+            XCTAssertEqual(strictBlue.rgb, "rgb(50, 52, 255)")
+            XCTAssertEqual(strictBlue.hsl, "hsl(239, 100%, 60%)")
+        } else {
+            XCTFail("strictColorFormats must parse #3234FF")
+        }
+
+        guard let rgbPreview = ClipboardMonitor.livePreviewColorFormats(for: "rgb(50, 52, 81)") else {
+            XCTFail("Expected valid live preview for rgb(50, 52, 81)")
+            return
+        }
+        XCTAssertEqual(rgbPreview.hex, "#323451")
+        XCTAssertEqual(rgbPreview.rgb, "rgb(50, 52, 81)")
+
+        guard let hslPreview = ClipboardMonitor.livePreviewColorFormats(for: "hsl(237, 24%, 26%)") else {
+            XCTFail("Expected valid live preview for hsl(237, 24%, 26%)")
+            return
+        }
+        XCTAssertEqual(hslPreview.hsl, "hsl(237, 24%, 26%)")
+    }
+
+    func testLiveEditingColorValueRetainsLastValidColorAcrossInvalidDraftAndResetsOnCancel() {
+        let savedText = "#3234FF"
+        guard let initialFormats = ClipboardMonitor.strictColorFormats(from: savedText) else {
+            XCTFail("Expected valid initial formats for #3234FF")
+            return
+        }
+        XCTAssertEqual(initialFormats.rgb, "rgb(50, 52, 255)")
+        XCTAssertEqual(initialFormats.hsl, "hsl(239, 100%, 60%)")
+
+        var lastValidFormats = initialFormats
+        var lastValidDisplayText = savedText
+
+        // 1. Пользователь вводит новый валидный цвет #111111 в режиме Edit
+        let validDraft = "#111111"
+        if let live = ClipboardMonitor.livePreviewColorFormats(for: validDraft) {
+            lastValidFormats = live
+            lastValidDisplayText = live.hex
+        }
+        let headerAfterValid = MainPanelView.resolvedEditingColorDisplayText(
+            isEditing: true,
+            draftText: validDraft,
+            savedText: savedText,
+            lastValidFormats: lastValidFormats,
+            lastValidDisplayText: lastValidDisplayText
+        )
+        XCTAssertEqual(headerAfterValid, "#111111")
+        XCTAssertEqual(lastValidFormats.hex, "#111111")
+        XCTAssertEqual(lastValidFormats.rgb, "rgb(17, 17, 17)")
+
+        // 2. Пользователь удаляет один символ (#11111 — невалидно):
+        // ни 3D-сфера/чипсы (lastValidFormats), ни крупный заголовок под Color Value НЕ должны откатываться на #3234FF
+        let invalidDraft = "#11111"
+        XCTAssertNil(ClipboardMonitor.livePreviewColorFormats(for: invalidDraft))
+        let headerOnInvalid = MainPanelView.resolvedEditingColorDisplayText(
+            isEditing: true,
+            draftText: invalidDraft,
+            savedText: savedText,
+            lastValidFormats: lastValidFormats,
+            lastValidDisplayText: lastValidDisplayText
+        )
+        XCTAssertEqual(headerOnInvalid, "#111111", "Color Value heading must stay on #111111 during invalid draft, not revert to #3234FF")
+        XCTAssertEqual(lastValidFormats.hex, "#111111")
+
+        // 3. При нажатии Cancel (isEditing == false) заголовок возвращается к сохранённому #3234FF
+        let headerAfterCancel = MainPanelView.resolvedEditingColorDisplayText(
+            isEditing: false,
+            draftText: "",
+            savedText: savedText,
+            lastValidFormats: nil,
+            lastValidDisplayText: nil
+        )
+        XCTAssertEqual(headerAfterCancel, "#3234FF")
+    }
+
+    func testSelectColorFormatHexRgbHslSwitchPreservesExact3234FFValues() {
+        let monitor = ClipboardMonitor.shared
+        let testId = "color-3234ff-switch-\(UUID().uuidString)"
+        let initialHex = "#3234FF"
+
+        let row = ClipboardItemRow(
+            id: testId,
+            rowid: 9997,
+            contentType: .color,
+            textPreview: initialHex,
+            contentHash: "hash-\(testId)",
+            sourceBundleId: "com.apple.test",
+            sourceAppName: "TestApp",
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: false,
+            createdAt: Int64(Date().timeIntervalSince1970),
+            expiresAt: nil
+        )
+        monitor.items.insert(row, at: 0)
+        defer {
+            monitor.items.removeAll { $0.id == testId }
+            monitor.evictCanonicalColor(for: testId)
+        }
+
+        guard let formats = monitor.colorFormats(for: row) else {
+            XCTFail("Expected colorFormats for #3234FF")
+            return
+        }
+        XCTAssertEqual(formats.hex, "#3234FF")
+        XCTAssertEqual(formats.rgb, "rgb(50, 52, 255)")
+        XCTAssertEqual(formats.hsl, "hsl(239, 100%, 60%)")
+
+        // HEX -> RGB
+        monitor.selectColorFormat(for: testId, newText: formats.rgb)
+        let afterRgb = monitor.items.first(where: { $0.id == testId })
+        XCTAssertEqual(afterRgb?.textPreview, "rgb(50, 52, 255)")
+        XCTAssertEqual(afterRgb?.content, "rgb(50, 52, 255)")
+        XCTAssertEqual(afterRgb?.contentType, .color)
+        XCTAssertEqual(monitor.colorFormats(for: afterRgb!)?.hex, "#3234FF")
+
+        // RGB -> HSL
+        monitor.selectColorFormat(for: testId, newText: formats.hsl)
+        let afterHsl = monitor.items.first(where: { $0.id == testId })
+        XCTAssertEqual(afterHsl?.textPreview, "hsl(239, 100%, 60%)")
+        XCTAssertEqual(afterHsl?.content, "hsl(239, 100%, 60%)")
+        XCTAssertEqual(monitor.colorFormats(for: afterHsl!)?.rgb, "rgb(50, 52, 255)")
+
+        // HSL -> HEX
+        monitor.selectColorFormat(for: testId, newText: formats.hex)
+        let afterHex = monitor.items.first(where: { $0.id == testId })
+        XCTAssertEqual(afterHex?.textPreview, "#3234FF")
+        XCTAssertEqual(afterHex?.content, "#3234FF")
+    }
+
+    func testSecretPasswordRevealToggleAndAutoResetOnSelectionChange() {
+        let secretId = "secret-card-\(UUID().uuidString)"
+        let otherId = "other-card-\(UUID().uuidString)"
+        let rawPassword = "SuperSecretPassword!2026"
+        let expectedMasked = SmartClassifier.maskedSecret(rawPassword)
+
+        // 1. По умолчанию пароль скрыт (revealedSecretItemId == nil)
+        var revealedSecretItemId: String? = nil
+        XCTAssertEqual(
+            MainPanelView.resolvedSecretDisplayText(
+                rawText: rawPassword,
+                previewText: rawPassword,
+                itemId: secretId,
+                revealedSecretItemId: revealedSecretItemId
+            ),
+            expectedMasked,
+            "Secret must be masked by default"
+        )
+
+        // 2. Нажатие «Показать пароль» раскрывает полный текст только для выбранной карточки
+        revealedSecretItemId = MainPanelView.toggleSecretReveal(for: secretId, currentRevealedId: revealedSecretItemId)
+        XCTAssertEqual(revealedSecretItemId, secretId)
+        XCTAssertEqual(
+            MainPanelView.resolvedSecretDisplayText(
+                rawText: rawPassword,
+                previewText: rawPassword,
+                itemId: secretId,
+                revealedSecretItemId: revealedSecretItemId
+            ),
+            rawPassword,
+            "Secret must display full raw password when revealed"
+        )
+        XCTAssertEqual(
+            MainPanelView.resolvedSecretDisplayText(
+                rawText: rawPassword,
+                previewText: rawPassword,
+                itemId: otherId,
+                revealedSecretItemId: revealedSecretItemId
+            ),
+            expectedMasked,
+            "Other secret cards must remain masked"
+        )
+
+        // 3. Повторное нажатие «Скрыть пароль» снова маскирует пароль
+        revealedSecretItemId = MainPanelView.toggleSecretReveal(for: secretId, currentRevealedId: revealedSecretItemId)
+        XCTAssertNil(revealedSecretItemId)
+        XCTAssertEqual(
+            MainPanelView.resolvedSecretDisplayText(
+                rawText: rawPassword,
+                previewText: rawPassword,
+                itemId: secretId,
+                revealedSecretItemId: revealedSecretItemId
+            ),
+            expectedMasked
+        )
+
+        // 4. Раскрываем снова и проверяем автосброс при смене выбранной карточки
+        revealedSecretItemId = MainPanelView.toggleSecretReveal(for: secretId, currentRevealedId: revealedSecretItemId)
+        XCTAssertEqual(revealedSecretItemId, secretId)
+
+        revealedSecretItemId = MainPanelView.resetSecretRevealOnSelectionChange(
+            previousSelectedId: secretId,
+            newSelectedId: otherId,
+            currentRevealedId: revealedSecretItemId
+        )
+        XCTAssertNil(revealedSecretItemId, "Switching card selection must automatically reset revealedSecretItemId to nil")
+        XCTAssertEqual(
+            MainPanelView.resolvedSecretDisplayText(
+                rawText: rawPassword,
+                previewText: rawPassword,
+                itemId: secretId,
+                revealedSecretItemId: revealedSecretItemId
+            ),
+            expectedMasked
+        )
+    }
+
     // MARK: - Тест подавления дребезга и двойного щелчка Taptic (>= 85 мс)
     func testTapticSingleClickDebounce() {
         XCTAssertGreaterThanOrEqual(
@@ -327,6 +704,39 @@ final class PasteVaultTests: XCTestCase {
         let immediateSecond = TapticSoundAndHaptics.shared.playClick()
         XCTAssertTrue(first, "First click after resetMouseCycle() must fire")
         XCTAssertFalse(immediateSecond, "Immediate second playClick() within debounce window must be suppressed")
+    }
+
+    func testPassGenSingleClickGateBlocksSecondaryWheelTickAndGenerationLoopEmitsNoExtraTrigger() {
+        // 1. Симулируем клик по кнопке PassGen (.pvButton):
+        // mouseDown -> PVButtonBody.playClick(), mouseUp -> action (даже если бы вызвал performDialTick/playWheelTick)
+        TapticSoundAndHaptics.shared.resetMouseCycle()
+        TapticSoundAndHaptics.shared.simulateMouseDown()
+
+        let clickOnMouseDown = TapticSoundAndHaptics.shared.playClick()
+        XCTAssertTrue(clickOnMouseDown, "PVButton mouseDown click must fire once")
+
+        TapticSoundAndHaptics.shared.simulateMouseUp()
+
+        let secondaryDialTick = TapticSoundAndHaptics.shared.performDialTick()
+        let secondaryWheelTick = TapticSoundAndHaptics.shared.playWheelTick()
+        let secondaryClick = TapticSoundAndHaptics.shared.playClick()
+        XCTAssertFalse(secondaryDialTick, "performDialTick() in the same mouse cycle (< 350ms) must be blocked by One-Click-Per-MouseDown Gate")
+        XCTAssertFalse(secondaryWheelTick, "playWheelTick() in the same mouse cycle (< 350ms) must be blocked by One-Click-Per-MouseDown Gate")
+        XCTAssertFalse(secondaryClick, "Second playClick() within 350ms must be suppressed")
+
+        // 2. Цикл генерации паролей/фраз в PassGenerator не должен дёргать звуковой движок
+        for _ in 0..<20 {
+            let pwd = PassGenerator.generatePassword(length: 16, includeUppercase: true, includeDigits: true, includeSymbols: true)
+            XCTAssertEqual(pwd.secret.count, 16)
+            let mnemonic = PassGenerator.generateMnemonic(wordCount: 5)
+            XCTAssertFalse(mnemonic.secret.isEmpty)
+        }
+        XCTAssertFalse(TapticSoundAndHaptics.shared.playWheelTick(), "Gate must remain intact after PassGenerator loop")
+
+        // 3. Колесо таймера (playWheelTick без предшествующего playClick) должно продолжать работать штатно
+        TapticSoundAndHaptics.shared.resetMouseCycle()
+        usleep(45_000) // > 35ms wheelTickInterval
+        XCTAssertTrue(TapticSoundAndHaptics.shared.playWheelTick(), "Timer wheel tick without preceding button click must still fire")
     }
 
     // MARK: - Тест контрастности и целостности всех 10 тем оформления
@@ -1217,5 +1627,293 @@ final class PasteVaultTests: XCTestCase {
         // Обычные полезные теги (#OCR, #Swift) сохраняются
         let imageTags = ClipboardRowCardView.visibleTags(for: ["#OCR"], contentType: .image, in: .ru)
         XCTAssertEqual(imageTags, ["#OCR"])
+    }
+
+    // MARK: - Этап 6: Retry-контроллер буфера и прямое чтение изображений
+    @MainActor
+    func testDelayedScreenshotDataIsCapturedOnRetryWithoutDuplicates() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        let monitor = ClipboardMonitor.shared
+        monitor.clearAllHistoryInMemory()
+        let prevSaveImages = monitor.saveImagesEnabled
+        let prevIncognito = monitor.isIncognitoPaused
+        monitor.saveImagesEnabled = true
+        monitor.isIncognitoPaused = false
+        defer {
+            monitor.saveImagesEnabled = prevSaveImages
+            monitor.isIncognitoPaused = prevIncognito
+            monitor.clearAllHistoryInMemory()
+            monitor.resetRetryStateForTesting()
+            Task { try? await DatabaseManager.shared.clearAllHistory() }
+        }
+
+        // Создаём валидный PNG (52x36)
+        let imgSize = NSSize(width: 52, height: 36)
+        let image = NSImage(size: imgSize)
+        image.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSRect(origin: .zero, size: imgSize).fill()
+        image.unlockFocus()
+        let tiffData = try XCTUnwrap(image.tiffRepresentation)
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: tiffData))
+        let pngData = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+
+        let pb = monitor.pasteboard
+        monitor.resetRetryStateForTesting()
+        let initialCount = monitor.lastHandledChangeCountForTesting
+
+        // Шаг 1: объявляем .png без данных (имитируем отложенную запись screencaptureui)
+        let declaredChangeCount = pb.declareTypes([.png], owner: nil)
+        XCTAssertNotEqual(declaredChangeCount, initialCount)
+
+        // Тик 1: данные ещё nil -> элемент не захвачен, lastChangeCount НЕ зафиксирован, attempts = 1
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.screencaptureui", sourceAppNameOverride: "Screenshot")
+        XCTAssertTrue(monitor.items.isEmpty)
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, initialCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.changeCount, declaredChangeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 1)
+
+        // Тик 2: всё ещё nil -> attempts = 2, lastChangeCount по-прежнему не зафиксирован
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.screencaptureui", sourceAppNameOverride: "Screenshot")
+        XCTAssertTrue(monitor.items.isEmpty)
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, initialCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 2)
+
+        // Шаг 2: данные PNG дописаны под тем же changeCount
+        XCTAssertTrue(pb.setData(pngData, forType: .png))
+        XCTAssertEqual(pb.changeCount, declaredChangeCount)
+
+        // Тик 3: изображение успешно захвачено ровно 1 раз, raw PNG сохранён напрямую, lastChangeCount зафиксирован
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.screencaptureui", sourceAppNameOverride: "Screenshot")
+        XCTAssertEqual(monitor.items.count, 1)
+        let captured = try XCTUnwrap(monitor.items.first)
+        XCTAssertEqual(captured.effectiveContentType, .image)
+        XCTAssertEqual(captured.rawImageData, pngData)
+        XCTAssertTrue(DatabaseManager.isPNGData(try XCTUnwrap(captured.rawImageData)))
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, declaredChangeCount)
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+
+        // Тик 4: повторный вызов не создаёт дубль
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.screencaptureui", sourceAppNameOverride: "Screenshot")
+        XCTAssertEqual(monitor.items.count, 1)
+    }
+
+    @MainActor
+    func testRetryStopsAndCommitsLastChangeCountAfterMaxAttempts() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        let monitor = ClipboardMonitor.shared
+        monitor.clearAllHistoryInMemory()
+        let prevIncognito = monitor.isIncognitoPaused
+        monitor.isIncognitoPaused = false
+        defer {
+            monitor.isIncognitoPaused = prevIncognito
+            monitor.clearAllHistoryInMemory()
+            monitor.resetRetryStateForTesting()
+            Task { try? await DatabaseManager.shared.clearAllHistory() }
+        }
+
+        let pb = monitor.pasteboard
+        monitor.resetRetryStateForTesting()
+        let initialCount = monitor.lastHandledChangeCountForTesting
+
+        // Пустой буфер (clearContents меняет changeCount, но types пуст)
+        let emptyChangeCount = pb.clearContents()
+        XCTAssertNotEqual(emptyChangeCount, initialCount)
+
+        let maxAttempts = ClipboardMonitor.maxPendingRetryAttempts
+        for attempt in 1..<maxAttempts {
+            monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.Preview", sourceAppNameOverride: "Preview")
+            XCTAssertEqual(monitor.lastHandledChangeCountForTesting, initialCount, "Must not commit before max attempts (attempt \(attempt))")
+            XCTAssertEqual(monitor.pendingRetryStateForTesting.changeCount, emptyChangeCount)
+            XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, attempt)
+        }
+
+        // На последней попытке (12-й тик) lastChangeCount фиксируется, retry-состояние очищается
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.Preview", sourceAppNameOverride: "Preview")
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, emptyChangeCount)
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+        XCTAssertTrue(monitor.items.isEmpty)
+
+        // Последующий тик ничего не инкрементирует и не повторяет
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.Preview", sourceAppNameOverride: "Preview")
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+    }
+
+    @MainActor
+    func testIntentionalSkipsCommitLastChangeCountImmediatelyWithoutRetry() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        let monitor = ClipboardMonitor.shared
+        monitor.clearAllHistoryInMemory()
+        let prevIncognito = monitor.isIncognitoPaused
+        let prevSaveImages = monitor.saveImagesEnabled
+        defer {
+            monitor.isIncognitoPaused = prevIncognito
+            monitor.saveImagesEnabled = prevSaveImages
+            monitor.clearAllHistoryInMemory()
+            monitor.resetRetryStateForTesting()
+            Task { try? await DatabaseManager.shared.clearAllHistory() }
+        }
+
+        let pb = monitor.pasteboard
+        monitor.resetRetryStateForTesting()
+
+        // 1. Инкогнито: фиксирует changeCount сразу на 1-м тике без retry
+        monitor.isIncognitoPaused = true
+        let incognitoCount = pb.clearContents()
+        pb.setString("incognito-secret", forType: .string)
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.Safari", sourceAppNameOverride: "Safari")
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, incognitoCount)
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+        XCTAssertTrue(monitor.items.isEmpty)
+        monitor.isIncognitoPaused = false
+
+        // 2. TransientType: фиксирует changeCount сразу на 1-м тике без retry
+        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        let transientCount = pb.declareTypes([transientType, .string], owner: nil)
+        pb.setString("transient-value", forType: .string)
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.Safari", sourceAppNameOverride: "Safari")
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, transientCount)
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+        XCTAssertTrue(monitor.items.isEmpty)
+
+        // 3. Чёрный список приложений: фиксирует changeCount сразу на 1-м тике без retry
+        let blacklistedCount = pb.clearContents()
+        pb.setString("1password-secret", forType: .string)
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.1password.1password", sourceAppNameOverride: "1Password")
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, blacklistedCount)
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+        XCTAssertTrue(monitor.items.isEmpty)
+
+        // 4. Отключённое сохранение картинок: даже если image-данные ещё не готовы, фиксирует сразу без retry
+        monitor.saveImagesEnabled = false
+        let disabledImgCount = pb.declareTypes([.png], owner: nil)
+        monitor.pollPasteboardTickForTesting(sourceBundleIDOverride: "com.apple.screencaptureui", sourceAppNameOverride: "Screenshot")
+        XCTAssertEqual(monitor.lastHandledChangeCountForTesting, disabledImgCount)
+        XCTAssertNil(monitor.pendingRetryStateForTesting.changeCount)
+        XCTAssertEqual(monitor.pendingRetryStateForTesting.attempts, 0)
+        XCTAssertTrue(monitor.items.isEmpty)
+    }
+
+    // MARK: - Этап 7: Локализация карточек .file и удаление дубля тега #File / #Файл
+    @MainActor
+    func testFileCardPreviewTextIsLocalizedOnCaptureAndForLegacySQLiteItems() async throws {
+        try await DatabaseManager.shared.initializeDatabase()
+        let monitor = ClipboardMonitor.shared
+        monitor.clearAllHistoryInMemory()
+        let prevLang = AppDefaults.shared.string(forKey: "appLanguage")
+        let prevSaveFiles = monitor.saveFilesEnabled
+        monitor.saveFilesEnabled = true
+        defer {
+            if let prevLang {
+                AppDefaults.shared.set(prevLang, forKey: "appLanguage")
+            } else {
+                AppDefaults.shared.removeObject(forKey: "appLanguage")
+            }
+            monitor.saveFilesEnabled = prevSaveFiles
+            monitor.clearAllHistoryInMemory()
+            Task { try? await DatabaseManager.shared.clearAllHistory() }
+        }
+
+        // 1. Захват одного и нескольких файлов при EN-локали
+        AppDefaults.shared.set("en", forKey: "appLanguage")
+        let readmeURL = URL(fileURLWithPath: "/tmp/README.md")
+        let notesURL = URL(fileURLWithPath: "/tmp/NOTES.txt")
+        monitor.captureFileItem([readmeURL], bundleId: "com.apple.finder", appName: "Finder")
+        let enSingle = try XCTUnwrap(monitor.items.first)
+        XCTAssertEqual(enSingle.textPreview, "[File: README.md]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: enSingle, in: .en), "[File: README.md]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: enSingle, in: .ru), "[Файл: README.md]")
+        XCTAssertEqual(enSingle.fileURLs, [readmeURL])
+
+        monitor.captureFileItem([readmeURL, notesURL], bundleId: "com.apple.finder", appName: "Finder")
+        let enMulti = try XCTUnwrap(monitor.items.first)
+        XCTAssertEqual(enMulti.textPreview, "[Files: 2 items — README.md & more]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: enMulti, in: .en), "[Files: 2 items — README.md & more]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: enMulti, in: .ru), "[Файлы: 2 шт. — README.md и др.]")
+
+        // 2. Захват при RU-локали
+        monitor.clearAllHistoryInMemory()
+        AppDefaults.shared.set("ru", forKey: "appLanguage")
+        monitor.captureFileItem([readmeURL], bundleId: "com.apple.finder", appName: "Finder")
+        let ruSingle = try XCTUnwrap(monitor.items.first)
+        XCTAssertEqual(ruSingle.textPreview, "[Файл: README.md]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: ruSingle, in: .en), "[File: README.md]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: ruSingle, in: .ru), "[Файл: README.md]")
+
+        // 3. Старые/закреплённые записи из SQLite с "[Файл: README.md]" и "[Файлы: 3 шт. — README.md и др.]" без fileURLPath
+        let legacySingleRu = ClipboardItemRow(
+            id: "legacy-file-single",
+            rowid: 1,
+            contentType: .file,
+            textPreview: "[Файл: README.md]",
+            contentHash: "legacy-file-single-hash",
+            sourceBundleId: "com.apple.finder",
+            sourceAppName: "Finder",
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: true,
+            createdAt: 100,
+            expiresAt: nil
+        )
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: legacySingleRu, in: .en), "[File: README.md]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: legacySingleRu, in: .ru), "[Файл: README.md]")
+
+        let legacyMultiRu = ClipboardItemRow(
+            id: "legacy-file-multi",
+            rowid: 2,
+            contentType: .file,
+            textPreview: "[Файлы: 3 шт. — README.md и др.]",
+            contentHash: "legacy-file-multi-hash",
+            sourceBundleId: "com.apple.finder",
+            sourceAppName: "Finder",
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: true,
+            createdAt: 101,
+            expiresAt: nil
+        )
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: legacyMultiRu, in: .en), "[Files: 3 items — README.md & more]")
+        XCTAssertEqual(ClipboardRowCardView.displayPreviewText(for: legacyMultiRu, in: .ru), "[Файлы: 3 шт. — README.md и др.]")
+    }
+
+    @MainActor
+    func testFileCardsDoNotAddOrDisplayDuplicateFileTag() {
+        XCTAssertEqual(SmartClassifier.classify(text: "[Файл: README.md]", isSensitive: false), .file)
+        XCTAssertEqual(SmartClassifier.classify(text: "[File: README.md]", isSensitive: false), .file)
+
+        let ruTags = SmartClassifier.tags(for: "[Файл: README.md]", contentType: .file, isSensitive: false, language: .ru)
+        let enTags = SmartClassifier.tags(for: "[File: README.md]", contentType: .file, isSensitive: false, language: .en)
+        XCTAssertFalse(ruTags.contains("#Файл") || ruTags.contains("Файл") || ruTags.contains("#File") || ruTags.contains("File"))
+        XCTAssertFalse(enTags.contains("#File") || enTags.contains("File") || enTags.contains("#Файл") || enTags.contains("Файл"))
+
+        let row = ClipboardItemRow(
+            id: "file-tag-test",
+            rowid: 1,
+            contentType: .file,
+            textPreview: "[File: README.md]",
+            contentHash: "file-tag-test-hash",
+            sourceBundleId: "com.apple.finder",
+            sourceAppName: "Finder",
+            isSensitive: false,
+            secretKind: nil,
+            isPinned: false,
+            createdAt: 1,
+            expiresAt: nil,
+            fileURLPath: "/tmp/README.md"
+        )
+        XCTAssertTrue(row.detectedTags.isEmpty)
+
+        // Старые записи с "#Файл" / "#File" / "Файл" / "File" в любом регистре отфильтровываются, а полезные теги остаются
+        let legacyMixedTags = ["#Файл", "#File", "файл", "FILE", " #file ", "#OCR", "#Swift", "#JSON"]
+        let visibleEn = ClipboardRowCardView.visibleTags(for: legacyMixedTags, contentType: .file, in: .en)
+        let visibleRu = ClipboardRowCardView.visibleTags(for: legacyMixedTags, contentType: .file, in: .ru)
+        XCTAssertEqual(visibleEn, ["#OCR", "#Swift", "#JSON"])
+        XCTAssertEqual(visibleRu, ["#OCR", "#Swift", "#JSON"])
     }
 }

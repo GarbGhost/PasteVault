@@ -1082,7 +1082,7 @@ final class DestructiveE2ETests: XCTestCase {
         XCTAssertTrue(enUtmTags.contains("#UTM-tracker"), "В EN тег ссылки должен быть '#UTM-tracker', получено: \(enUtmTags)")
 
         let enFileTags = SmartClassifier.tags(for: "[File: demo.pdf]", contentType: .file, isSensitive: false, language: .en)
-        XCTAssertTrue(enFileTags.contains("#File"), "В EN тег файла должен быть '#File', получено: \(enFileTags)")
+        XCTAssertFalse(enFileTags.contains("#File") || enFileTags.contains("#Файл"), "У карточки файла не должно быть дублирующего тега #File/#Файл: \(enFileTags)")
 
         let macroExpandedEn = SnippetMacroEngine.expand(
             "App={{app}} Day={{weekday}}",

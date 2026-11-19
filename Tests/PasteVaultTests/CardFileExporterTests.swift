@@ -273,8 +273,8 @@ final class CardFileExporterTests: XCTestCase {
         )
         XCTAssertEqual(
             UpdateService.shared.currentVersion,
-            "1.1.2",
-            "Текущая версия приложения в UpdateService должна быть 1.1.2"
+            "1.1.3",
+            "Текущая версия приложения в UpdateService должна быть 1.1.3"
         )
     }
 
