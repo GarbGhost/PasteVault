@@ -1,5 +1,34 @@
 # Changelog / История изменений
 
+## [1.1.3] - 2026-11-19
+
+### 🇷🇺 Русский
+
+- Надёжный перехват скриншотов и картинок: снимки экрана больше не теряются, даже если система записывает их в буфер с небольшой задержкой; улучшена поддержка разных форматов изображений.
+- Умные карточки цветов: ручное редактирование цвета теперь сразу пересчитывает форматы HEX, RGB и HSL, показывает живой предпросмотр на объёмном индикаторе цвета, подсвечивает ошибки ввода и плавно анимирует переключение форматов.
+- Карточки файлов и секретов: названия файлов переводятся по выбранному языку интерфейса без дублирующих тегов, добавлена плавная анимация показа и скрытия паролей.
+- Звук и интерфейс: устранён двойной щелчок на кнопках генератора паролей и подправлено скругление полосы прокрутки в окне обновлений.
+
+<details>
+<summary><b>🇬🇧 English (click to expand)</b></summary>
+<br>
+
+- Reliable screenshot & image capture: screenshots are no longer missed even when macOS writes them to the clipboard with a slight delay, with broader image format support.
+- Smarter color cards: editing a color now updates HEX, RGB, and HSL values with live preview on the 3D color indicator, validates invalid input, and smoothly animates format switching.
+- Files & secrets: file cards adapt cleanly to the selected app language without duplicate tags, and password reveal/hide now animates smoothly.
+- Audio & UI polish: fixed the double-click sound on Password Generator buttons and clipped the scrollbar corners inside the Update Available window.
+
+</details>
+
+### 🔐 Checksums (`SHA-256`)
+
+| File | Size | SHA-256 |
+| :--- | :--- | :--- |
+| **`PasteVault_v1.1.3_Universal.dmg`** | `11.4 MB` | `8830ea162021a6450f5c93ef5e7379021e855458c8e165a1387cc86bf24579fd` |
+| **`PasteVault_v1.1.3_Universal.zip`** | `7.7 MB` | `d1a4972cd51d1bb9a32248f24460912e6aa8f33cb99828bd307d870dd3849f39` |
+
+---
+
 ## [1.1.2] - 2026-11-16
 
 ### 🇷🇺 Русский
