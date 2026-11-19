@@ -279,17 +279,117 @@ public final class ClipboardMonitor: ObservableObject {
     /// Гарантирует 100% отсутствие дрейфа точности при переключении HEX <-> RGB <-> HSL.
     private var canonicalColorsByItemId: [String: (hex: String, rgb: String, hsl: String, color: NSColor)] = [:]
 
-    /// Возвращает эталонные строковые форматы (HEX, RGB, HSL) и NSColor для карточки цвета.
-    /// При первом вызове рассчитывает и кэширует эталонные значения, сохраняя точность исходного цвета.
-    public func colorFormats(for item: ClipboardItemRow) -> (hex: String, rgb: String, hsl: String, color: NSColor)? {
-        if let cached = canonicalColorsByItemId[item.id] {
-            return cached
+    /// Строгий валидатор редактирования кода цвета для карточек типа `.color`:
+    /// - HEX: строго `#` + ровно 3 или ровно 6 символов `[0-9a-fA-F]` (4, 5, 7, 8+ символов вроде `#3883` или `#32345123` невалидны)
+    /// - RGB: строго `rgb(R, G, B)`, где R, G, B — целые числа `0...255`
+    /// - HSL: строго `hsl(H, S%, L%)`, где H в `0...360`, S и L в `0...100` со знаком `%`
+    public static func isValidStrictColorInput(_ rawText: String) -> Bool {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\n") else { return false }
+
+        if trimmed.hasPrefix("#") {
+            let hex = String(trimmed.dropFirst())
+            guard hex.count == 3 || hex.count == 6 else { return false }
+            return hex.unicodeScalars.allSatisfy { scalar in
+                (scalar.value >= 48 && scalar.value <= 57) ||
+                (scalar.value >= 65 && scalar.value <= 70) ||
+                (scalar.value >= 97 && scalar.value <= 102)
+            }
         }
-        guard let nsColor = SmartClassifier.parseNSColor(item.textPreview) else {
+
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("rgb(") && trimmed.hasSuffix(")") {
+            let inside = trimmed.dropFirst(4).dropLast()
+            let parts = inside.split(separator: ",", omittingEmptySubsequences: false)
+            guard parts.count == 3 else { return false }
+            for part in parts {
+                let token = part.trimmingCharacters(in: .whitespaces)
+                guard !token.isEmpty,
+                      token.unicodeScalars.allSatisfy({ $0.value >= 48 && $0.value <= 57 }),
+                      let val = Int(token),
+                      (0...255).contains(val) else {
+                    return false
+                }
+            }
+            return true
+        }
+
+        if lower.hasPrefix("hsl(") && trimmed.hasSuffix(")") {
+            let inside = trimmed.dropFirst(4).dropLast()
+            let parts = inside.split(separator: ",", omittingEmptySubsequences: false)
+            guard parts.count == 3 else { return false }
+
+            let hToken = parts[0].trimmingCharacters(in: .whitespaces)
+            guard !hToken.isEmpty,
+                  hToken.unicodeScalars.allSatisfy({ $0.value >= 48 && $0.value <= 57 }),
+                  let hVal = Int(hToken),
+                  (0...360).contains(hVal) else {
+                return false
+            }
+
+            for idx in 1...2 {
+                let token = parts[idx].trimmingCharacters(in: .whitespaces)
+                guard token.hasSuffix("%") else { return false }
+                let numPart = String(token.dropLast())
+                guard !numPart.isEmpty,
+                      numPart.unicodeScalars.allSatisfy({ $0.value >= 48 && $0.value <= 57 }),
+                      let val = Int(numPart),
+                      (0...100).contains(val) else {
+                    return false
+                }
+            }
+            return true
+        }
+
+        return false
+    }
+
+    /// Возвращает эталонные форматы (HEX, RGB, HSL, NSColor) только для строго валидного кода цвета (`.color` Edit).
+    public static func strictColorFormats(
+        from rawText: String
+    ) -> (hex: String, rgb: String, hsl: String, color: NSColor)? {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidStrictColorInput(trimmed),
+              let nsColor = SmartClassifier.parseNSColor(trimmed) else {
             return nil
         }
 
-        let trimmed = item.textPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hex: String
+        let rgb: String
+        let hsl: String
+
+        if trimmed.hasPrefix("#") {
+            hex = trimmed.uppercased()
+            rgb = nsColor.rgbString
+            hsl = nsColor.hslString
+        } else if trimmed.lowercased().hasPrefix("rgb") {
+            rgb = trimmed
+            hex = nsColor.hexString
+            hsl = nsColor.hslString
+        } else {
+            hsl = trimmed
+            hex = nsColor.hexString
+            rgb = nsColor.rgbString
+        }
+
+        return (hex: hex, rgb: rgb, hsl: hsl, color: nsColor)
+    }
+
+    /// Парсит строку цвета (#HEX, rgb/rgba, hsl/hsla) и возвращает эталонные форматы (HEX, RGB, HSL, NSColor).
+    /// При `strict: true` (для live preview во время набора и ручного сохранения) использует строгий валидатор `isValidStrictColorInput`.
+    public static func parseColorFormats(
+        from rawText: String,
+        strict: Bool = false
+    ) -> (hex: String, rgb: String, hsl: String, color: NSColor)? {
+        if strict {
+            return strictColorFormats(from: rawText)
+        }
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let nsColor = SmartClassifier.parseNSColor(trimmed) else {
+            return nil
+        }
+
         let hex: String
         let rgb: String
         let hsl: String
@@ -312,7 +412,26 @@ public final class ClipboardMonitor: ObservableObject {
             hsl = nsColor.hslString
         }
 
-        let formats = (hex: hex, rgb: rgb, hsl: hsl, color: nsColor)
+        return (hex: hex, rgb: rgb, hsl: hsl, color: nsColor)
+    }
+
+    /// Парсит живой предпросмотр цвета во время ручного набора в Edit без изменения кэша и базы.
+    /// Возвращает `nil` при частичном или невалидном вводе.
+    public static func livePreviewColorFormats(
+        for draftText: String
+    ) -> (hex: String, rgb: String, hsl: String, color: NSColor)? {
+        strictColorFormats(from: draftText)
+    }
+
+    /// Возвращает эталонные строковые форматы (HEX, RGB, HSL) и NSColor для карточки цвета.
+    /// При первом вызове рассчитывает и кэширует эталонные значения, сохраняя точность исходного цвета.
+    public func colorFormats(for item: ClipboardItemRow) -> (hex: String, rgb: String, hsl: String, color: NSColor)? {
+        if let cached = canonicalColorsByItemId[item.id] {
+            return cached
+        }
+        guard let formats = Self.parseColorFormats(from: item.textPreview, strict: false) else {
+            return nil
+        }
         canonicalColorsByItemId[item.id] = formats
         return formats
     }
@@ -375,8 +494,54 @@ public final class ClipboardMonitor: ObservableObject {
     public func updateItemText(id: String, newText: String) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         let cur = items[idx]
+
+        // Для существующих карточек .color применяем строгую валидацию:
+        // невалидный ввод отклоняется (карточка никогда не превращается в .text / .code / .secret),
+        // а валидный цвет пересчитывает кэш canonicalColorsByItemId и сохраняет contentType: .color
+        if cur.effectiveContentType == .color || cur.contentType == .color {
+            guard let strictFormats = Self.strictColorFormats(from: newText) else {
+                return
+            }
+            let trimmedColorText = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let colorDigest = SHA256.hash(data: Data(trimmedColorText.utf8))
+            let colorHash = colorDigest.map { String(format: "%02x", $0) }.joined()
+
+            canonicalColorsByItemId[id] = strictFormats
+
+            let updated = ClipboardItemRow(
+                id: cur.id,
+                rowid: cur.rowid,
+                contentType: .color,
+                textPreview: trimmedColorText,
+                contentHash: colorHash,
+                sourceBundleId: cur.sourceBundleId,
+                sourceAppName: cur.sourceAppName,
+                isSensitive: false,
+                secretKind: nil,
+                isPinned: cur.isPinned,
+                createdAt: cur.createdAt,
+                expiresAt: cur.expiresAt,
+                ocrText: cur.ocrText,
+                rawImageData: cur.rawImageData,
+                fileURLPath: cur.fileURLPath,
+                useCount: cur.useCount
+            )
+            items[idx] = updated
+            Task {
+                try? await DatabaseManager.shared.updateItemText(
+                    id: id,
+                    newText: trimmedColorText,
+                    newHash: colorHash,
+                    contentType: .color
+                )
+            }
+            return
+        }
+
         let digest = SHA256.hash(data: Data(newText.utf8))
         let newHash = digest.map { String(format: "%02x", $0) }.joined()
+        canonicalColorsByItemId.removeValue(forKey: id)
+
         let updated = ClipboardItemRow(
             id: cur.id,
             rowid: cur.rowid,
@@ -396,8 +561,20 @@ public final class ClipboardMonitor: ObservableObject {
             useCount: cur.useCount
         )
         items[idx] = updated
+
+        if updated.effectiveContentType == .color,
+           let strictFormats = Self.strictColorFormats(from: newText) {
+            canonicalColorsByItemId[id] = strictFormats
+        }
+
+        let persistedContentType: ContentKind? = (updated.effectiveContentType == .color) ? .color : nil
         Task {
-            try? await DatabaseManager.shared.updateItemText(id: id, newText: newText, newHash: newHash)
+            try? await DatabaseManager.shared.updateItemText(
+                id: id,
+                newText: newText,
+                newHash: newHash,
+                contentType: persistedContentType
+            )
         }
     }
 
@@ -601,7 +778,20 @@ public final class ClipboardMonitor: ObservableObject {
 
     public let pasteboard: NSPasteboard = DatabaseManager.isRunningTests ? NSPasteboard.withUniqueName() : NSPasteboard.general
     private var lastChangeCount: Int
+    private var pendingRetryChangeCount: Int? = nil
+    private var pendingRetryAttempts: Int = 0
+    internal static let maxPendingRetryAttempts: Int = 12
     private var dispatchTimer: DispatchSourceTimer?
+
+    internal var lastHandledChangeCountForTesting: Int { lastChangeCount }
+    internal var pendingRetryStateForTesting: (changeCount: Int?, attempts: Int) {
+        (pendingRetryChangeCount, pendingRetryAttempts)
+    }
+    internal func resetRetryStateForTesting() {
+        pendingRetryChangeCount = nil
+        pendingRetryAttempts = 0
+        lastChangeCount = pasteboard.changeCount
+    }
     private var purgeTimer: Timer?
     private var accessibilityTimer: Timer?
     private var accessibilityObservers: [NSObjectProtocol] = []
@@ -838,7 +1028,7 @@ public final class ClipboardMonitor: ObservableObject {
             if let currentPasteboardText,
                currentPasteboardText == expired.textPreview.trimmingCharacters(in: .whitespacesAndNewlines) {
                 pasteboard.clearContents()
-                lastChangeCount = pasteboard.changeCount
+                markChangeCountHandled(pasteboard.changeCount)
             }
 
             let expiredId = expired.id
@@ -987,46 +1177,209 @@ public final class ClipboardMonitor: ObservableObject {
         }
     }
 
+    /// Фиксирует обработанный changeCount и сбрасывает состояние повторных попыток
+    private func markChangeCountHandled(_ count: Int) {
+        lastChangeCount = count
+        pendingRetryChangeCount = nil
+        pendingRetryAttempts = 0
+    }
+
+    private func recordPendingRetry(for currentCount: Int, types: [NSPasteboard.PasteboardType], reason: String) {
+        if pendingRetryChangeCount != currentCount {
+            pendingRetryChangeCount = currentCount
+            pendingRetryAttempts = 1
+        } else {
+            pendingRetryAttempts += 1
+        }
+
+        if pendingRetryAttempts >= Self.maxPendingRetryAttempts {
+            let typesDesc = types.map(\.rawValue).joined(separator: ", ")
+            NSLog(
+                "[PasteVault][Clipboard] Giving up on pasteboard changeCount=%d after %d attempts (%@; types: [%@])",
+                currentCount,
+                pendingRetryAttempts,
+                reason,
+                typesDesc
+            )
+            markChangeCountHandled(currentCount)
+        }
+    }
+
+    private func pasteboardData(forType type: NSPasteboard.PasteboardType) -> Data? {
+        if let direct = pasteboard.data(forType: type), !direct.isEmpty {
+            return direct
+        }
+        if let itemData = pasteboard.pasteboardItems?.lazy.compactMap({ $0.data(forType: type) }).first(where: { !$0.isEmpty }) {
+            return itemData
+        }
+        return nil
+    }
+
+    private func validatedImage(from data: Data) -> NSImage? {
+        guard !data.isEmpty,
+              let image = NSImage(data: data),
+              !image.representations.isEmpty,
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return nil
+        }
+        return image
+    }
+
+    private func normalizedPNGData(from image: NSImage) -> Data? {
+        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
+        }
+        if let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff) {
+            return rep.representation(using: .png, properties: [:])
+        }
+        return nil
+    }
+
+    private func pasteboardAdvertisesImage(_ types: [NSPasteboard.PasteboardType]) -> Bool {
+        if types.contains(.png) || types.contains(.tiff) {
+            return true
+        }
+        let knownImageRawTypes: Set<String> = [
+            UTType.png.identifier,
+            UTType.tiff.identifier,
+            UTType.jpeg.identifier,
+            UTType.heic.identifier,
+            UTType.heif.identifier,
+            UTType.gif.identifier,
+            UTType.webP.identifier,
+            "public.image"
+        ]
+        for type in types {
+            if knownImageRawTypes.contains(type.rawValue) {
+                return true
+            }
+            if let utType = UTType(type.rawValue), utType.conforms(to: .image) {
+                return true
+            }
+        }
+        return pasteboard.canReadObject(forClasses: [NSImage.self], options: nil)
+    }
+
+    internal func extractImageFromPasteboard() -> (image: NSImage, imageData: Data)? {
+        // 1. Прямое чтение сырых PNG-байтов без перекодирования PNG -> TIFF -> PNG
+        let pngType = NSPasteboard.PasteboardType(UTType.png.identifier)
+        for candidateType in [NSPasteboard.PasteboardType.png, pngType] {
+            if let pngData = pasteboardData(forType: candidateType),
+               let image = validatedImage(from: pngData) {
+                return (image, pngData)
+            }
+        }
+
+        // 2. Fallback на .tiff
+        let tiffType = NSPasteboard.PasteboardType(UTType.tiff.identifier)
+        for candidateType in [NSPasteboard.PasteboardType.tiff, tiffType] {
+            if let tiffData = pasteboardData(forType: candidateType),
+               let image = validatedImage(from: tiffData) {
+                return (image, tiffData)
+            }
+        }
+
+        // 3. Fallback на JPEG, HEIC и прочие image-UTI
+        let extraTypes: [NSPasteboard.PasteboardType] = [
+            NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+            NSPasteboard.PasteboardType(UTType.heic.identifier),
+            NSPasteboard.PasteboardType(UTType.heif.identifier),
+            NSPasteboard.PasteboardType(UTType.gif.identifier),
+            NSPasteboard.PasteboardType(UTType.webP.identifier)
+        ]
+        var orderedTypes = extraTypes
+        for t in (pasteboard.types ?? []) {
+            if t != .png && t != .tiff && !orderedTypes.contains(t),
+               let utType = UTType(t.rawValue), utType.conforms(to: .image) {
+                orderedTypes.append(t)
+            }
+        }
+        for imageType in orderedTypes {
+            if let rawData = pasteboardData(forType: imageType),
+               let image = validatedImage(from: rawData) {
+                let payload = normalizedPNGData(from: image) ?? image.tiffRepresentation ?? rawData
+                return (image, payload)
+            }
+        }
+
+        // 4. Fallback через NSImage(pasteboard:) / readObjects
+        let pasteboardImage = (pasteboard.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?.first
+            ?? NSImage(pasteboard: pasteboard)
+        if let image = pasteboardImage,
+           image.size.width > 0,
+           image.size.height > 0,
+           let payload = normalizedPNGData(from: image) ?? image.tiffRepresentation,
+           !payload.isEmpty {
+            return (image, payload)
+        }
+
+        return nil
+    }
+
     /// Мгновенная синхронная проверка буфера (вызывается перед открытием окна и по таймеру)
     /// Игнорирует следующее изменение буфера обмена (при программной авто-вставке)
     public func ignoreNextChange() {
-        lastChangeCount = pasteboard.changeCount
+        markChangeCountHandled(pasteboard.changeCount)
     }
 
     public func pollPasteboardImmediately() {
         captureCurrentPasteboard(force: false)
     }
 
-    private func captureCurrentPasteboard(force: Bool) {
+    internal func pollPasteboardTickForTesting(
+        force: Bool = false,
+        sourceBundleIDOverride: String? = nil,
+        sourceAppNameOverride: String? = nil
+    ) {
+        captureCurrentPasteboard(
+            force: force,
+            sourceBundleIDOverride: sourceBundleIDOverride,
+            sourceAppNameOverride: sourceAppNameOverride
+        )
+    }
+
+    private func captureCurrentPasteboard(
+        force: Bool,
+        sourceBundleIDOverride: String? = nil,
+        sourceAppNameOverride: String? = nil
+    ) {
         let currentCount = pasteboard.changeCount
         if !force {
             guard currentCount != lastChangeCount else { return }
         }
-        lastChangeCount = currentCount
 
-        guard !isIncognitoPaused else { return }
-
-        if let types = pasteboard.types {
-            if types.contains(transientType) || types.contains(autoGeneratedType) {
-                return
-            }
-        }
-
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        let sourceBundleID = frontApp?.bundleIdentifier ?? lastActiveApp?.bundleIdentifier ?? targetApp?.bundleIdentifier
-        if isAppBlacklisted(sourceBundleID) {
+        // 0. Осознанные пропуски (сразу фиксируют lastChangeCount и сбрасывают retry)
+        if isIncognitoPaused {
+            markChangeCountHandled(currentCount)
             return
         }
 
-        let bundleId = frontApp?.bundleIdentifier
+        let types = pasteboard.types ?? []
+        if types.contains(transientType) || types.contains(autoGeneratedType) {
+            markChangeCountHandled(currentCount)
+            return
+        }
+
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let sourceBundleID = sourceBundleIDOverride ?? frontApp?.bundleIdentifier ?? lastActiveApp?.bundleIdentifier ?? targetApp?.bundleIdentifier
+        if isAppBlacklisted(sourceBundleID) {
+            markChangeCountHandled(currentCount)
+            return
+        }
+
+        let bundleId = sourceBundleIDOverride ?? frontApp?.bundleIdentifier
         let appName: String
-        if bundleId == Bundle.main.bundleIdentifier {
+        if let sourceAppNameOverride {
+            appName = sourceAppNameOverride
+        } else if bundleId == Bundle.main.bundleIdentifier {
             appName = "PasteVault"
         } else {
             appName = frontApp?.localizedName ?? targetApp?.localizedName ?? "Системный буфер"
         }
 
-        let isMarkedConcealed = (pasteboard.types?.contains(concealedType) == true) || (pasteboard.types?.contains(autoGeneratedType) == true)
+        let isMarkedConcealed = types.contains(concealedType) || types.contains(autoGeneratedType)
 
         // 1. ПРИОРИТЕТ 1: Файлы (NSPasteboard.PasteboardType.fileURL / NSFilenamesPboardType)
         // В macOS при копировании файла в Finder в буфер попадает и fileURL, и tiff иконка.
@@ -1040,6 +1393,7 @@ public final class ClipboardMonitor: ObservableObject {
         }
 
         if !extractedFileURLs.isEmpty {
+            markChangeCountHandled(currentCount)
             guard saveFilesEnabled else {
                 // Если сохранение файлов отключено — полностью игнорируем событие (НЕ переходим к картинкам и тексту)
                 return
@@ -1048,22 +1402,34 @@ public final class ClipboardMonitor: ObservableObject {
             return
         }
 
-        // 2. ПРИОРИТЕТ 2: Изображения (.tiff, .png, когда это НЕ файл)
-        if let types = pasteboard.types,
-           (types.contains(.tiff) || types.contains(.png)),
-           let image = NSImage(pasteboard: pasteboard),
-           let tiffData = image.tiffRepresentation {
+        // 2. ПРИОРИТЕТ 2: Изображения (PNG напрямую, TIFF, JPEG, HEIC, NSImage, когда это НЕ файл)
+        if pasteboardAdvertisesImage(types) {
             guard saveImagesEnabled else {
-                // Если сохранение картинок отключено — полностью игнорируем изображение и НЕ запускаем Vision OCR
+                // Осознанный пропуск: сохранение картинок отключено — фиксируем changeCount без retry и OCR
+                markChangeCountHandled(currentCount)
                 return
             }
-            captureImageItem(image, tiffData: tiffData, bundleId: bundleId, appName: appName)
+            if let extracted = extractImageFromPasteboard() {
+                markChangeCountHandled(currentCount)
+                captureImageItem(extracted.image, imageData: extracted.imageData, bundleId: bundleId, appName: appName)
+                return
+            }
+            // Image-UTI уже объявлен, но данные изображения ещё дописываются — повторяем на следующих тиках
+            if force {
+                markChangeCountHandled(currentCount)
+            } else {
+                recordPendingRetry(for: currentCount, types: types, reason: "image payload not ready")
+            }
             return
         }
 
         // 3. ПРИОРИТЕТ 3: Текст, ссылки, код (.string)
-        if let rawText = pasteboard.string(forType: .string),
-           !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let rawText = pasteboard.string(forType: .string) {
+            if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                markChangeCountHandled(currentCount)
+                return
+            }
+            markChangeCountHandled(currentCount)
             guard saveTextEnabled else {
                 // Если сохранение текста отключено — полностью игнорируем текстовую запись
                 return
@@ -1071,6 +1437,24 @@ public final class ClipboardMonitor: ObservableObject {
             captureTextItem(rawText, isMarkedConcealed: isMarkedConcealed, bundleId: bundleId, appName: appName)
             return
         }
+
+        // Буфер пуст или ещё не отдал данные (например, обещанная запись скриншота)
+        if force {
+            markChangeCountHandled(currentCount)
+        } else {
+            recordPendingRetry(
+                for: currentCount,
+                types: types,
+                reason: types.isEmpty ? "empty pasteboard types" : "no readable payload"
+            )
+        }
+    }
+
+    public static func filePreviewText(fileName: String, count: Int, in lang: AppLanguage = AppLanguage.current) -> String {
+        if count <= 1 {
+            return lang == .en ? "[File: \(fileName)]" : "[Файл: \(fileName)]"
+        }
+        return lang == .en ? "[Files: \(count) items — \(fileName) & more]" : "[Файлы: \(count) шт. — \(fileName) и др.]"
     }
 
     /// Захват файлов
@@ -1081,7 +1465,7 @@ public final class ClipboardMonitor: ObservableObject {
         let firstURL = urls[0]
         let fileName = firstURL.lastPathComponent
         let count = urls.count
-        let previewText = count == 1 ? "[Файл: \(fileName)]" : "[Файлы: \(count) шт. — \(fileName) и др.]"
+        let previewText = Self.filePreviewText(fileName: fileName, count: count)
 
         let fileIcon = NSWorkspace.shared.icon(forFile: firstURL.path)
         fileIcon.size = NSSize(width: 48, height: 48)
@@ -1123,23 +1507,32 @@ public final class ClipboardMonitor: ObservableObject {
         NotificationCenter.default.post(name: Notification.Name("pasteVaultDidCaptureItem"), object: itemId)
 
         Task {
-            _ = try? await DatabaseManager.shared.upsertItem(
-                id: itemId,
-                contentType: .file,
-                textPreview: previewText,
-                rawPayload: payloadData,
-                sourceBundleId: bundleId,
-                sourceAppName: appName,
-                isSensitive: false,
-                secretKind: nil,
-                ttlSeconds: nil,
-                fileURLPath: filePathsString
-            )
+            do {
+                _ = try await DatabaseManager.shared.upsertItem(
+                    id: itemId,
+                    contentType: .file,
+                    textPreview: previewText,
+                    rawPayload: payloadData,
+                    sourceBundleId: bundleId,
+                    sourceAppName: appName,
+                    isSensitive: false,
+                    secretKind: nil,
+                    ttlSeconds: nil,
+                    fileURLPath: filePathsString
+                )
+            } catch {
+                NSLog("[PasteVault][Clipboard] Failed to persist file item id=%@: %@", itemId, error.localizedDescription)
+            }
         }
     }
 
-    /// Захват изображений / скриншотов
+    /// Захват изображений / скриншотов (обратная совместимость для вызовов с tiffData:)
     public func captureImageItem(_ image: NSImage, tiffData: Data, bundleId: String? = nil, appName: String? = nil) {
+        captureImageItem(image, imageData: tiffData, bundleId: bundleId, appName: appName)
+    }
+
+    /// Захват изображений / скриншотов (принимает PNG, TIFF или нормализованные байты изображения)
+    public func captureImageItem(_ image: NSImage, imageData: Data, bundleId: String? = nil, appName: String? = nil) {
         guard saveImagesEnabled else { return }
 
         let width = Int(image.size.width)
@@ -1148,7 +1541,7 @@ public final class ClipboardMonitor: ObservableObject {
         let previewText = isEn
             ? "[Screenshot \(width)×\(height) px] #OCR"
             : "[Скриншот \(width)×\(height) пкс] #OCR"
-        let digest = SHA256.hash(data: tiffData)
+        let digest = SHA256.hash(data: imageData)
         let contentHash = digest.map { String(format: "%02x", $0) }.joined()
         let now = Int64(Date().timeIntervalSince1970)
 
@@ -1156,7 +1549,7 @@ public final class ClipboardMonitor: ObservableObject {
         let itemId = existingItem?.id ?? UUID().uuidString
         let isPinned = existingItem?.isPinned ?? false
         let cachedOCR = existingItem?.ocrText
-        let savedRelPath = DatabaseManager.saveClipboardScreenshotPNG(data: tiffData, itemId: itemId)
+        let savedRelPath = DatabaseManager.saveClipboardScreenshotPNG(data: imageData, itemId: itemId)
 
         let newRow = ClipboardItemRow(
             id: itemId,
@@ -1172,7 +1565,7 @@ public final class ClipboardMonitor: ObservableObject {
             createdAt: now,
             expiresAt: nil,
             ocrText: cachedOCR,
-            rawImageData: tiffData,
+            rawImageData: imageData,
             fileURLPath: savedRelPath,
             useCount: existingItem?.useCount ?? 0
         )
@@ -1186,22 +1579,26 @@ public final class ClipboardMonitor: ObservableObject {
         NotificationCenter.default.post(name: Notification.Name("pasteVaultDidCaptureItem"), object: itemId)
 
         Task {
-            _ = try? await DatabaseManager.shared.upsertItem(
-                id: itemId,
-                contentType: .image,
-                textPreview: previewText,
-                rawPayload: tiffData,
-                sourceBundleId: bundleId,
-                sourceAppName: appName,
-                isSensitive: false,
-                secretKind: nil,
-                ttlSeconds: nil,
-                fileURLPath: savedRelPath,
-                ocrText: cachedOCR
-            )
+            do {
+                _ = try await DatabaseManager.shared.upsertItem(
+                    id: itemId,
+                    contentType: .image,
+                    textPreview: previewText,
+                    rawPayload: imageData,
+                    sourceBundleId: bundleId,
+                    sourceAppName: appName,
+                    isSensitive: false,
+                    secretKind: nil,
+                    ttlSeconds: nil,
+                    fileURLPath: savedRelPath,
+                    ocrText: cachedOCR
+                )
+            } catch {
+                NSLog("[PasteVault][Clipboard] Failed to persist image item id=%@: %@", itemId, error.localizedDescription)
+            }
             if cachedOCR == nil {
                 let recognized = await Task.detached(priority: .utility) {
-                    Self.recognizeOCRText(from: tiffData)
+                    Self.recognizeOCRText(from: imageData)
                 }.value
                 if let recognized, !recognized.isEmpty {
                     await MainActor.run {
@@ -1209,7 +1606,11 @@ public final class ClipboardMonitor: ObservableObject {
                             self.items[idx].ocrText = recognized
                         }
                     }
-                    try? await DatabaseManager.shared.updateItemOCRText(id: itemId, ocrText: recognized)
+                    do {
+                        try await DatabaseManager.shared.updateItemOCRText(id: itemId, ocrText: recognized)
+                    } catch {
+                        NSLog("[PasteVault][Clipboard] Failed to persist OCR text for id=%@: %@", itemId, error.localizedDescription)
+                    }
                 }
             }
         }
@@ -1278,7 +1679,7 @@ public final class ClipboardMonitor: ObservableObject {
         } else {
             pasteboard.writeObjects([annotatedImage])
         }
-        lastChangeCount = pasteboard.changeCount
+        markChangeCountHandled(pasteboard.changeCount)
 
         let toastMsg = isEn
             ? "Annotated copy saved to clipboard"
@@ -1294,19 +1695,23 @@ public final class ClipboardMonitor: ObservableObject {
         }
 
         Task {
-            _ = try? await DatabaseManager.shared.upsertItem(
-                id: itemId,
-                contentType: .image,
-                textPreview: previewText,
-                rawPayload: tiffData,
-                sourceBundleId: sourceBundle,
-                sourceAppName: sourceApp,
-                isSensitive: false,
-                secretKind: nil,
-                ttlSeconds: nil,
-                fileURLPath: savedRelPath,
-                ocrText: ocr
-            )
+            do {
+                _ = try await DatabaseManager.shared.upsertItem(
+                    id: itemId,
+                    contentType: .image,
+                    textPreview: previewText,
+                    rawPayload: tiffData,
+                    sourceBundleId: sourceBundle,
+                    sourceAppName: sourceApp,
+                    isSensitive: false,
+                    secretKind: nil,
+                    ttlSeconds: nil,
+                    fileURLPath: savedRelPath,
+                    ocrText: ocr
+                )
+            } catch {
+                NSLog("[PasteVault][Clipboard] Failed to persist annotated copy id=%@: %@", itemId, error.localizedDescription)
+            }
         }
 
         return newRow
@@ -1361,17 +1766,21 @@ public final class ClipboardMonitor: ObservableObject {
         NotificationCenter.default.post(name: Notification.Name("pasteVaultDidCaptureItem"), object: itemId)
 
         Task {
-            _ = try? await DatabaseManager.shared.upsertItem(
-                id: itemId,
-                contentType: contentKind,
-                textPreview: text,
-                rawPayload: payloadData,
-                sourceBundleId: bundleId,
-                sourceAppName: appName,
-                isSensitive: isSecretKind,
-                secretKind: secretKind,
-                ttlSeconds: ttlSeconds
-            )
+            do {
+                _ = try await DatabaseManager.shared.upsertItem(
+                    id: itemId,
+                    contentType: contentKind,
+                    textPreview: text,
+                    rawPayload: payloadData,
+                    sourceBundleId: bundleId,
+                    sourceAppName: appName,
+                    isSensitive: isSecretKind,
+                    secretKind: secretKind,
+                    ttlSeconds: ttlSeconds
+                )
+            } catch {
+                NSLog("[PasteVault][Clipboard] Failed to persist text item id=%@: %@", itemId, error.localizedDescription)
+            }
         }
     }
 
@@ -1388,13 +1797,16 @@ public final class ClipboardMonitor: ObservableObject {
         } else if (item.effectiveContentType == .image || item.contentType == .image), let img = imageForItem(item) {
             // 2. Для картинок — помещаем данные изображения строго в формате .png (БЕЗ .tiff и БЕЗ writeObjects)
             var targetPNGData: Data? = nil
-            if let rawData = item.rawImageData,
-               let rep = NSBitmapImageRep(data: rawData),
-               let png = rep.representation(using: .png, properties: [:]) {
-                targetPNGData = png
-            } else if let tiff = img.tiffRepresentation,
-                      let rep = NSBitmapImageRep(data: tiff),
-                      let png = rep.representation(using: .png, properties: [:]) {
+            if let rawData = item.rawImageData {
+                if DatabaseManager.isPNGData(rawData) {
+                    targetPNGData = rawData
+                } else if let rep = NSBitmapImageRep(data: rawData),
+                          let png = rep.representation(using: .png, properties: [:]) {
+                    targetPNGData = png
+                }
+            }
+            if targetPNGData == nil,
+               let png = normalizedPNGData(from: img) {
                 targetPNGData = png
             }
 
@@ -1407,7 +1819,7 @@ public final class ClipboardMonitor: ObservableObject {
             // 3. Для текста
             pasteboard.setString(item.textPreview, forType: .string)
         }
-        lastChangeCount = pasteboard.changeCount
+        markChangeCountHandled(pasteboard.changeCount)
 
         if let ttl = selfDestructAfterSeconds {
             pendingDestructWorkItems.removeValue(forKey: item.id)?.cancel()
@@ -1418,7 +1830,7 @@ public final class ClipboardMonitor: ObservableObject {
                 self.pendingDestructWorkItems.removeValue(forKey: itemId)
                 guard self.pasteboard.changeCount == expectedChangeCount else { return }
                 self.pasteboard.clearContents()
-                self.lastChangeCount = self.pasteboard.changeCount
+                self.markChangeCountHandled(self.pasteboard.changeCount)
             }
             pendingDestructWorkItems[itemId] = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + ttl, execute: workItem)
@@ -1429,7 +1841,7 @@ public final class ClipboardMonitor: ObservableObject {
     public func copyToPasteboardImmediately(text: String, selfDestructAfterSeconds: TimeInterval? = nil, destructKey: String? = nil) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        lastChangeCount = pasteboard.changeCount
+        markChangeCountHandled(pasteboard.changeCount)
 
         if let ttl = selfDestructAfterSeconds {
             let itemKey: String
@@ -1448,7 +1860,7 @@ public final class ClipboardMonitor: ObservableObject {
                 self.pendingDestructWorkItems.removeValue(forKey: itemKey)
                 guard self.pasteboard.changeCount == expectedChangeCount else { return }
                 self.pasteboard.clearContents()
-                self.lastChangeCount = self.pasteboard.changeCount
+                self.markChangeCountHandled(self.pasteboard.changeCount)
             }
             pendingDestructWorkItems[itemKey] = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + ttl, execute: workItem)
@@ -1477,7 +1889,7 @@ public final class ClipboardMonitor: ObservableObject {
         // 1. Очищаем системный буфер и записываем пароль обычной строкой
         pasteboard.clearContents()
         pasteboard.setString(trimmed, forType: .string)
-        lastChangeCount = pasteboard.changeCount
+        markChangeCountHandled(pasteboard.changeCount)
 
         if let effectiveTTL {
             pendingDestructWorkItems.removeValue(forKey: itemId)?.cancel()
@@ -1487,7 +1899,7 @@ public final class ClipboardMonitor: ObservableObject {
                 self.pendingDestructWorkItems.removeValue(forKey: itemId)
                 guard self.pasteboard.changeCount == expectedChangeCount else { return }
                 self.pasteboard.clearContents()
-                self.lastChangeCount = self.pasteboard.changeCount
+                self.markChangeCountHandled(self.pasteboard.changeCount)
             }
             pendingDestructWorkItems[itemId] = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + effectiveTTL, execute: workItem)
@@ -1517,17 +1929,21 @@ public final class ClipboardMonitor: ObservableObject {
         NotificationCenter.default.post(name: Notification.Name("pasteVaultDidCaptureItem"), object: itemId)
 
         Task {
-            _ = try? await DatabaseManager.shared.upsertItem(
-                id: itemId,
-                contentType: .secret,
-                textPreview: trimmed,
-                rawPayload: payloadData,
-                sourceBundleId: Bundle.main.bundleIdentifier,
-                sourceAppName: "PasteVault (PassGen)",
-                isSensitive: true,
-                secretKind: generatedKind,
-                ttlSeconds: ttlInt
-            )
+            do {
+                _ = try await DatabaseManager.shared.upsertItem(
+                    id: itemId,
+                    contentType: .secret,
+                    textPreview: trimmed,
+                    rawPayload: payloadData,
+                    sourceBundleId: Bundle.main.bundleIdentifier,
+                    sourceAppName: "PasteVault (PassGen)",
+                    isSensitive: true,
+                    secretKind: generatedKind,
+                    ttlSeconds: ttlInt
+                )
+            } catch {
+                NSLog("[PasteVault][Clipboard] Failed to persist generated password id=%@: %@", itemId, error.localizedDescription)
+            }
         }
 
         return itemId
@@ -2046,14 +2462,12 @@ public final class ClipboardMonitor: ObservableObject {
 
         let specs: [SampleSpec] = [
             SampleSpec(
-                text: isEn
-                    ? "Meeting notes: review macOS release architecture and zero-network security policy"
-                    : "Заметки со встречи: обсудить архитектуру релиза macOS приложения",
-                sourceApp: "Notes",
+                text: "#38BDF8",
+                sourceApp: "Figma",
                 isSensitive: false,
                 isImage: false,
                 secretKind: nil,
-                expectedKind: .text,
+                expectedKind: .color,
                 expectedTag: nil
             ),
             SampleSpec(
@@ -2104,12 +2518,14 @@ public final class ClipboardMonitor: ObservableObject {
                 expectedTag: nil
             ),
             SampleSpec(
-                text: "#38BDF8",
-                sourceApp: "Figma",
+                text: isEn
+                    ? "Meeting notes: review macOS release architecture and zero-network security policy"
+                    : "Заметки со встречи: обсудить архитектуру релиза macOS приложения",
+                sourceApp: "Notes",
                 isSensitive: false,
                 isImage: false,
                 secretKind: nil,
-                expectedKind: .color,
+                expectedKind: .text,
                 expectedTag: nil
             ),
             SampleSpec(
@@ -2128,7 +2544,7 @@ public final class ClipboardMonitor: ObservableObject {
                 isImage: false,
                 secretKind: nil,
                 expectedKind: .file,
-                expectedTag: isEn ? "#File" : "#Файл"
+                expectedTag: nil
             )
         ]
 

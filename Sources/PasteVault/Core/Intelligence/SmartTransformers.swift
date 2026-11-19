@@ -551,9 +551,6 @@ public enum SmartClassifier {
         if contentType == .image || sample.hasPrefix("[Скриншот") || sample.hasPrefix("[Screenshot") || sample.contains("#OCR") {
             result.append("#OCR")
         }
-        if contentType == .file || sample.hasPrefix("[Файл") || sample.hasPrefix("[File") {
-            result.append(isEn ? "#File" : "#Файл")
-        }
         return result
     }
 }

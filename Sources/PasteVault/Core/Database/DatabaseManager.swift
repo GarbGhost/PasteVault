@@ -525,7 +525,12 @@ public actor DatabaseManager {
         ocrText: String? = nil
     ) throws -> String {
         if db == nil {
-            try? initializeDatabase()
+            do {
+                try initializeDatabase()
+            } catch {
+                NSLog("[PasteVault][DB] upsertItem failed to initialize database: %@", error.localizedDescription)
+                throw error
+            }
         }
 
         let digest = SHA256.hash(data: rawPayload)
@@ -551,7 +556,12 @@ public actor DatabaseManager {
         """
 
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, upsertSQL, -1, &stmt, nil) == SQLITE_OK else { return itemId }
+        let prepRC = sqlite3_prepare_v2(db, upsertSQL, -1, &stmt, nil)
+        guard prepRC == SQLITE_OK else {
+            let errMsg = db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "database handle is nil"
+            NSLog("[PasteVault][DB] upsertItem sqlite3_prepare_v2 failed (rc=%d): %@", prepRC, errMsg)
+            throw NSError(domain: "PasteVault.SQLite", code: Int(prepRC), userInfo: [NSLocalizedDescriptionKey: "upsertItem prepare failed: \(errMsg)"])
+        }
         defer { sqlite3_finalize(stmt) }
 
         bindTextExact(stmt, 1, itemId)
@@ -567,20 +577,40 @@ public actor DatabaseManager {
         bindOpt(stmt, 11, fileURLPath)
         bindOpt(stmt, 12, ocrText)
 
-        _ = sqlite3_step(stmt)
+        let stepRC = sqlite3_step(stmt)
+        guard stepRC == SQLITE_DONE else {
+            let errMsg = db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "sqlite3_step failed"
+            NSLog("[PasteVault][DB] upsertItem sqlite3_step failed (rc=%d) for id=%@: %@", stepRC, itemId, errMsg)
+            throw NSError(domain: "PasteVault.SQLite", code: Int(stepRC), userInfo: [NSLocalizedDescriptionKey: "upsertItem step failed: \(errMsg)"])
+        }
         return itemId
     }
 
     public func updateItemOCRText(id: String, ocrText: String?) throws {
         if db == nil {
-            try? initializeDatabase()
+            do {
+                try initializeDatabase()
+            } catch {
+                NSLog("[PasteVault][DB] updateItemOCRText failed to initialize database: %@", error.localizedDescription)
+                throw error
+            }
         }
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE clipboard_items SET ocr_text = ?1 WHERE id = ?2;", -1, &stmt, nil) == SQLITE_OK else { return }
+        let prepRC = sqlite3_prepare_v2(db, "UPDATE clipboard_items SET ocr_text = ?1 WHERE id = ?2;", -1, &stmt, nil)
+        guard prepRC == SQLITE_OK else {
+            let errMsg = db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "database handle is nil"
+            NSLog("[PasteVault][DB] updateItemOCRText sqlite3_prepare_v2 failed (rc=%d): %@", prepRC, errMsg)
+            throw NSError(domain: "PasteVault.SQLite", code: Int(prepRC), userInfo: [NSLocalizedDescriptionKey: "updateItemOCRText prepare failed: \(errMsg)"])
+        }
         defer { sqlite3_finalize(stmt) }
         bindOpt(stmt, 1, ocrText)
         bindTextExact(stmt, 2, id)
-        _ = sqlite3_step(stmt)
+        let stepRC = sqlite3_step(stmt)
+        guard stepRC == SQLITE_DONE else {
+            let errMsg = db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "sqlite3_step failed"
+            NSLog("[PasteVault][DB] updateItemOCRText sqlite3_step failed (rc=%d) for id=%@: %@", stepRC, id, errMsg)
+            throw NSError(domain: "PasteVault.SQLite", code: Int(stepRC), userInfo: [NSLocalizedDescriptionKey: "updateItemOCRText step failed: \(errMsg)"])
+        }
     }
 
     public func restoreItem(
@@ -815,27 +845,47 @@ public actor DatabaseManager {
         return trimmed
     }
 
+    nonisolated public static func isPNGData(_ data: Data) -> Bool {
+        let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        return data.count >= 8 && Array(data.prefix(8)) == pngSignature
+    }
+
     nonisolated public static func saveClipboardScreenshotPNG(data: Data, itemId: String) -> String? {
-        guard let safeId = sanitizedClipboardMediaItemId(itemId),
-              let screenshotsDir = try? screenshotsDirectoryURL() else {
+        guard let safeId = sanitizedClipboardMediaItemId(itemId) else {
+            NSLog("[PasteVault][DB] saveClipboardScreenshotPNG rejected invalid itemId=%@", itemId)
+            return nil
+        }
+        let screenshotsDir: URL
+        do {
+            screenshotsDir = try screenshotsDirectoryURL()
+        } catch {
+            NSLog("[PasteVault][DB] saveClipboardScreenshotPNG failed to access Screenshots dir: %@", error.localizedDescription)
             return nil
         }
         let pngData: Data
-        let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-        if data.count >= 8 && Array(data.prefix(8)) == pngSignature {
+        if isPNGData(data) {
             pngData = data
         } else if let rep = NSBitmapImageRep(data: data),
                   let converted = rep.representation(using: .png, properties: [:]) {
             pngData = converted
+        } else if let img = NSImage(data: data),
+                  let cgImage = img.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let converted = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]) {
+            pngData = converted
         } else {
+            NSLog("[PasteVault][DB] saveClipboardScreenshotPNG failed to convert image data (%d bytes) for itemId=%@", data.count, safeId)
             return nil
         }
         let targetURL = screenshotsDir.appendingPathComponent("\(safeId).png")
-        guard isSafeAllowedClipboardMediaURL(targetURL) else { return nil }
+        guard isSafeAllowedClipboardMediaURL(targetURL) else {
+            NSLog("[PasteVault][DB] saveClipboardScreenshotPNG rejected unsafe targetURL=%@", targetURL.path)
+            return nil
+        }
         do {
             try pngData.write(to: targetURL, options: .atomic)
             return "Screenshots/\(safeId).png"
         } catch {
+            NSLog("[PasteVault][DB] saveClipboardScreenshotPNG failed to write %@: %@", targetURL.path, error.localizedDescription)
             return nil
         }
     }
