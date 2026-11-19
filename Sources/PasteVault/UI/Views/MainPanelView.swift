@@ -1029,6 +1029,13 @@ public final class TapticSoundAndHaptics {
     public func playWheelTick() -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
+        let isPhysicalDown = isMouseButtonDown || (NSEvent.pressedMouseButtons & 1 != 0)
+        // One-Click-Per-MouseDown Gate: если playClick() уже сработал в текущем цикле клика мыши,
+        // блокируем дублирующий performDialTick()/playWheelTick() из action кнопки (напр. PassGen).
+        if hasPlayedInCurrentMouseCycle && (isPhysicalDown || (now - lastMouseUpTime < Self.clickDebounceInterval)) {
+            lock.unlock()
+            return false
+        }
         guard now - lastWheelTickTime >= Self.wheelTickInterval else {
             lock.unlock()
             return false
@@ -1053,8 +1060,9 @@ public final class TapticSoundAndHaptics {
         return true
     }
 
-    public func performDialTick() {
-        playWheelTick()
+    @discardableResult
+    public func performDialTick() -> Bool {
+        return playWheelTick()
     }
 
     public func playConfirmClick() {
@@ -2492,6 +2500,100 @@ public struct DoubleClickCursorIcon: View {
 
 // MARK: - Isolated Clipboard Row Card View (Zero Parent Redraws on Hover)
 @MainActor
+/// Объёмная нативная SwiftUI 3D-сфера для предпросмотра цвета в правом инспекторе.
+/// Реализует Animatable по RGBA-каналам для плавного GPU-перелива градиента, блика,
+/// контрового ободка и тени без моргания при смене цвета.
+private struct ColorSphere3DView: View, Animatable {
+    var r: Double
+    var g: Double
+    var b: Double
+    var a: Double
+    var size: CGFloat = 40
+    var borderTint: Color = .white
+
+    nonisolated var animatableData: AnimatablePair<AnimatablePair<Double, Double>, AnimatablePair<Double, Double>> {
+        get { AnimatablePair(AnimatablePair(r, g), AnimatablePair(b, a)) }
+        set {
+            r = newValue.first.first
+            g = newValue.first.second
+            b = newValue.second.first
+            a = newValue.second.second
+        }
+    }
+
+    init(nsColor: NSColor, size: CGFloat = 40, borderTint: Color = .white) {
+        let srgb = nsColor.usingColorSpace(.sRGB) ?? nsColor
+        self.r = Double(srgb.redComponent)
+        self.g = Double(srgb.greenComponent)
+        self.b = Double(srgb.blueComponent)
+        self.a = Double(srgb.alphaComponent)
+        self.size = size
+        self.borderTint = borderTint
+    }
+
+    private var baseColor: Color {
+        Color(red: r, green: g, blue: b, opacity: a)
+    }
+
+    private var highlightColor: Color {
+        Color(
+            red: min(1.0, r + (1.0 - r) * 0.48),
+            green: min(1.0, g + (1.0 - g) * 0.48),
+            blue: min(1.0, b + (1.0 - b) * 0.48),
+            opacity: a
+        )
+    }
+
+    private var shadowColor: Color {
+        Color(
+            red: max(0.0, r * 0.46),
+            green: max(0.0, g * 0.46),
+            blue: max(0.0, b * 0.46),
+            opacity: a
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            // Основной сферический градиент от светлого оттенка (0.32, 0.28) через базовый цвет к глубокому затемнённому
+            Circle()
+                .fill(
+                    RadialGradient(
+                        gradient: Gradient(stops: [
+                            .init(color: highlightColor, location: 0.0),
+                            .init(color: baseColor, location: 0.48),
+                            .init(color: shadowColor, location: 1.0)
+                        ]),
+                        center: UnitPoint(x: 0.32, y: 0.28),
+                        startRadius: size * 0.04,
+                        endRadius: size * 0.68
+                    )
+                )
+
+            // Мягкий глянцевый блик сверху-слева
+            Ellipse()
+                .fill(
+                    RadialGradient(
+                        gradient: Gradient(colors: [
+                            Color.white.opacity(0.68),
+                            Color.white.opacity(0.22),
+                            Color.white.opacity(0.0)
+                        ]),
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: size * 0.24
+                    )
+                )
+                .frame(width: size * 0.44, height: size * 0.28)
+                .rotationEffect(.degrees(-28))
+                .offset(x: -size * 0.14, y: -size * 0.17)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: baseColor.opacity(0.32), radius: 6, x: 0, y: 0)
+        .shadow(color: Color.black.opacity(0.14), radius: 2, x: 0, y: 0)
+    }
+}
+
 public struct ClipboardRowCardView: View {
     public let item: ClipboardItemRow
     public let index: Int
@@ -2506,6 +2608,8 @@ public struct ClipboardRowCardView: View {
     public var isPastedToast: Bool = false
     public var isPasteFailedToast: Bool = false
     public var searchQuery: String = ""
+    public var livePreviewColor: NSColor? = nil
+    public var isInvalidColorEdit: Bool = false
     public let onSelect: () -> Void
     public let onPaste: () -> Void
     public let onDelete: () -> Void
@@ -2648,16 +2752,70 @@ public struct ClipboardRowCardView: View {
         }
     }
 
-    /// Убирает теги, дублирующие бейдж категории карточки (включая устаревшие «Цвет» / «Color» у записей цвета).
+    /// Убирает теги, дублирующие бейдж категории карточки (включая устаревшие «Цвет» / «Color» и «#Файл» / «#File»).
     public static func visibleTags(for tags: [String], contentType: ContentKind, in lang: AppLanguage) -> [String] {
         let badgeLabel = categoryBadgeLabel(for: contentType, in: lang)
         return tags.filter { tag in
             if contentType == .color && (tag == "Цвет" || tag == "Color" || tag == "#Цвет" || tag == "#Color") {
                 return false
             }
+            if contentType == .file {
+                let normalized = tag
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+                    .lowercased()
+                if normalized == "файл" || normalized == "file" {
+                    return false
+                }
+            }
             let localized = ClipboardFilterSelection.localizedTag(tag, in: lang)
             return localized.caseInsensitiveCompare(badgeLabel) != .orderedSame
         }
+    }
+
+    /// Динамически локализует превью-строку карточек `.file` для текущего языка интерфейса (включая старые записи из SQLite).
+    public static func displayPreviewText(for item: ClipboardItemRow, in lang: AppLanguage) -> String {
+        guard item.effectiveContentType == .file || item.contentType == .file else {
+            return item.displayPreviewText
+        }
+        let urls = item.fileURLs
+        if let firstURL = urls.first {
+            return ClipboardMonitor.filePreviewText(fileName: firstURL.lastPathComponent, count: urls.count, in: lang)
+        }
+        return localizedFilePreviewString(item.textPreview, in: lang)
+    }
+
+    public static func localizedFilePreviewString(_ raw: String, in lang: AppLanguage) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["[Файл: ", "[File: "] where trimmed.hasPrefix(prefix) && trimmed.hasSuffix("]") {
+            let inner = String(trimmed.dropFirst(prefix.count).dropLast())
+            return ClipboardMonitor.filePreviewText(fileName: inner, count: 1, in: lang)
+        }
+        if trimmed.hasPrefix("[Файлы: "), trimmed.hasSuffix("]"),
+           let range = trimmed.range(of: " шт. — ") {
+            let countStart = trimmed.index(trimmed.startIndex, offsetBy: "[Файлы: ".count)
+            let countStr = String(trimmed[countStart..<range.lowerBound])
+            var namePart = String(trimmed[range.upperBound..<trimmed.index(before: trimmed.endIndex)])
+            if namePart.hasSuffix(" и др.") {
+                namePart = String(namePart.dropLast(" и др.".count))
+            }
+            if let count = Int(countStr) {
+                return ClipboardMonitor.filePreviewText(fileName: namePart, count: count, in: lang)
+            }
+        }
+        if trimmed.hasPrefix("[Files: "), trimmed.hasSuffix("]"),
+           let range = trimmed.range(of: " items — ") {
+            let countStart = trimmed.index(trimmed.startIndex, offsetBy: "[Files: ".count)
+            let countStr = String(trimmed[countStart..<range.lowerBound])
+            var namePart = String(trimmed[range.upperBound..<trimmed.index(before: trimmed.endIndex)])
+            if namePart.hasSuffix(" & more") {
+                namePart = String(namePart.dropLast(" & more".count))
+            }
+            if let count = Int(countStr) {
+                return ClipboardMonitor.filePreviewText(fileName: namePart, count: count, in: lang)
+            }
+        }
+        return raw
     }
 
     public var body: some View {
@@ -2667,13 +2825,32 @@ public struct ClipboardRowCardView: View {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(currentTheme.primaryText.opacity(0.08))
                     .frame(width: 28, height: 28)
+                    .overlay {
+                        if isInvalidColorEdit {
+                            PhaseAnimator([false, true]) { pulse in
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(
+                                        Color.red.opacity(pulse ? 1.0 : 0.30),
+                                        lineWidth: 1.6
+                                    )
+                            } animation: { _ in
+                                .easeInOut(duration: 0.52)
+                            }
+                        } else if item.effectiveContentType == .color {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(currentTheme.primaryText.opacity(0.18), lineWidth: 1.0)
+                        }
+                    }
 
                 if item.effectiveContentType == .color,
-                   let nsColor = SmartClassifier.parseNSColor(item.textPreview) {
+                   let nsColor = livePreviewColor ?? SmartClassifier.parseNSColor(item.textPreview) {
+                    let srgb = nsColor.usingColorSpace(.sRGB) ?? nsColor
+                    let colorKey = "\(Int(round(srgb.redComponent * 255)))_\(Int(round(srgb.greenComponent * 255)))_\(Int(round(srgb.blueComponent * 255)))_\(Int(round(srgb.alphaComponent * 255)))"
                     Circle()
                         .fill(Color(nsColor: nsColor))
                         .frame(width: 18, height: 18)
                         .overlay(Circle().stroke(currentTheme.primaryText.opacity(0.45), lineWidth: 1.5))
+                        .animation(.easeInOut(duration: 0.42), value: colorKey)
                 } else if (item.effectiveContentType == .image || item.effectiveContentType == .file),
                           let previewImg = previewImage {
                     Image(nsImage: previewImg)
@@ -2915,9 +3092,10 @@ public struct ClipboardRowCardView: View {
                 }
 
                 // Строка 3: Текстовое превью контента (с подсветкой поискового запроса для не-секретных записей)
+                let cardPreviewText = Self.displayPreviewText(for: item, in: language)
                 if !searchQuery.isEmpty && !isSecretItem {
                     Text(SearchHighlightHelper.highlight(
-                        text: item.displayPreviewText,
+                        text: cardPreviewText,
                         query: searchQuery,
                         baseFont: currentFont.font(size: 12, weight: .regular),
                         baseColor: currentTheme.primaryText,
@@ -2928,7 +3106,7 @@ public struct ClipboardRowCardView: View {
                     .lineLimit(2)
                     .truncationMode(.tail)
                 } else {
-                    Text(item.displayPreviewText)
+                    Text(cardPreviewText)
                         .font(currentFont.font(size: 12, weight: .regular))
                         .foregroundStyle(currentTheme.primaryText)
                         .lineLimit(2)
@@ -3410,6 +3588,14 @@ public struct MainPanelView: View {
     @StateObject private var screenshotEditorEngine = ScreenshotEditorEngine()
     @State private var editingItemId: String? = nil
     @State private var editingItemText: String = ""
+    @State private var lastValidEditingColorFormats: (hex: String, rgb: String, hsl: String, color: NSColor)? = nil
+    @State private var lastValidEditingColorText: String? = nil
+
+    /// Живой предпросмотр цвета во время набора в режиме Edit (не меняет базу до Save)
+    private var activeLiveColorFormats: (hex: String, rgb: String, hsl: String, color: NSColor)? {
+        guard editingItemId != nil else { return nil }
+        return ClipboardMonitor.livePreviewColorFormats(for: editingItemText)
+    }
     @State private var showFullTextInInspectorItemId: String? = nil
     private let inspectorPreviewCharLimit: Int = 35_000
 
@@ -4767,6 +4953,55 @@ public struct MainPanelView: View {
         }
     }
 
+    // MARK: - Secret Reveal State Helpers
+    public static func toggleSecretReveal(for itemId: String, currentRevealedId: String?) -> String? {
+        return (currentRevealedId == itemId) ? nil : itemId
+    }
+
+    public static func resolvedSecretDisplayText(
+        rawText: String,
+        previewText: String,
+        itemId: String,
+        revealedSecretItemId: String?
+    ) -> String {
+        return (revealedSecretItemId == itemId) ? rawText : SmartClassifier.maskedSecret(previewText)
+    }
+
+    public static func resetSecretRevealOnSelectionChange(
+        previousSelectedId: String?,
+        newSelectedId: String?,
+        currentRevealedId: String?
+    ) -> String? {
+        return nil
+    }
+
+    public static func resolvedEditingColorDisplayText(
+        isEditing: Bool,
+        draftText: String,
+        savedText: String,
+        lastValidFormats: (hex: String, rgb: String, hsl: String, color: NSColor)?,
+        lastValidDisplayText: String?
+    ) -> String {
+        guard isEditing else { return savedText }
+        if let live = ClipboardMonitor.livePreviewColorFormats(for: draftText) {
+            let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("#") { return live.hex }
+            if trimmed.lowercased().hasPrefix("rgb") { return live.rgb }
+            if trimmed.lowercased().hasPrefix("hsl") { return live.hsl }
+            return trimmed
+        }
+        if let lastValidDisplayText {
+            return lastValidDisplayText
+        }
+        if let lastValidFormats {
+            let trimmedSaved = savedText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if trimmedSaved.hasPrefix("rgb") { return lastValidFormats.rgb }
+            if trimmedSaved.hasPrefix("hsl") { return lastValidFormats.hsl }
+            return lastValidFormats.hex
+        }
+        return savedText
+    }
+
     // MARK: - Left History Column
     private func selectCardImmediately(_ id: String) {
         guard selectedItemId != id || revealedSecretItemId != nil else { return }
@@ -4774,8 +5009,13 @@ public struct MainPanelView: View {
         var tx = Transaction()
         tx.disablesAnimations = true
         withTransaction(tx) {
+            let prevId = selectedItemId
             selectedItemId = id
-            revealedSecretItemId = nil
+            revealedSecretItemId = Self.resetSecretRevealOnSelectionChange(
+                previousSelectedId: prevId,
+                newSelectedId: id,
+                currentRevealedId: revealedSecretItemId
+            )
         }
     }
 
@@ -4834,6 +5074,8 @@ public struct MainPanelView: View {
                         let currentSelectedId = selectedItemId ?? items.first?.id
                         let pinnedItems = items.filter { $0.isPinned }
                         let unpinnedItems = items.filter { !$0.isPinned }
+                        let activeLivePreviewColor = activeLiveColorFormats?.color ?? lastValidEditingColorFormats?.color
+                        let isEditingTextInvalidColor = (editingItemId != nil) && !ClipboardMonitor.isValidStrictColorInput(editingItemText)
 
                         if !pinnedItems.isEmpty {
                             // 1. Блок: ЗАКРЕПЛЁННЫЕ (N)
@@ -4866,6 +5108,8 @@ public struct MainPanelView: View {
                                     isPastedToast: (pastedItemToastId == item.id),
                                     isPasteFailedToast: (pasteFailedItemId == item.id),
                                     searchQuery: searchQuery,
+                                    livePreviewColor: (editingItemId == item.id) ? activeLivePreviewColor : nil,
+                                    isInvalidColorEdit: (editingItemId == item.id) && (item.effectiveContentType == .color || item.contentType == .color) && isEditingTextInvalidColor,
                                     onSelect: {
                                         selectCardImmediately(item.id)
                                     },
@@ -4925,6 +5169,8 @@ public struct MainPanelView: View {
                                         isPastedToast: (pastedItemToastId == item.id),
                                         isPasteFailedToast: (pasteFailedItemId == item.id),
                                         searchQuery: searchQuery,
+                                        livePreviewColor: (editingItemId == item.id) ? activeLivePreviewColor : nil,
+                                        isInvalidColorEdit: (editingItemId == item.id) && (item.effectiveContentType == .color || item.contentType == .color) && isEditingTextInvalidColor,
                                         onSelect: {
                                             selectCardImmediately(item.id)
                                         },
@@ -4967,6 +5213,8 @@ public struct MainPanelView: View {
                                     isPastedToast: (pastedItemToastId == item.id),
                                     isPasteFailedToast: (pasteFailedItemId == item.id),
                                     searchQuery: searchQuery,
+                                    livePreviewColor: (editingItemId == item.id) ? activeLivePreviewColor : nil,
+                                    isInvalidColorEdit: (editingItemId == item.id) && (item.effectiveContentType == .color || item.contentType == .color) && isEditingTextInvalidColor,
                                     onSelect: {
                                         selectCardImmediately(item.id)
                                     },
@@ -5004,8 +5252,14 @@ public struct MainPanelView: View {
                     CardHoverCoordinator.shared.setHovered(nil)
                 }
             }
-            .onChange(of: selectedItemId) { _, _ in
+            .onChange(of: selectedItemId) { _, newId in
                 revealedSecretItemId = nil
+                if let editingId = editingItemId, editingId != newId {
+                    editingItemId = nil
+                    editingItemText = ""
+                    lastValidEditingColorFormats = nil
+                    lastValidEditingColorText = nil
+                }
             }
             .onChange(of: keyboardScrollTargetId) { _, targetId in
                 if let targetId {
@@ -5241,10 +5495,11 @@ public struct MainPanelView: View {
                         // Счётчик знаков, слов и строк (строго для .text и .code)
                         let itemKind = currentItem.effectiveContentType
                         if !isSecret && (itemKind == .text || itemKind == .code) {
+                            let _ = fontManager.resolvedPostScriptNames.count
                             let metrics = ClipboardTextMetricsFormatter.compute(for: currentItem.content)
                             Text(ClipboardTextMetricsFormatter.badgeText(for: itemKind, metrics: metrics, isEnglish: currentLanguage == .en))
-                                .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                                .foregroundStyle(currentTheme.secondaryText)
+                                .font(currentFont.font(size: 11.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(currentTheme.accentColor)
                                 .lineLimit(1)
                                 .padding(.horizontal, 9)
                                 .frame(height: 26)
@@ -5254,7 +5509,7 @@ public struct MainPanelView: View {
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                                        .strokeBorder(currentTheme.accentColor.opacity(0.45), lineWidth: 1)
                                 )
                                 .help(ClipboardTextMetricsFormatter.exactTooltip(for: metrics, isEnglish: currentLanguage == .en))
                         }
@@ -5528,37 +5783,86 @@ public struct MainPanelView: View {
                                     .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 10)
                                 }
                             } else if currentItem.effectiveContentType == .color,
-                                      let colorFormats = monitor.colorFormats(for: currentItem) {
-                                let nsColor = colorFormats.color
+                                      let savedColorFormats = monitor.colorFormats(for: currentItem) {
+                                let isEditingThisColor = (editingItemId == currentItem.id)
+                                let isInvalidColorDraft = isEditingThisColor && !ClipboardMonitor.isValidStrictColorInput(editingItemText)
+                                let liveFormats = isEditingThisColor ? activeLiveColorFormats : nil
+                                let displayFormats = liveFormats ?? (isEditingThisColor ? lastValidEditingColorFormats : nil) ?? savedColorFormats
+                                let nsColor = displayFormats.color
+                                let srgb = nsColor.usingColorSpace(.sRGB) ?? nsColor
+                                let colorAnimKey = "\(Int(round(srgb.redComponent * 255)))_\(Int(round(srgb.greenComponent * 255)))_\(Int(round(srgb.blueComponent * 255)))_\(Int(round(srgb.alphaComponent * 255)))"
+                                let displayValueText = Self.resolvedEditingColorDisplayText(
+                                    isEditing: isEditingThisColor,
+                                    draftText: editingItemText,
+                                    savedText: currentItem.textPreview,
+                                    lastValidFormats: isEditingThisColor ? lastValidEditingColorFormats : nil,
+                                    lastValidDisplayText: isEditingThisColor ? lastValidEditingColorText : nil
+                                )
+
                                 VStack(alignment: .leading, spacing: 10) {
                                     HStack(spacing: 12) {
-                                        Circle()
-                                            .fill(Color(nsColor: nsColor))
-                                            .frame(width: 36, height: 36)
-                                            .overlay(Circle().stroke(currentTheme.primaryText.opacity(0.55), lineWidth: 2))
+                                        ZStack {
+                                            if isInvalidColorDraft {
+                                                PhaseAnimator([false, true]) { pulse in
+                                                    Circle()
+                                                        .strokeBorder(
+                                                            Color.red.opacity(pulse ? 1.0 : 0.30),
+                                                            lineWidth: 1.75
+                                                        )
+                                                        .frame(width: 47, height: 47)
+                                                        .shadow(color: Color.red.opacity(pulse ? 0.45 : 0.10), radius: 4, x: 0, y: 0)
+                                                } animation: { _ in
+                                                    .easeInOut(duration: 0.52)
+                                                }
+                                            } else {
+                                                Circle()
+                                                    .strokeBorder(
+                                                        Color.gray.opacity(0.45),
+                                                        lineWidth: 1.75
+                                                    )
+                                                    .frame(width: 47, height: 47)
+                                            }
+
+                                            ColorSphere3DView(
+                                                nsColor: nsColor,
+                                                size: 38,
+                                                borderTint: currentTheme.primaryText
+                                            )
+                                            .animation(.easeInOut(duration: 0.42), value: colorAnimKey)
+                                        }
+                                        .frame(width: 47, height: 47)
+
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(tr("Цветовой код", "Color Value"))
                                                 .font(currentFont.font(size: 11, weight: .semibold))
                                                 .foregroundStyle(currentTheme.secondaryText)
-                                            Text(currentItem.textPreview)
+                                            Text(displayValueText)
                                                 .font(currentFont.font(size: 16, weight: .bold))
                                                 .foregroundStyle(currentTheme.primaryText)
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.85)
+                                                .id(currentItem.id)
+                                                .contentTransition(.numericText())
+                                                .animation(.easeInOut(duration: 0.24), value: displayValueText)
                                         }
+                                        .clipped()
                                         Spacer()
                                     }
 
-                                    HStack(spacing: 8) {
-                                        let hex = colorFormats.hex
-                                        let rgb = colorFormats.rgb
-                                        let hsl = colorFormats.hsl
+                                    HStack(spacing: 6) {
+                                        let hex = displayFormats.hex
+                                        let rgb = displayFormats.rgb
+                                        let hsl = displayFormats.hsl
 
-                                        colorFormatChip(for: currentItem, format: "HEX", value: hex)
-                                        colorFormatChip(for: currentItem, format: "RGB", value: rgb)
-                                        colorFormatChip(for: currentItem, format: "HSL", value: hsl)
+                                        colorFormatChip(for: currentItem, format: "HEX", value: hex, activeSourceText: displayValueText)
+                                        colorFormatChip(for: currentItem, format: "RGB", value: rgb, activeSourceText: displayValueText)
+                                        colorFormatChip(for: currentItem, format: "HSL", value: hsl, activeSourceText: displayValueText)
                                     }
+                                    .clipped()
                                 }
                                 .padding(12)
                                 .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 11)
+                                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                             } else if currentItem.effectiveContentType == .url,
                                       let rawUrl = URL(string: currentItem.textPreview.trimmingCharacters(in: .whitespacesAndNewlines)) {
                                 HStack(spacing: 10) {
@@ -5619,7 +5923,7 @@ public struct MainPanelView: View {
                                             .foregroundStyle(currentTheme.primaryText)
                                     }
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(currentItem.fileURLs.first?.lastPathComponent ?? currentItem.textPreview)
+                                        Text(currentItem.fileURLs.first?.lastPathComponent ?? ClipboardRowCardView.displayPreviewText(for: currentItem, in: currentLanguage))
                                             .font(currentFont.font(size: 13, weight: .semibold))
                                             .foregroundStyle(currentTheme.primaryText)
                                         if let path = currentItem.fileURLPath {
@@ -5638,13 +5942,29 @@ public struct MainPanelView: View {
 
                             if currentItem.effectiveContentType != .image && currentItem.effectiveContentType != .file {
                                 if editingItemId == currentItem.id {
+                                    let isEditingColorCard = (currentItem.effectiveContentType == .color || currentItem.contentType == .color)
+                                    let isColorInputValid = !isEditingColorCard || ClipboardMonitor.isValidStrictColorInput(editingItemText)
+
                                     VStack(alignment: .leading, spacing: 8) {
-                                        HStack {
+                                        HStack(spacing: 8) {
                                             Label(tr("Редактирование текста перед вставкой", "Edit Text Before Pasting"), systemImage: "pencil")
                                                 .font(currentFont.font(size: 11, weight: .semibold))
                                                 .foregroundStyle(currentTheme.accentColor)
                                             Spacer()
+                                            if isEditingColorCard && !isColorInputValid {
+                                                HStack(spacing: 4) {
+                                                    Image(systemName: "exclamationmark.triangle.fill")
+                                                        .symbolRenderingMode(.monochrome)
+                                                        .font(.system(size: 10, weight: .bold))
+                                                    Text(tr("Неверный код цвета", "Invalid color code"))
+                                                        .font(currentFont.font(size: 11, weight: .semibold))
+                                                        .lineLimit(1)
+                                                }
+                                                .foregroundStyle(Color.red)
+                                                .transition(.opacity)
+                                            }
                                         }
+                                        .animation(.easeInOut(duration: 0.2), value: isColorInputValid)
 
                                         TextEditor(text: $editingItemText)
                                             .font(currentFont.font(size: 13, weight: .regular))
@@ -5655,13 +5975,40 @@ public struct MainPanelView: View {
                                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                             .overlay(
                                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                    .strokeBorder(currentTheme.accentColor.opacity(0.6), lineWidth: 1)
+                                                    .strokeBorder(
+                                                        (isEditingColorCard && !isColorInputValid)
+                                                            ? Color.red.opacity(0.75)
+                                                            : currentTheme.accentColor.opacity(0.6),
+                                                        lineWidth: 1
+                                                    )
                                             )
+                                            .onChange(of: editingItemText) { _, newValue in
+                                                if isEditingColorCard,
+                                                   let valid = ClipboardMonitor.livePreviewColorFormats(for: newValue) {
+                                                    lastValidEditingColorFormats = valid
+                                                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                    if trimmed.hasPrefix("#") {
+                                                        lastValidEditingColorText = valid.hex
+                                                    } else if trimmed.lowercased().hasPrefix("rgb") {
+                                                        lastValidEditingColorText = valid.rgb
+                                                    } else if trimmed.lowercased().hasPrefix("hsl") {
+                                                        lastValidEditingColorText = valid.hsl
+                                                    } else {
+                                                        lastValidEditingColorText = trimmed
+                                                    }
+                                                }
+                                            }
 
                                         HStack(spacing: 8) {
                                             Button {
-                                                monitor.updateItemText(id: currentItem.id, newText: editingItemText)
-                                                editingItemId = nil
+                                                guard isColorInputValid else { return }
+                                                withAnimation(.easeInOut(duration: 0.42)) {
+                                                    monitor.updateItemText(id: currentItem.id, newText: editingItemText)
+                                                    editingItemId = nil
+                                                    editingItemText = ""
+                                                    lastValidEditingColorFormats = nil
+                                                    lastValidEditingColorText = nil
+                                                }
                                             } label: {
                                                 HStack(spacing: 4) {
                                                     Image(systemName: "checkmark")
@@ -5670,10 +6017,18 @@ public struct MainPanelView: View {
                                                 }
                                             }
                                             .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+                                            .disabled(!isColorInputValid)
+                                            .opacity(isColorInputValid ? 1.0 : 0.45)
 
                                             Button {
-                                                monitor.updateItemText(id: currentItem.id, newText: editingItemText)
-                                                editingItemId = nil
+                                                guard isColorInputValid else { return }
+                                                withAnimation(.easeInOut(duration: 0.42)) {
+                                                    monitor.updateItemText(id: currentItem.id, newText: editingItemText)
+                                                    editingItemId = nil
+                                                    editingItemText = ""
+                                                    lastValidEditingColorFormats = nil
+                                                    lastValidEditingColorText = nil
+                                                }
                                                 if let updated = monitor.items.first(where: { $0.id == currentItem.id }) {
                                                     pasteItem(updated)
                                                 }
@@ -5685,9 +6040,16 @@ public struct MainPanelView: View {
                                                 }
                                             }
                                             .pvButton(variant: .primary, size: .small, theme: currentTheme)
+                                            .disabled(!isColorInputValid)
+                                            .opacity(isColorInputValid ? 1.0 : 0.45)
 
                                             Button {
-                                                editingItemId = nil
+                                                withAnimation(.easeInOut(duration: 0.42)) {
+                                                    editingItemId = nil
+                                                    editingItemText = ""
+                                                    lastValidEditingColorFormats = nil
+                                                    lastValidEditingColorText = nil
+                                                }
                                             } label: {
                                                 Text(tr("Отмена", "Cancel"))
                                             }
@@ -5698,6 +6060,7 @@ public struct MainPanelView: View {
                                     }
                                     .padding(12)
                                     .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 11)
+                                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                                 } else {
                                     VStack(alignment: .leading, spacing: 8) {
                                         HStack(alignment: .center, spacing: 8) {
@@ -5705,7 +6068,8 @@ public struct MainPanelView: View {
                                                 HStack(spacing: 5) {
                                                     Image(systemName: "key.fill")
                                                         .symbolRenderingMode(.monochrome)
-                                                    Text(tr("Скрытый пароль", "Hidden Secret"))
+                                                    Text(tr("Секрет", "Hidden Secret"))
+                                                        .lineLimit(1)
                                                 }
                                                 .font(currentFont.font(size: 11, weight: .semibold))
                                                 .foregroundStyle(currentTheme.badgeText)
@@ -5758,6 +6122,8 @@ public struct MainPanelView: View {
                                                 Button {
                                                     editingItemId = currentItem.id
                                                     editingItemText = currentItem.textPreview
+                                                    lastValidEditingColorFormats = monitor.colorFormats(for: currentItem)
+                                                    lastValidEditingColorText = currentItem.textPreview.trimmingCharacters(in: .whitespacesAndNewlines)
                                                 } label: {
                                                     HStack(spacing: 4) {
                                                         Image(systemName: "pencil")
@@ -5797,20 +6163,24 @@ public struct MainPanelView: View {
                                                 if isSecret {
                                                     let isRevealed = (revealedSecretItemId == currentItem.id)
                                                     Button {
-                                                        if isRevealed {
-                                                            revealedSecretItemId = nil
-                                                        } else {
-                                                            revealedSecretItemId = currentItem.id
+                                                        withAnimation(.easeInOut(duration: 0.28)) {
+                                                            revealedSecretItemId = Self.toggleSecretReveal(
+                                                                for: currentItem.id,
+                                                                currentRevealedId: revealedSecretItemId
+                                                            )
                                                         }
                                                     } label: {
                                                         HStack(spacing: 4) {
                                                             Image(systemName: isRevealed ? "eye.slash.fill" : "eye.fill")
                                                                 .symbolRenderingMode(.monochrome)
                                                                 .font(.system(size: 12, weight: .semibold))
+                                                                .contentTransition(.symbolEffect(.replace))
                                                             Text(isRevealed ? tr("Скрыть пароль", "Hide Password") : tr("Показать пароль", "Show Password"))
                                                                 .font(currentFont.font(size: 12, weight: .semibold))
                                                                 .lineLimit(1)
+                                                                .contentTransition(.numericText())
                                                         }
+                                                        .animation(.easeInOut(duration: 0.28), value: isRevealed)
                                                         .padding(.horizontal, 4)
                                                         .frame(height: 28)
                                                     }
@@ -5824,12 +6194,55 @@ public struct MainPanelView: View {
                                             .zIndex(50)
                                         }
 
-                                        if isSecret && (revealedSecretItemId != currentItem.id) {
-                                            Text(SmartClassifier.maskedSecret(currentItem.textPreview))
-                                                .font(currentFont.font(size: 13, weight: .semibold))
-                                                .foregroundStyle(currentTheme.badgeText)
+                                        if isSecret {
+                                            let isRevealed = (revealedSecretItemId == currentItem.id)
+                                            let isShowingFull = (currentItem.content.count <= inspectorPreviewCharLimit) || (showFullTextInInspectorItemId == currentItem.id)
+                                            let rawSecretText = isShowingFull ? currentItem.content : String(currentItem.content.prefix(inspectorPreviewCharLimit))
+                                            let secretDisplayText = Self.resolvedSecretDisplayText(
+                                                rawText: rawSecretText,
+                                                previewText: currentItem.textPreview,
+                                                itemId: currentItem.id,
+                                                revealedSecretItemId: revealedSecretItemId
+                                            )
+
+                                            if isRevealed && !searchQuery.isEmpty {
+                                                Text(SearchHighlightHelper.highlightedSnippetText(
+                                                    rawSecretText,
+                                                    query: searchQuery,
+                                                    accentColor: currentTheme.accentColor,
+                                                    primaryColor: currentTheme.primaryText,
+                                                    baseFontSize: 13,
+                                                    baseFont: currentFont.font(size: 13, weight: .regular),
+                                                    isLight: currentTheme.isLight
+                                                ))
                                                 .textSelection(.enabled)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                                .contentTransition(.numericText())
+                                                .animation(.easeInOut(duration: 0.28), value: isRevealed)
+                                            } else {
+                                                Text(secretDisplayText)
+                                                    .font(currentFont.font(size: 13, weight: isRevealed ? .regular : .semibold))
+                                                    .foregroundStyle(isRevealed ? currentTheme.primaryText : currentTheme.badgeText)
+                                                    .textSelection(.enabled)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .contentTransition(.numericText())
+                                                    .animation(.easeInOut(duration: 0.28), value: isRevealed)
+                                            }
+
+                                            if isRevealed && !isShowingFull {
+                                                Button {
+                                                    showFullTextInInspectorItemId = currentItem.id
+                                                } label: {
+                                                    HStack(spacing: 5) {
+                                                        Image(systemName: "chevron.down.circle")
+                                                            .symbolRenderingMode(.monochrome)
+                                                        Text(tr("Показать весь текст (\(currentItem.content.count) симв.)", "Show full text (\(currentItem.content.count) chars)"))
+                                                    }
+                                                    .font(currentFont.font(size: 11, weight: .semibold))
+                                                }
+                                                .pvButton(variant: .secondary, size: .small, theme: currentTheme)
+                                                .padding(.top, 4)
+                                            }
                                         } else {
                                             let isShowingFull = (currentItem.content.count <= inspectorPreviewCharLimit) || (showFullTextInInspectorItemId == currentItem.id)
                                             let textToDisplay = isShowingFull ? currentItem.content : String(currentItem.content.prefix(inspectorPreviewCharLimit))
@@ -5878,6 +6291,7 @@ public struct MainPanelView: View {
                                     }
                                     .padding(12)
                                     .liquidGlassCard(theme: currentTheme, windowOpacity: windowOpacity, cornerRadius: 11)
+                                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                                 }
                             }
                         }
@@ -7372,7 +7786,7 @@ public struct MainPanelView: View {
 
                                 Slider(value: $passLength, in: 8...48, step: 1)
                                     .onChange(of: passLength) { _, _ in
-                                        generatePass()
+                                        generatePass(playTick: true)
                                     }
                             }
 
@@ -7380,17 +7794,17 @@ public struct MainPanelView: View {
                                 Toggle(tr("Спецсимволы (!@#$)", "Symbols (!@#$)"), isOn: $passIncludeSymbols)
                                     .font(currentFont.font(size: 12, weight: .regular))
                                     .foregroundStyle(currentTheme.primaryText)
-                                    .onChange(of: passIncludeSymbols) { _, _ in generatePass() }
+                                    .onChange(of: passIncludeSymbols) { _, _ in generatePass(playTick: true) }
 
                                 Toggle(tr("Цифры (0-9)", "Numbers (0-9)"), isOn: $passIncludeDigits)
                                     .font(currentFont.font(size: 12, weight: .regular))
                                     .foregroundStyle(currentTheme.primaryText)
-                                    .onChange(of: passIncludeDigits) { _, _ in generatePass() }
+                                    .onChange(of: passIncludeDigits) { _, _ in generatePass(playTick: true) }
 
                                 Toggle(tr("Прописные (A-Z)", "Uppercase (A-Z)"), isOn: $passIncludeUppercase)
                                     .font(currentFont.font(size: 12, weight: .regular))
                                     .foregroundStyle(currentTheme.primaryText)
-                                    .onChange(of: passIncludeUppercase) { _, _ in generatePass() }
+                                    .onChange(of: passIncludeUppercase) { _, _ in generatePass(playTick: true) }
                             }
                         }
 
@@ -9052,8 +9466,8 @@ public struct MainPanelView: View {
         monitor.copyToPasteboardImmediately(text: outString)
     }
 
-    private func colorFormatChip(for item: ClipboardItemRow, format: String, value: String) -> some View {
-        let trimmedCurrent = item.textPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func colorFormatChip(for item: ClipboardItemRow, format: String, value: String, activeSourceText: String? = nil) -> some View {
+        let trimmedCurrent = (activeSourceText ?? item.textPreview).trimmingCharacters(in: .whitespacesAndNewlines)
         let isActive: Bool = {
             if trimmedCurrent.caseInsensitiveCompare(value) == .orderedSame { return true }
             if format == "HEX" && trimmedCurrent.hasPrefix("#") { return true }
@@ -9066,27 +9480,42 @@ public struct MainPanelView: View {
 
         return Button {
             TapticSoundAndHaptics.shared.performDialTick()
-            monitor.selectColorFormat(for: item.id, newText: value)
-            withAnimation(.easeInOut(duration: 0.15)) {
-                copiedColorChip = chipKey
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                if copiedColorChip == chipKey {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        copiedColorChip = nil
+            if editingItemId == item.id {
+                withAnimation(.easeInOut(duration: 0.24)) {
+                    editingItemText = value
+                }
+            } else {
+                withAnimation(.easeInOut(duration: 0.24)) {
+                    monitor.selectColorFormat(for: item.id, newText: value)
+                }
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    copiedColorChip = chipKey
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    if copiedColorChip == chipKey {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            copiedColorChip = nil
+                        }
                     }
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: isCopied ? "checkmark" : (isActive ? "checkmark.circle.fill" : "doc.on.doc"))
-                    .symbolRenderingMode(.monochrome)
-                    .font(.system(size: 9, weight: (isCopied || isActive) ? .bold : .medium))
+            HStack(spacing: 3.5) {
+                if !isCopied {
+                    Image(systemName: isActive ? "checkmark.circle.fill" : "doc.on.doc")
+                        .symbolRenderingMode(.monochrome)
+                        .font(.system(size: 9, weight: isActive ? .bold : .medium))
+                }
                 Text(isCopied ? tr("✓ \(format)", "✓ \(format)") : "\(format): \(value)")
                     .font(currentFont.font(size: 11, weight: (isCopied || isActive) ? .semibold : .medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.84)
+                    .allowsTightening(true)
+                    .id("\(chipKey)_\(isCopied ? "copied" : "val")")
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.24), value: value)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6.5)
             .padding(.vertical, 4)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -9097,6 +9526,8 @@ public struct MainPanelView: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder((isCopied || isActive) ? currentTheme.accentColor : currentTheme.borderColor, lineWidth: (isCopied || isActive) ? 1.5 : 1)
             )
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .help(tr("Выбрать и скопировать формат \(format)", "Select and copy \(format) format"))
@@ -11343,6 +11774,7 @@ public struct MainPanelView: View {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(currentTheme.backgroundColor.opacity(0.60))
                         )
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .strokeBorder(currentTheme.borderColor, lineWidth: 0.8)
@@ -11857,8 +12289,10 @@ public struct MainPanelView: View {
         return TimeInterval(sec)
     }
 
-    private func generatePass() {
-        TapticSoundAndHaptics.shared.performDialTick()
+    private func generatePass(playTick: Bool = false) {
+        if playTick {
+            TapticSoundAndHaptics.shared.performDialTick()
+        }
         if passIsMnemonic {
             let generated = PassGenerator.generateMnemonic(wordCount: 5)
             self.passGeneratedSecret = generated.secret
