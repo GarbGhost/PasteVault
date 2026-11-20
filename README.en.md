@@ -4,7 +4,7 @@
   <img src="Resources/Branding/AppIcon_1024.png" width="128" height="128" alt="PasteVault Icon" />
 </p>
 
-<h1 align="center">PasteVault v1.1.3</h1>
+<h1 align="center">PasteVault v1.1.4</h1>
 
 <p align="center">
   <strong>Fast, private, and completely local clipboard manager, screenshot editor, 3D snippets deck, and cryptographic password generator for macOS.</strong>
@@ -12,7 +12,7 @@
 
 <p align="center">
   <em>100% On-Mac Storage • Zero Cloud, Analytics, or Telemetry • SQLite FTS5 • Apple Vision OCR • Encrypted PVENC2 Backups</em><br />
-  <a href="https://github.com/GarbGhost/PasteVault/releases/download/v1.1.3/PasteVault_v1.1.3_Universal.dmg">Download PasteVault_v1.1.3_Universal.dmg (v1.1.3)</a>
+  <a href="https://github.com/GarbGhost/PasteVault/releases/download/v1.1.4/PasteVault_v1.1.4_Universal.dmg">Download PasteVault_v1.1.4_Universal.dmg (v1.1.4)</a>
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@ PasteVault continuously captures everything you copy on macOS, classifies items 
 - **Pinning & Filtering:** keep essential items at the top (`PINNED`), sort chronologically, or filter by content category.
 - **Offline Apple Vision OCR:** extracts readable text from copied screenshots locally with zero network requests, complete with one-click copy and paste actions for recognized text.
 - **Inspector Utilities:** strip UTM tracking parameters from URLs, format or minify JSON payloads, edit text inline, and view live character/word/line counts.
-- **Card File Export:** export text and code entries to `.txt, .docx, .md, .conf, .json, .swift, .py, .sh, .js` with automatic recommended format selection.
+- **Card File Export:** export text and code entries to `.txt, .docx, .html, .md, .conf, .json, .swift, .py, .sh, .js` with automatic recommended format selection.
 
 ---
 
@@ -93,7 +93,7 @@ Manage reusable templates, commands, replies, and AI prompts in an interactive *
 
 Runs on macOS 14 and up, on Apple Silicon and Intel (Universal Binary).
 
-- **Prebuilt Installer (v1.1.3):** download [PasteVault_v1.1.3_Universal.dmg](https://github.com/GarbGhost/PasteVault/releases/download/v1.1.3/PasteVault_v1.1.3_Universal.dmg) and drag `Paste Vault.app` into `/Applications`.
+- **Prebuilt Installer (v1.1.4):** download [PasteVault_v1.1.4_Universal.dmg](https://github.com/GarbGhost/PasteVault/releases/download/v1.1.4/PasteVault_v1.1.4_Universal.dmg) and drag `Paste Vault.app` into `/Applications`.
 
 ### Build from Source
 

@@ -1,5 +1,34 @@
 # Changelog / История изменений
 
+## [1.1.4] - 2026-11-20
+
+### 🇷🇺 Русский
+
+- **Значок в строке меню на новом Mac:** иконка PasteVault больше не пропадает из строки меню при первом запуске и при запросе системных разрешений; улучшена чёткость значка.
+- **Системные окна выбора и сохранения файлов:** выбор фото в сниппетах, сохранение изображений в PNG, экспорт карточек, резервное копирование и выбор программ для чёрного списка теперь всегда открываются поверх окна PasteVault и не теряют фокус.
+- **Экспорт карточки в HTML:** в меню сохранения карточки добавлен формат `.html` — создаёт автономную веб-страницу с поддержкой светлой и тёмной темы, кликабельными ссылками, образцом цвета и блоками кода.
+- **Язык описания обновлений:** окно новой версии теперь показывает заметки к релизу строго на выбранном языке интерфейса (русском или английском).
+
+<details>
+<summary><b>🇬🇧 English (click to expand)</b></summary>
+<br>
+
+- **Menu bar icon on a clean Mac:** the PasteVault icon stays visible in the menu bar on initial launch and after permission prompts, with crisper rendering.
+- **File open & save dialogs:** choosing a snippet photo, saving PNG screenshots, exporting cards, backup export/import, and picking apps for the blacklist now reliably appear above the PasteVault window without losing focus.
+- **HTML card export:** added `.html` export format that generates a self-contained web page with automatic light/dark theme support, clickable links, color swatches, and formatted code blocks.
+- **Localized update notes:** the update window now displays release notes in the selected app language (Russian or English).
+
+</details>
+
+### 🔐 Checksums (`SHA-256`)
+
+| File | Size | SHA-256 |
+| :--- | :--- | :--- |
+| **`PasteVault_v1.1.4_Universal.dmg`** | `14.4 MB` | `f63eac8b77e9a2c2dd1218577b1b5b5abc9eb7de625c4552eb35dcb36ca63968` |
+| **`PasteVault_v1.1.4_Universal.zip`** | `11.7 MB` | `5f5ea91db4b541d2331a73946db06cecba559bb766d898c9c0d5e0bf679c040d` |
+
+---
+
 ## [1.1.3] - 2026-11-19
 
 ### 🇷🇺 Русский
