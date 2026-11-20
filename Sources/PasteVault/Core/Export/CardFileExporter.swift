@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 
 public enum CardExportFormat: String, CaseIterable, Identifiable, Sendable {
     case docx
+    case html
     case txt
     case conf
     case json
@@ -24,6 +25,8 @@ public enum CardExportFormat: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .docx:
             return language == .en ? ".docx (Word Document)" : ".docx (Документ Word)"
+        case .html:
+            return language == .en ? "HTML Page (.html)" : "HTML-страница (.html)"
         case .txt:
             return language == .en ? ".txt (Text File)" : ".txt (Текстовый файл)"
         case .conf:
@@ -46,6 +49,7 @@ public enum CardExportFormat: String, CaseIterable, Identifiable, Sendable {
     public var iconName: String {
         switch self {
         case .docx: return "doc.richtext"
+        case .html: return "globe"
         case .txt: return "doc.plaintext"
         case .conf: return "gearshape"
         case .json: return "curlybraces"
@@ -291,8 +295,8 @@ public struct CardFileExporter {
             }
             return "\(jsName).js"
 
-        // MARK: - ГРУППА Б: 3 ТЕКСТОВЫХ И ДОКУМЕНТНЫХ ФОРМАТА
-        case .txt, .docx, .md:
+        // MARK: - ГРУППА Б: ТЕКСТОВЫЕ И ДОКУМЕНТНЫЕ ФОРМАТЫ
+        case .txt, .docx, .md, .html:
             guard let rawFirstLine = nonEmpties.first else {
                 return "document.\(format.extensionName)"
             }
@@ -412,6 +416,156 @@ public struct CardFileExporter {
         return .txt
     }
 
+    /// Экранирует HTML-спецсимволы для безопасного вывода текста внутри HTML5-документа
+    public static func escapeHTML(_ raw: String) -> String {
+        var result = raw.replacingOccurrences(of: "&", with: "&amp;")
+        result = result.replacingOccurrences(of: "<", with: "&lt;")
+        result = result.replacingOccurrences(of: ">", with: "&gt;")
+        result = result.replacingOccurrences(of: "\"", with: "&quot;")
+        result = result.replacingOccurrences(of: "'", with: "&#39;")
+        return result
+    }
+
+    /// Генерирует автономную HTML5-страницу (Zero-Network, поддержка тёмной темы, URL, цветов, кода и заметок)
+    public static func generateHTMLDocument(from text: String, isCode: Bool = false) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind: ContentKind = isCode ? .code : SmartClassifier.classify(text: trimmed, isSensitive: false)
+
+        let bodyContent: String
+        switch kind {
+        case .color:
+            let escapedColor = escapeHTML(trimmed)
+            let swatchCSS: String
+            if let nsColor = SmartClassifier.parseNSColor(trimmed),
+               let srgb = nsColor.usingColorSpace(.sRGB) {
+                let r = Int(round(srgb.redComponent * 255))
+                let g = Int(round(srgb.greenComponent * 255))
+                let b = Int(round(srgb.blueComponent * 255))
+                let a = String(format: "%.3f", srgb.alphaComponent)
+                swatchCSS = "rgba(\(r), \(g), \(b), \(a))"
+            } else {
+                swatchCSS = "#888888"
+            }
+            bodyContent = """
+            <div class="color-row">
+              <span class="color-swatch" style="background-color: \(swatchCSS);"></span>
+              <code class="color-value">\(escapedColor)</code>
+            </div>
+            """
+
+        case .url:
+            let escapedURL = escapeHTML(trimmed)
+            let lower = trimmed.lowercased()
+            if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+                bodyContent = """
+                <p class="link-wrap"><a class="link-card" href="\(escapedURL)" rel="noopener noreferrer">\(escapedURL)</a></p>
+                """
+            } else {
+                bodyContent = "<div class=\"note\">\(escapeHTML(text))</div>"
+            }
+
+        case .code:
+            bodyContent = "<pre><code>\(escapeHTML(text))</code></pre>"
+
+        default:
+            let paragraphs = text
+                .components(separatedBy: "\n\n")
+                .map { "<p>\(escapeHTML($0).replacingOccurrences(of: "\n", with: "<br>"))</p>" }
+                .joined(separator: "\n")
+            bodyContent = "<div class=\"note\">\n\(paragraphs)\n</div>"
+        }
+
+        let titleBase = sanitizeFileName(
+            trimmed.components(separatedBy: .newlines).first?.prefix(48).description ?? "PasteVault Note"
+        )
+        let pageTitle = escapeHTML(titleBase.isEmpty ? "PasteVault" : titleBase)
+
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>\(pageTitle)</title>
+          <style>
+            :root {
+              color-scheme: light dark;
+              --bg: #f6f8fa;
+              --card: #ffffff;
+              --border: #d0d7de;
+              --text: #1f2328;
+              --muted: #656d76;
+              --code-bg: #f3f4f6;
+              --accent: #0969da;
+            }
+            @media (prefers-color-scheme: dark) {
+              :root {
+                --bg: #0d1117;
+                --card: #161b22;
+                --border: #30363d;
+                --text: #e6edf3;
+                --muted: #8b949e;
+                --code-bg: #0d1117;
+                --accent: #58a6ff;
+              }
+            }
+            * { box-sizing: border-box; }
+            body {
+              margin: 0;
+              padding: 32px 20px;
+              background: var(--bg);
+              color: var(--text);
+              font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+              font-size: 15px;
+              line-height: 1.6;
+            }
+            main.card {
+              max-width: 820px;
+              margin: 0 auto;
+              padding: 24px 28px;
+              background: var(--card);
+              border: 1px solid var(--border);
+              border-radius: 12px;
+            }
+            .note p { margin: 0 0 1em; overflow-wrap: anywhere; }
+            .note p:last-child { margin-bottom: 0; }
+            pre {
+              margin: 0;
+              padding: 16px;
+              background: var(--code-bg);
+              border: 1px solid var(--border);
+              border-radius: 8px;
+              overflow-x: auto;
+            }
+            code {
+              font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
+              font-size: 13.5px;
+              line-height: 1.5;
+            }
+            .link-wrap { margin: 0; overflow-wrap: anywhere; }
+            .link-card { color: var(--accent); text-decoration: none; font-weight: 500; }
+            .link-card:hover { text-decoration: underline; }
+            .color-row { display: flex; align-items: center; gap: 14px; }
+            .color-swatch {
+              display: inline-block;
+              width: 36px;
+              height: 36px;
+              border-radius: 8px;
+              border: 1px solid var(--border);
+              flex-shrink: 0;
+            }
+            .color-value { font-size: 16px; font-weight: 600; }
+          </style>
+        </head>
+        <body>
+          <main class="card">
+            \(bodyContent)
+          </main>
+        </body>
+        </html>
+        """
+    }
+
     /// Генерирует сериализованные байты файла.
     /// Для .docx нативно создает Microsoft Word через NSAttributedString (officeOpenXML).
     public static func generateExportData(from text: String, format: CardExportFormat, isCode: Bool = false) throws -> Data {
@@ -428,12 +582,14 @@ public struct CardFileExporter {
                 from: NSRange(location: 0, length: attr.length),
                 documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML]
             )
+        case .html:
+            return Data(generateHTMLDocument(from: text, isCode: isCode).utf8)
         case .txt, .conf, .json, .swift, .py, .md, .sh, .js:
             return Data(text.utf8)
         }
     }
 
-    /// Открывает системное окно сохранения NSSavePanel как шторку прямо поверх окна FloatingPanel
+    /// Открывает системное окно сохранения NSSavePanel поверх окна FloatingPanel через единый презентатор
     @MainActor
     public static func promptSaveCard(
         content: String,
@@ -441,17 +597,16 @@ public struct CardFileExporter {
         isCode: Bool = false,
         language: AppLanguage = .current
     ) {
-        ClipboardMonitor.shared.isShowingFilePanel = true
-        NSApp.activate()
         let savePanel = NSSavePanel()
-        if let utType = UTType(filenameExtension: format.extensionName) {
+        if format == .html {
+            savePanel.allowedContentTypes = [.html]
+        } else if let utType = UTType(filenameExtension: format.extensionName) {
             savePanel.allowedContentTypes = [utType]
         }
         savePanel.canCreateDirectories = true
         savePanel.nameFieldStringValue = defaultFileName(for: content, format: format)
         savePanel.prompt = language == .en ? "Save" : "Сохранить"
         savePanel.title = language == .en ? "Export to .\(format.extensionName)" : "Экспорт в .\(format.extensionName)"
-        savePanel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
 
         let writeAction: (URL) -> Void = { url in
             do {
@@ -462,17 +617,7 @@ public struct CardFileExporter {
             }
         }
 
-        let hostWindow = NSApp.windows.first(where: { $0.className.contains("FloatingPanel") && $0.isVisible }) ?? NSApp.keyWindow
-        if let host = hostWindow {
-            savePanel.beginSheetModal(for: host) { response in
-                ClipboardMonitor.shared.isShowingFilePanel = false
-                if response == .OK, let url = savePanel.url {
-                    writeAction(url)
-                }
-            }
-        } else {
-            let response = savePanel.runModal()
-            ClipboardMonitor.shared.isShowingFilePanel = false
+        SystemFilePanelPresenter.present(savePanel, delayAfterPopoverDismiss: true) { response in
             if response == .OK, let url = savePanel.url {
                 writeAction(url)
             }
