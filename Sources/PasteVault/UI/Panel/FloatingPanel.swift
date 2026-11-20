@@ -820,3 +820,76 @@ public struct WindowDragHandle: NSViewRepresentable {
     public func updateNSView(_ nsView: DraggableNSView, context: Context) {}
 }
 
+/// Единый надёжный презентатор системных файловых панелей (`NSOpenPanel` / `NSSavePanel`) поверх `FloatingPanel`.
+/// Гарантирует уровень выше `.popUpMenu` (103 > 101), перенос на активный Space, принудительную активацию приложения,
+/// независимый модальный показ без хрупкого `beginSheetModal` на `.nonactivatingPanel` и гарантированный сброс флагов.
+@MainActor
+public enum SystemFilePanelPresenter {
+    public static var panelLevel: NSWindow.Level {
+        NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
+    }
+
+    public static func activeHostWindow() -> NSWindow? {
+        NSApp.windows.first(where: { $0 is FloatingPanel<MainPanelView> && $0.isVisible })
+            ?? NSApp.windows.first(where: { $0.isVisible && $0.className.contains("FloatingPanel") })
+            ?? NSApp.keyWindow
+            ?? NSApp.windows.first(where: {
+                let className = String(describing: type(of: $0))
+                return $0.isVisible && !className.contains("StatusBar") && $0.level.rawValue < NSWindow.Level.statusBar.rawValue
+            })
+    }
+
+    public static func present(
+        _ panel: NSSavePanel,
+        hostWindow: NSWindow? = nil,
+        delayAfterPopoverDismiss: Bool = false,
+        onComplete: @escaping @MainActor (NSApplication.ModalResponse) -> Void
+    ) {
+        ClipboardMonitor.shared.isShowingFilePanel = true
+        ClipboardMonitor.shared.isModalOverlayActive = true
+
+        let targetHost = hostWindow ?? activeHostWindow()
+        let targetLevel = panelLevel
+        panel.level = targetLevel
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+
+        let runPanel: @MainActor () -> Void = {
+            panel.level = targetLevel
+            panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
+
+            DispatchQueue.main.async {
+                guard panel.isVisible else { return }
+                panel.level = targetLevel
+                panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+                NSApp.activate(ignoringOtherApps: true)
+                panel.makeKeyAndOrderFront(nil)
+                panel.orderFrontRegardless()
+            }
+
+            let response = panel.runModal()
+            panel.orderOut(nil)
+
+            ClipboardMonitor.shared.isShowingFilePanel = false
+            ClipboardMonitor.shared.isModalOverlayActive = false
+
+            if let targetHost {
+                targetHost.makeKeyAndOrderFront(nil)
+            }
+            onComplete(response)
+        }
+
+        if delayAfterPopoverDismiss {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                runPanel()
+            }
+        } else {
+            DispatchQueue.main.async {
+                runPanel()
+            }
+        }
+    }
+}
+

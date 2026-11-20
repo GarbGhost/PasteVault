@@ -41,6 +41,18 @@ public enum AppDefaults {
         }
     }
 
+    nonisolated public static func cleanupCurrentTestPreferencesAndSync() {
+        if let suite = testSuiteName {
+            removeTestPreferences(forSuiteName: suite)
+        }
+        cleanupOrphanedTestPreferences(currentPID: ProcessInfo.processInfo.processIdentifier)
+        let testTmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PasteVault_TestRun_\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        if FileManager.default.fileExists(atPath: testTmpDir.path) {
+            try? FileManager.default.removeItem(at: testTmpDir)
+        }
+    }
+
     nonisolated public static func cleanupOrphanedTestPreferences(
         currentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
         preferencesDir: URL? = nil

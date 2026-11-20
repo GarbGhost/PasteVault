@@ -3821,6 +3821,10 @@ public struct ScreenshotEditorWorkspaceView: View {
                     return event
                 }
                 keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [engine, viewportState] event in
+                    guard !ClipboardMonitor.shared.isShowingFilePanel,
+                          !NSApp.windows.contains(where: { $0 is NSSavePanel && $0.isVisible }) else {
+                        return event
+                    }
                     let hostWin = viewportState.hostWindow ?? NSApp.keyWindow
                     let isHostTextView = hostWin?.firstResponder is NSTextView
                     guard ScreenshotEditorEngine.shouldProcessKeyEvent(

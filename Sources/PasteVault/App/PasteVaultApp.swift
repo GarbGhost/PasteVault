@@ -554,6 +554,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             print("[SYNTHETIC_SNIPPET_DELETE_RULES_VERIFIED] Single delete of pinned snippet allowed, bulk clear preserves pinned")
 
             print("[SYNTHETIC_TEST_PASSED] ALL CATEGORIES (INCLUDING FILES), 10 THEMES, 6 FONTS, RESCALED OPACITY, INTERACTIVE BLACKLIST, IMAGE COPY/PASTE, STORAGE & CONTENT TYPES, ACCESSIBILITY SERVICE, 11 SHORTCUTS, IMAGE CACHE, PNG SAVER & 500-ITEM PERF VERIFIED")
+            AppDefaults.cleanupCurrentTestPreferencesAndSync()
             exit(0)
         }
 
@@ -562,7 +563,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         app.setActivationPolicy(.accessory)
         app.delegate = delegate
-        app.run()
+        withExtendedLifetime(delegate) {
+            app.run()
+        }
     }
 
     public static func enforceSingleInstance() {
@@ -675,8 +678,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Закрываем любые возможные системные пустые окна, оставляя только главное окно Paste Vault
+        // Закрываем любые возможные системные пустые окна, оставляя главное окно Paste Vault и NSStatusBarWindow
         for window in NSApp.windows where window !== panel {
+            let className = String(describing: type(of: window))
+            let isStatusBarWindow = className.contains("StatusBar") || window.level.rawValue >= NSWindow.Level.statusBar.rawValue
+            guard !isStatusBarWindow else { continue }
             window.close()
         }
 
@@ -763,13 +769,40 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    public func makeVaultMenuBarIcon() -> NSImage {
+    public func makeVaultMenuBarIcon() -> NSImage? {
         let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size, flipped: true) { _ in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+        let image = NSImage(size: size)
+
+        for scale in [1, 2] {
+            let px = 18 * scale
+            guard let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: px,
+                pixelsHigh: px,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ),
+            let nsCtx = NSGraphicsContext(bitmapImageRep: rep) else {
+                return nil
+            }
+            rep.size = size
+
+            let prevCtx = NSGraphicsContext.current
+            NSGraphicsContext.current = nsCtx
+            defer { NSGraphicsContext.current = prevCtx }
+
+            let ctx = nsCtx.cgContext
             let primaryColor = NSColor.black.cgColor
 
             ctx.saveGState()
+            ctx.translateBy(x: 0, y: CGFloat(px))
+            ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             ctx.scaleBy(x: 18.0 / 100.0, y: 18.0 / 100.0)
 
             let cx: CGFloat = 53.5
@@ -887,23 +920,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             ctx.fillPath()
 
             ctx.restoreGState()
+            ctx.endTransparencyLayer()
             ctx.restoreGState()
-            return true
+
+            image.addRepresentation(rep)
         }
+
         image.size = size
         image.isTemplate = true
         return image
     }
 
     private func setupStatusBarItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.autosaveName = "PasteVaultStatusItem"
         item.isVisible = true
 
         if let button = item.button {
-            let customIcon = makeVaultMenuBarIcon()
             let resolvedIcon: NSImage
-            if customIcon.size.width > 0 && customIcon.size.height > 0 {
+            if let customIcon = makeVaultMenuBarIcon(),
+               customIcon.size.width > 0 && customIcon.size.height > 0 {
                 customIcon.size = NSSize(width: 18, height: 18)
                 customIcon.isTemplate = true
                 resolvedIcon = customIcon
@@ -915,9 +951,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 sfFallback.isTemplate = true
                 resolvedIcon = sfFallback
             } else {
-                customIcon.size = NSSize(width: 18, height: 18)
-                customIcon.isTemplate = true
-                resolvedIcon = customIcon
+                let empty = NSImage(size: NSSize(width: 18, height: 18))
+                empty.isTemplate = true
+                resolvedIcon = empty
             }
 
             button.image = resolvedIcon
@@ -1025,14 +1061,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         panel?.dismissPanel(restorePreviousApp: restorePreviousApp)
     }
 
-    /// Временно скрывает панель и окна перед вызовом нативного окна авторизации Apple
+    /// Временно скрывает панель и окна приложения (не затрагивая NSStatusBarWindow) перед вызовом нативного окна авторизации Apple
     public func hidePanelForAccessibilityPrompt() {
-        NSApp.windows.forEach { $0.orderOut(nil) }
+        for window in NSApp.windows {
+            let className = String(describing: type(of: window))
+            let isStatusBarWindow = className.contains("StatusBar") || window.level.rawValue >= NSWindow.Level.statusBar.rawValue
+            guard !isStatusBarWindow else { continue }
+            window.orderOut(nil)
+        }
         NSApp.deactivate()
     }
 
     /// Возвращает панель поверх всех окон при предоставлении Универсального доступа
     public func restorePanelAfterAccessibilityGranted() {
+        if statusItem == nil {
+            setupStatusBarItem()
+        }
+        statusItem?.isVisible = true
         if panel == nil {
             setupFloatingPanel()
         }

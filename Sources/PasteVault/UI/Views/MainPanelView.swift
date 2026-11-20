@@ -4484,8 +4484,13 @@ public struct MainPanelView: View {
 
     /// Асинхронно сбрасывает старую запись TCC при отсутствии прав и вызывает системный запрос Apple на предоставление Универсального доступа
     private func requestAccessibilityAccess() {
-        // 1) Сначала сними окна Paste Vault с экрана
-        NSApp.windows.forEach { $0.orderOut(nil) }
+        // 1) Сначала сними окна Paste Vault с экрана (не затрагивая NSStatusBarWindow)
+        for window in NSApp.windows {
+            let className = String(describing: type(of: window))
+            let isStatusBarWindow = className.contains("StatusBar") || window.level.rawValue >= NSWindow.Level.statusBar.rawValue
+            guard !isStatusBarWindow else { continue }
+            window.orderOut(nil)
+        }
         NSApp.deactivate()
 
         let showSystemPrompt: @Sendable () -> Void = {
@@ -8981,11 +8986,6 @@ public struct MainPanelView: View {
     }
 
     private func selectAppFromApplicationsFolder() {
-        guard let hostWindow = NSApp.windows.first(where: { $0.isVisible && ($0 is NSPanel || $0.className.contains("FloatingPanel")) }) ?? NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) else { return }
-
-        ClipboardMonitor.shared.isModalOverlayActive = true
-        NSApp.activate(ignoringOtherApps: true)
-
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -8996,25 +8996,12 @@ public struct MainPanelView: View {
         panel.prompt = tr("Выбрать", "Select")
         panel.message = tr("Выберите приложение для добавления в Чёрный список", "Choose an application to blacklist")
 
-        let targetLevel = NSWindow.Level(rawValue: max(Int(CGWindowLevelForKey(.popUpMenuWindow)), hostWindow.level.rawValue) + 2)
-        panel.level = targetLevel
-
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            ClipboardMonitor.shared.isShowingFilePanel = false
-            ClipboardMonitor.shared.isModalOverlayActive = false
-            hostWindow.makeKeyAndOrderFront(nil)
+        SystemFilePanelPresenter.present(panel) { response in
             if response == .OK, let selectedURL = panel.url {
                 if let bundle = Bundle(url: selectedURL), let bid = bundle.bundleIdentifier {
                     self.monitor.addBlacklistedApp(bundleID: bid)
                 }
             }
-        }
-
-        if hostWindow.attachedSheet == nil {
-            panel.beginSheetModal(for: hostWindow, completionHandler: handleResponse)
-        } else {
-            let response = panel.runModal()
-            handleResponse(response)
         }
     }
 
@@ -10068,11 +10055,9 @@ public struct MainPanelView: View {
         }
     }
 
-    /// Открывает системный NSOpenPanel для выбора фото с Mac и прикрепляет его к фрагменту (без runModal)
+    /// Открывает системный NSOpenPanel для выбора фото с Mac и прикрепляет его к фрагменту
     private func chooseSnippetPhotoFromMac() {
-        ClipboardMonitor.shared.isShowingFilePanel = true
         isMacroDropdownOpen = false
-        NSApp.activate()
 
         let openPanel = NSOpenPanel()
         openPanel.title = tr("Выбрать фото", "Choose Photo")
@@ -10081,15 +10066,8 @@ public struct MainPanelView: View {
         openPanel.canChooseDirectories = false
         openPanel.allowsMultipleSelection = false
         openPanel.allowedContentTypes = [.image, .png, .jpeg, .heic, .tiff, .gif, .webP]
-        openPanel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
 
-        let hostWindow = NSApp.windows.first(where: {
-            $0.isVisible && ($0.className.contains("FloatingPanel") || $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue)
-        })
-
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            ClipboardMonitor.shared.isShowingFilePanel = false
-            hostWindow?.makeKeyAndOrderFront(nil)
+        SystemFilePanelPresenter.present(openPanel) { response in
             guard response == .OK, let url = openPanel.url else { return }
             Task.detached(priority: .userInitiated) {
                 let image = NSImage(contentsOf: url)
@@ -10105,13 +10083,6 @@ public struct MainPanelView: View {
                     }
                 }
             }
-        }
-
-        if let hostWindow, hostWindow.attachedSheet == nil {
-            openPanel.beginSheetModal(for: hostWindow, completionHandler: handleResponse)
-        } else {
-            openPanel.begin(completionHandler: handleResponse)
-            openPanel.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -10400,8 +10371,6 @@ public struct MainPanelView: View {
     }
 
     private func saveImageToDisk(img: NSImage, defaultName: String) {
-        ClipboardMonitor.shared.isShowingFilePanel = true
-        NSApp.activate()
         let savePanel = NSSavePanel()
         if let pngType = UTType(filenameExtension: "png") {
             savePanel.allowedContentTypes = [pngType]
@@ -10409,7 +10378,6 @@ public struct MainPanelView: View {
         savePanel.canCreateDirectories = true
         savePanel.nameFieldStringValue = defaultName
         savePanel.prompt = tr("Сохранить", "Save")
-        savePanel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 5)
 
         let tiffData = img.tiffRepresentation
         let writePNG: @Sendable (URL) -> Void = { url in
@@ -10422,17 +10390,11 @@ public struct MainPanelView: View {
             }
         }
 
-        let targetWindow = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel && $0.className.contains("Popup")) }) ?? NSApp.keyWindow
-        if let window = targetWindow {
-            savePanel.beginSheetModal(for: window) { response in
-                ClipboardMonitor.shared.isShowingFilePanel = false
-                if response == .OK, let url = savePanel.url {
-                    writePNG(url)
-                }
+        let shouldRestoreLightboxOverlay = isImageLightboxPresented
+        SystemFilePanelPresenter.present(savePanel) { response in
+            if shouldRestoreLightboxOverlay && self.isImageLightboxPresented {
+                ClipboardMonitor.shared.isModalOverlayActive = true
             }
-        } else {
-            let response = savePanel.runModal()
-            ClipboardMonitor.shared.isShowingFilePanel = false
             if response == .OK, let url = savePanel.url {
                 writePNG(url)
             }
@@ -11407,14 +11369,14 @@ public struct MainPanelView: View {
         ClipboardMonitor.shared.isModalOverlayActive = true
     }
 
-    private func loadAndPresentBackupImportConfirmation(from fileURL: URL, password: String?, hostWindow: NSWindow) {
+    private func loadAndPresentBackupImportConfirmation(from fileURL: URL, password: String?, hostWindow: NSWindow?) {
         switch Self.decryptBackupArchiveForImport(from: fileURL, password: password) {
         case .success(let archive):
             self.presentImportConfirmation(for: archive, fileName: fileURL.lastPathComponent)
-            hostWindow.makeKeyAndOrderFront(nil)
+            hostWindow?.makeKeyAndOrderFront(nil)
         case .failure(let error):
             ClipboardMonitor.shared.isModalOverlayActive = false
-            hostWindow.makeKeyAndOrderFront(nil)
+            hostWindow?.makeKeyAndOrderFront(nil)
             if let backupError = error as? BackupManager.BackupArchiveError {
                 self.showBackupToast(backupError.localizedDescription, isError: true)
             } else {
@@ -11430,12 +11392,7 @@ public struct MainPanelView: View {
     }()
 
     private func performExportSavePanel() {
-        guard let hostWindow = NSApp.windows.first(where: { $0.isVisible && ($0 is NSPanel || $0.className.contains("FloatingPanel")) }) ?? NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) else { return }
-
         showExportModal = false
-        ClipboardMonitor.shared.isModalOverlayActive = true
-        ClipboardMonitor.shared.isShowingFilePanel = true
-        NSApp.activate()
 
         let panel = NSSavePanel()
         panel.title = tr("Сохранить резервную копию", "Save Backup Archive")
@@ -11447,14 +11404,7 @@ public struct MainPanelView: View {
         let accessory = buildBackupPasswordAccessoryView()
         panel.accessoryView = accessory.container
 
-        let targetLevel = NSWindow.Level(rawValue: max(Int(CGWindowLevelForKey(.popUpMenuWindow)), hostWindow.level.rawValue) + 2)
-        panel.level = targetLevel
-
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            ClipboardMonitor.shared.isShowingFilePanel = false
-            ClipboardMonitor.shared.isModalOverlayActive = false
-            hostWindow.makeKeyAndOrderFront(nil)
-
+        SystemFilePanelPresenter.present(panel) { response in
             if response == .OK, let targetURL = panel.url {
                 let archive = BackupManager.buildArchive(
                     items: self.monitor.items,
@@ -11484,22 +11434,9 @@ public struct MainPanelView: View {
                 }
             }
         }
-
-        if hostWindow.attachedSheet == nil {
-            panel.beginSheetModal(for: hostWindow, completionHandler: handleResponse)
-        } else {
-            let response = panel.runModal()
-            handleResponse(response)
-        }
     }
 
     private func openImportFilePicker() {
-        guard let hostWindow = NSApp.windows.first(where: { $0.isVisible && ($0 is NSPanel || $0.className.contains("FloatingPanel")) }) ?? NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) else { return }
-
-        ClipboardMonitor.shared.isModalOverlayActive = true
-        ClipboardMonitor.shared.isShowingFilePanel = true
-        NSApp.activate(ignoringOtherApps: true)
-
         let panel = NSOpenPanel()
         panel.title = tr("Выбрать файл резервной копии", "Select Backup Archive")
         panel.prompt = tr("Открыть", "Open")
@@ -11508,20 +11445,12 @@ public struct MainPanelView: View {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.json]
 
-        let targetLevel = NSWindow.Level(rawValue: max(Int(CGWindowLevelForKey(.popUpMenuWindow)), hostWindow.level.rawValue) + 2)
-        panel.level = targetLevel
+        SystemFilePanelPresenter.present(panel) { response in
+            guard response == .OK, let fileURL = panel.url else { return }
 
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            ClipboardMonitor.shared.isShowingFilePanel = false
-            panel.orderOut(nil)
-            guard response == .OK, let fileURL = panel.url else {
-                ClipboardMonitor.shared.isModalOverlayActive = false
-                hostWindow.makeKeyAndOrderFront(nil)
-                return
-            }
-
+            let hostWindow = SystemFilePanelPresenter.activeHostWindow()
             DispatchQueue.main.async {
-                hostWindow.makeKeyAndOrderFront(nil)
+                hostWindow?.makeKeyAndOrderFront(nil)
                 if BackupManager.fileRequiresPassword(at: fileURL) {
                     self.pendingImportFileURL = fileURL
                     self.pendingImportFileName = fileURL.lastPathComponent
@@ -11537,13 +11466,6 @@ public struct MainPanelView: View {
                     self.loadAndPresentBackupImportConfirmation(from: fileURL, password: nil, hostWindow: hostWindow)
                 }
             }
-        }
-
-        if hostWindow.attachedSheet == nil {
-            panel.beginSheetModal(for: hostWindow, completionHandler: handleResponse)
-        } else {
-            let response = panel.runModal()
-            handleResponse(response)
         }
     }
 
@@ -11761,7 +11683,7 @@ public struct MainPanelView: View {
                             .foregroundStyle(currentTheme.secondaryText)
 
                         ScrollView(.vertical) {
-                            let cleanNotes = UpdateService.formattedPopupReleaseNotes(from: notes)
+                            let cleanNotes = UpdateService.formattedPopupReleaseNotes(from: notes, language: currentLanguage)
                             Text(cleanNotes.isEmpty ? tr("Описание релиза доступно на странице GitHub Releases.", "Release notes are available on GitHub Releases.") : cleanNotes)
                                 .font(currentFont.font(size: 12, weight: .regular))
                                 .foregroundStyle(currentTheme.primaryText)
