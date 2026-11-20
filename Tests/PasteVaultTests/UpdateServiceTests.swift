@@ -31,10 +31,10 @@ final class UpdateServiceTests: XCTestCase {
     @MainActor
     func testPrivateOrOfflineStateDistinctFromUpToDate() {
         let releasesURL = UpdateService.releasesPageURL
-        let offline = UpdateService.UpdateState.privateOrOffline(currentVersion: "1.1.3", releasesURL: releasesURL)
-        let upToDate = UpdateService.UpdateState.upToDate(currentVersion: "1.1.3")
+        let offline = UpdateService.UpdateState.privateOrOffline(currentVersion: "1.1.4", releasesURL: releasesURL)
+        let upToDate = UpdateService.UpdateState.upToDate(currentVersion: "1.1.4")
         XCTAssertNotEqual(offline, upToDate, "404/offline state must stay distinct from verified upToDate state")
-        XCTAssertEqual(UpdateService.shared.currentVersion, "1.1.3")
+        XCTAssertEqual(UpdateService.shared.currentVersion, "1.1.4")
     }
 
     func testDetachedRelaunchCommandAndOpenPanelFlag() {
@@ -52,5 +52,50 @@ final class UpdateServiceTests: XCTestCase {
         XCTAssertTrue(AppDefaults.shared.bool(forKey: key))
         AppDefaults.shared.set(false, forKey: key)
         XCTAssertFalse(AppDefaults.shared.bool(forKey: key))
+    }
+
+    func testLocalizedPopupReleaseNotesExtractsRussianAndEnglishSections() {
+        let bilingualDetailsRelease = """
+        ### 🇷🇺 Русский
+
+        - **Иконка в строке меню:** значок PasteVault стабильно отображается на новом Mac.
+        - **Файловые диалоги:** выбор фото и экспорт карточек открываются поверх окна.
+
+        <details>
+        <summary><b>🇬🇧 English (click to expand)</b></summary>
+        <br>
+
+        - **Menu bar icon:** PasteVault icon stays visible on a clean Mac.
+        - **File dialogs:** photo picker and card export open cleanly above the panel.
+
+        </details>
+        """
+
+        let ruNotes = UpdateService.formattedPopupReleaseNotes(from: bilingualDetailsRelease, language: .ru)
+        XCTAssertTrue(ruNotes.contains("Иконка в строке меню: значок PasteVault стабильно отображается на новом Mac."))
+        XCTAssertTrue(ruNotes.contains("Файловые диалоги: выбор фото и экспорт карточек открываются поверх окна."))
+        XCTAssertFalse(ruNotes.contains("Menu bar icon"))
+        XCTAssertFalse(ruNotes.contains("<details"))
+
+        let enNotes = UpdateService.formattedPopupReleaseNotes(from: bilingualDetailsRelease, language: .en)
+        XCTAssertTrue(enNotes.contains("Menu bar icon: PasteVault icon stays visible on a clean Mac."))
+        XCTAssertTrue(enNotes.contains("File dialogs: photo picker and card export open cleanly above the panel."))
+        XCTAssertFalse(enNotes.contains("Иконка в строке меню"))
+        XCTAssertFalse(enNotes.contains("<details"))
+        XCTAssertFalse(enNotes.contains("</details>"))
+        XCTAssertFalse(enNotes.contains("<summary>"))
+        XCTAssertFalse(enNotes.contains("<b>"))
+        XCTAssertFalse(enNotes.contains("English (click to expand)"))
+
+        let headingBasedRelease = """
+        ### 🇷🇺 Русский
+        - Исправлено окно сохранения.
+
+        ### 🇬🇧 English
+        - Fixed save dialog positioning.
+        """
+        let enHeadingNotes = UpdateService.formattedPopupReleaseNotes(from: headingBasedRelease, language: .en)
+        XCTAssertTrue(enHeadingNotes.contains("Fixed save dialog positioning."))
+        XCTAssertFalse(enHeadingNotes.contains("Исправлено окно сохранения"))
     }
 }

@@ -273,8 +273,8 @@ final class CardFileExporterTests: XCTestCase {
         )
         XCTAssertEqual(
             UpdateService.shared.currentVersion,
-            "1.1.3",
-            "Текущая версия приложения в UpdateService должна быть 1.1.3"
+            "1.1.4",
+            "Текущая версия приложения в UpdateService должна быть 1.1.4"
         )
     }
 
@@ -533,5 +533,44 @@ final class CardFileExporterTests: XCTestCase {
         XCTAssertLessThan(srgb.redComponent, 0.1)
         XCTAssertLessThan(srgb.greenComponent, 0.1)
         XCTAssertLessThan(srgb.blueComponent, 0.1)
+    }
+
+    // MARK: - 17. HTML5 Zero-Network Export (.html)
+    func testHTMLExportFormatMetadataAndEscaping() throws {
+        XCTAssertEqual(CardExportFormat.html.extensionName, "html")
+        XCTAssertEqual(CardExportFormat.html.title(in: .ru), "HTML-страница (.html)")
+        XCTAssertEqual(CardExportFormat.html.title(in: .en), "HTML Page (.html)")
+
+        let fileName = CardFileExporter.defaultFileName(for: "Заметка про интерфейс\nВторая строка", format: .html)
+        XCTAssertEqual(fileName, "Заметка_про_интерфейс.html")
+
+        let noteText = "A & B <script>alert(\"xss\" & 'test')</script>\n\nВторой абзац"
+        let data = try CardFileExporter.generateExportData(from: noteText, format: .html, isCode: false)
+        let html = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+        XCTAssertTrue(html.hasPrefix("<!DOCTYPE html>"))
+        XCTAssertTrue(html.contains("@media (prefers-color-scheme: dark)"))
+        XCTAssertTrue(html.contains("-apple-system"))
+        XCTAssertTrue(html.contains("A &amp; B &lt;script&gt;alert(&quot;xss&quot; &amp; &#39;test&#39;)&lt;/script&gt;"))
+        XCTAssertFalse(html.contains("<script>"))
+        XCTAssertFalse(html.contains("fonts.googleapis.com"))
+        XCTAssertFalse(html.contains("cdn."))
+    }
+
+    func testHTMLExportSpecialContentForURLColorAndCode() throws {
+        let urlData = try CardFileExporter.generateExportData(from: "https://github.com/GarbGhost/PasteVault?q=1&v=2", format: .html)
+        let urlHTML = try XCTUnwrap(String(data: urlData, encoding: .utf8))
+        XCTAssertTrue(urlHTML.contains("<a class=\"link-card\" href=\"https://github.com/GarbGhost/PasteVault?q=1&amp;v=2\""))
+
+        let colorData = try CardFileExporter.generateExportData(from: "#1AC773", format: .html)
+        let colorHTML = try XCTUnwrap(String(data: colorData, encoding: .utf8))
+        XCTAssertTrue(colorHTML.contains("class=\"color-swatch\""))
+        XCTAssertTrue(colorHTML.contains("rgba(26, 199, 115, 1.000)"))
+        XCTAssertTrue(colorHTML.contains("#1AC773"))
+
+        let codeData = try CardFileExporter.generateExportData(from: "{\"ok\": true, \"tag\": \"<v1>\"}", format: .html, isCode: true)
+        let codeHTML = try XCTUnwrap(String(data: codeData, encoding: .utf8))
+        XCTAssertTrue(codeHTML.contains("<pre><code>"))
+        XCTAssertTrue(codeHTML.contains("&lt;v1&gt;"))
     }
 }
