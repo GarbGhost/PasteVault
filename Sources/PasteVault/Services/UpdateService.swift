@@ -70,11 +70,11 @@ public final class UpdateService: ObservableObject {
 
     public var currentVersion: String {
         if let bundleID = Bundle.main.bundleIdentifier, bundleID != "com.pastevault.app" {
-            return "1.1.3"
+            return "1.1.4"
         }
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.3"
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.4"
         if Bundle.main.bundlePath.contains("xctest") || raw.isEmpty {
-            return "1.1.3"
+            return "1.1.4"
         }
         return raw
     }
@@ -251,30 +251,35 @@ public final class UpdateService: ObservableObject {
         }
     }
 
-    /// Очистка текста описания релиза для аккуратного компактного показа в попапе обновления
-    nonisolated public static func formattedPopupReleaseNotes(from rawBody: String) -> String {
+    /// Очистка текста описания релиза для аккуратного компактного показа в попапе обновления с учётом языка интерфейса
+    nonisolated public static func formattedPopupReleaseNotes(
+        from rawBody: String,
+        language: AppLanguage = .current
+    ) -> String {
+        let content = extractLocalizedReleaseSection(from: rawBody, language: language)
+
         let stopMarkers = [
             "### 📦 Установка", "### 📦 Installing",
             "## 📦 Установка", "## 📦 Installing",
             "📦 Установка", "📦 Installing",
             "### Установка", "### Installing",
             "## Установка", "## Installing",
-            "<details", "Checksums", "SHA-256",
+            "### 🔐 Checksums", "## 🔐 Checksums",
+            "Checksums", "SHA-256",
             "## [v", "### [v"
         ]
 
-        var cutoffIndex = rawBody.endIndex
-        let lowerBody = rawBody.lowercased()
+        var cutoffIndex = content.endIndex
+        let lowerContent = content.lowercased()
         for marker in stopMarkers {
-            if let range = lowerBody.range(of: marker.lowercased()) {
-                if range.lowerBound < cutoffIndex {
-                    cutoffIndex = range.lowerBound
-                }
+            if let range = lowerContent.range(of: marker.lowercased()), range.lowerBound < cutoffIndex {
+                cutoffIndex = range.lowerBound
             }
         }
-        let content = String(rawBody[..<cutoffIndex])
+        let trimmedSection = String(content[..<cutoffIndex])
+        let sanitizedHTML = stripReleaseHTMLTags(trimmedSection)
 
-        let lines = content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = sanitizedHTML.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
         var resultItems: [String] = []
         var currentItem: String = ""
 
@@ -287,8 +292,8 @@ public final class UpdateService: ObservableObject {
                 continue
             }
 
-            // Пропускаем markdown-заголовки
-            if line.hasPrefix("#") {
+            // Пропускаем markdown-заголовки и разделители
+            if line.hasPrefix("#") || line == "---" {
                 if !currentItem.isEmpty {
                     resultItems.append(currentItem)
                     currentItem = ""
@@ -336,13 +341,106 @@ public final class UpdateService: ObservableObject {
 
         let bullets = resultItems.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { "• \($0)" }
         if bullets.isEmpty {
-            let fallback = content.replacingOccurrences(of: "#", with: "")
+            let fallback = sanitizedHTML.replacingOccurrences(of: "#", with: "")
                 .replacingOccurrences(of: "**", with: "")
                 .replacingOccurrences(of: "`", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return fallback.isEmpty ? "" : fallback
         }
         return bullets.joined(separator: "\n\n")
+    }
+
+    nonisolated private static func extractLocalizedReleaseSection(from rawBody: String, language: AppLanguage) -> String {
+        if language == .en {
+            // 1. Ищем <details>...</details> с английским summary/содержимым
+            if let detailsRegex = try? NSRegularExpression(
+                pattern: #"<details\b[^>]*>(.*?)</details>"#,
+                options: [.caseInsensitive, .dotMatchesLineSeparators]
+            ) {
+                let nsRaw = rawBody as NSString
+                let matches = detailsRegex.matches(in: rawBody, range: NSRange(location: 0, length: nsRaw.length))
+                for match in matches where match.numberOfRanges > 1 {
+                    let inner = nsRaw.substring(with: match.range(at: 1))
+                    if inner.localizedCaseInsensitiveContains("english") {
+                        return removeSummaryTagBlock(inner)
+                    }
+                }
+            }
+
+            // 2. Ищем markdown-заголовок вида ### English / ### 🇬🇧 English
+            let lines = rawBody.components(separatedBy: .newlines)
+            if let startIdx = lines.firstIndex(where: { isEnglishHeadingLine($0) }) {
+                var collected: [String] = []
+                for idx in (startIdx + 1)..<lines.count {
+                    let trimmed = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if isLanguageOrMajorBoundaryHeading(trimmed) {
+                        break
+                    }
+                    collected.append(lines[idx])
+                }
+                let joined = collected.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !joined.isEmpty {
+                    return joined
+                }
+            }
+
+            return rawBody
+        }
+
+        // Для русского языка (ru): отсекаем <details> и английскую секцию, сохраняя русскую часть
+        var ruSection = rawBody
+        let ruCutMarkers = [
+            "<details",
+            "### 🇬🇧 English", "## 🇬🇧 English",
+            "### English", "## English"
+        ]
+        let lowerRu = ruSection.lowercased()
+        var earliestCut = ruSection.endIndex
+        for marker in ruCutMarkers {
+            if let range = lowerRu.range(of: marker.lowercased()), range.lowerBound < earliestCut {
+                earliestCut = range.lowerBound
+            }
+        }
+        ruSection = String(ruSection[..<earliestCut])
+        return ruSection
+    }
+
+    nonisolated private static func isEnglishHeadingLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("#") else { return false }
+        let title = trimmed.drop(while: { $0 == "#" || $0 == " " }).lowercased()
+        return title == "english" || title == "🇬🇧 english" || title.hasPrefix("🇬🇧 english") || title.hasPrefix("english ")
+    }
+
+    nonisolated private static func isLanguageOrMajorBoundaryHeading(_ trimmedLine: String) -> Bool {
+        guard trimmedLine.hasPrefix("#") else { return false }
+        let lower = trimmedLine.lowercased()
+        return lower.contains("русск") || lower.contains("checksum") || lower.contains("sha-256")
+            || lower.contains("установка") || lower.contains("installing")
+    }
+
+    nonisolated private static func removeSummaryTagBlock(_ text: String) -> String {
+        guard let summaryRegex = try? NSRegularExpression(
+            pattern: #"<summary\b[^>]*>.*?</summary>"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return text
+        }
+        let range = NSRange(location: 0, length: (text as NSString).length)
+        return summaryRegex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
+    }
+
+    nonisolated private static func stripReleaseHTMLTags(_ text: String) -> String {
+        var cleaned = removeSummaryTagBlock(text)
+        let lineBreakTags = ["<br>", "<br/>", "<br />", "</p>", "</li>"]
+        for tag in lineBreakTags {
+            cleaned = cleaned.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
+        }
+        if let tagRegex = try? NSRegularExpression(pattern: #"</?[a-zA-Z][^>]*>"#, options: []) {
+            let range = NSRange(location: 0, length: (cleaned as NSString).length)
+            cleaned = tagRegex.stringByReplacingMatches(in: cleaned, range: range, withTemplate: "")
+        }
+        return cleaned
     }
 
     public func dismissModal() {
