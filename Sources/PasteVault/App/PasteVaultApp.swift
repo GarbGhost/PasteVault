@@ -680,9 +680,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Закрываем любые возможные системные пустые окна, оставляя главное окно Paste Vault и NSStatusBarWindow
         for window in NSApp.windows where window !== panel {
-            let className = String(describing: type(of: window))
-            let isStatusBarWindow = className.contains("StatusBar") || window.level.rawValue >= NSWindow.Level.statusBar.rawValue
-            guard !isStatusBarWindow else { continue }
+            guard !SystemFilePanelPresenter.isStatusBarWindow(window) else { continue }
             window.close()
         }
 
@@ -1063,10 +1061,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Временно скрывает панель и окна приложения (не затрагивая NSStatusBarWindow) перед вызовом нативного окна авторизации Apple
     public func hidePanelForAccessibilityPrompt() {
-        for window in NSApp.windows {
-            let className = String(describing: type(of: window))
-            let isStatusBarWindow = className.contains("StatusBar") || window.level.rawValue >= NSWindow.Level.statusBar.rawValue
-            guard !isStatusBarWindow else { continue }
+        for window in NSApp.windows where !SystemFilePanelPresenter.isStatusBarWindow(window) {
             window.orderOut(nil)
         }
         NSApp.deactivate()

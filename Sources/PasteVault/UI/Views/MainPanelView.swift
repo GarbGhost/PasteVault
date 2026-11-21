@@ -4485,10 +4485,7 @@ public struct MainPanelView: View {
     /// Асинхронно сбрасывает старую запись TCC при отсутствии прав и вызывает системный запрос Apple на предоставление Универсального доступа
     private func requestAccessibilityAccess() {
         // 1) Сначала сними окна Paste Vault с экрана (не затрагивая NSStatusBarWindow)
-        for window in NSApp.windows {
-            let className = String(describing: type(of: window))
-            let isStatusBarWindow = className.contains("StatusBar") || window.level.rawValue >= NSWindow.Level.statusBar.rawValue
-            guard !isStatusBarWindow else { continue }
+        for window in NSApp.windows where !SystemFilePanelPresenter.isStatusBarWindow(window) {
             window.orderOut(nil)
         }
         NSApp.deactivate()
@@ -5872,6 +5869,7 @@ public struct MainPanelView: View {
                                       let rawUrl = URL(string: currentItem.textPreview.trimmingCharacters(in: .whitespacesAndNewlines)) {
                                 HStack(spacing: 10) {
                                     Button {
+                                        AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
                                         NSWorkspace.shared.open(rawUrl)
                                     } label: {
                                         HStack(spacing: 5) {

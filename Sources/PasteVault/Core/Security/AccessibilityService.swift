@@ -115,6 +115,17 @@ public enum AccessibilityService {
 
     /// Открывает системные настройки ровно на странице «Конфиденциальность → Универсальный доступ» БЕЗ prompt
     public static func openSystemSettingsOnly() {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
+                }
+            }
+        }
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }

@@ -829,14 +829,29 @@ public enum SystemFilePanelPresenter {
         NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
     }
 
+    public static func isStatusBarWindow(_ window: NSWindow) -> Bool {
+        String(describing: type(of: window)).contains("StatusBar")
+            || window === AppDelegate.shared?.statusItem?.button?.window
+    }
+
     public static func activeHostWindow() -> NSWindow? {
         NSApp.windows.first(where: { $0 is FloatingPanel<MainPanelView> && $0.isVisible })
             ?? NSApp.windows.first(where: { $0.isVisible && $0.className.contains("FloatingPanel") })
             ?? NSApp.keyWindow
-            ?? NSApp.windows.first(where: {
-                let className = String(describing: type(of: $0))
-                return $0.isVisible && !className.contains("StatusBar") && $0.level.rawValue < NSWindow.Level.statusBar.rawValue
-            })
+            ?? NSApp.windows.first(where: { $0.isVisible && !isStatusBarWindow($0) })
+    }
+
+    @discardableResult
+    public static func temporarilyLowerHostLevel(_ hostWindow: NSWindow?) -> NSWindow.Level? {
+        guard let hostWindow else { return nil }
+        let saved = hostWindow.level
+        hostWindow.level = .normal
+        return saved
+    }
+
+    public static func restoreHostLevel(_ hostWindow: NSWindow?, to savedLevel: NSWindow.Level?) {
+        guard let hostWindow else { return }
+        hostWindow.level = savedLevel ?? .popUpMenu
     }
 
     public static func present(
@@ -849,34 +864,33 @@ public enum SystemFilePanelPresenter {
         ClipboardMonitor.shared.isModalOverlayActive = true
 
         let targetHost = hostWindow ?? activeHostWindow()
-        let targetLevel = panelLevel
-        panel.level = targetLevel
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
 
         let runPanel: @MainActor () -> Void = {
-            panel.level = targetLevel
+            let savedLevel = temporarilyLowerHostLevel(targetHost)
+            var didCleanup = false
+            defer {
+                if !didCleanup {
+                    restoreHostLevel(targetHost, to: savedLevel)
+                    ClipboardMonitor.shared.isShowingFilePanel = false
+                    ClipboardMonitor.shared.isModalOverlayActive = false
+                }
+            }
+
             panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
             NSApp.activate(ignoringOtherApps: true)
-            panel.makeKeyAndOrderFront(nil)
-            panel.orderFrontRegardless()
-
-            DispatchQueue.main.async {
-                guard panel.isVisible else { return }
-                panel.level = targetLevel
-                panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-                NSApp.activate(ignoringOtherApps: true)
-                panel.makeKeyAndOrderFront(nil)
-                panel.orderFrontRegardless()
-            }
 
             let response = panel.runModal()
             panel.orderOut(nil)
 
+            didCleanup = true
+            restoreHostLevel(targetHost, to: savedLevel)
             ClipboardMonitor.shared.isShowingFilePanel = false
             ClipboardMonitor.shared.isModalOverlayActive = false
 
-            if let targetHost {
-                targetHost.makeKeyAndOrderFront(nil)
+            if let targetHost, targetHost.isVisible {
+                targetHost.orderFrontRegardless()
+                targetHost.makeKey()
             }
             onComplete(response)
         }
