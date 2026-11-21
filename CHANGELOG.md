@@ -1,5 +1,32 @@
 # Changelog / История изменений
 
+## [1.1.5] - 2026-11-21
+
+### 🇷🇺 Русский
+
+- Системные окна выбора и сохранения файлов, а также диалоги подтверждения больше не открываются позади главного окна PasteVault.
+- Запрос Универсального доступа, переход в Системные настройки и открытие ссылок в браузере теперь автоматически скрывают панель, сохраняя значок в строке меню.
+- Название формата экспорта `.html (HTML-страница)` приведено к единому виду со всеми остальными форматами.
+
+<details>
+<summary><b>🇬🇧 English (click to expand)</b></summary>
+<br>
+
+- System file open/save panels and confirmation dialogs no longer appear behind the main PasteVault window.
+- Requesting Accessibility permission, opening System Settings, and launching browser links now automatically hide the panel while keeping the menu bar icon visible.
+- Unified the HTML export format label to `.html (HTML Page)` to match all other export formats.
+
+</details>
+
+### 🔐 Checksums (`SHA-256`)
+
+| File | Size | SHA-256 |
+| :--- | :--- | :--- |
+| **`PasteVault_v1.1.5_Universal.dmg`** | `14.4 MB` | `5bd62e62a04c5ae3f865d439b752059a5b4e7099d161d4518ac0aa930095c795` |
+| **`PasteVault_v1.1.5_Universal.zip`** | `11.7 MB` | `1e675b0eef742adb28412f077d8c90495fd2e2813c8f46d10b77e01d9e91aa68` |
+
+---
+
 ## [1.1.4] - 2026-11-20
 
 ### 🇷🇺 Русский
