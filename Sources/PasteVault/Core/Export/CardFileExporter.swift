@@ -26,7 +26,7 @@ public enum CardExportFormat: String, CaseIterable, Identifiable, Sendable {
         case .docx:
             return language == .en ? ".docx (Word Document)" : ".docx (Документ Word)"
         case .html:
-            return language == .en ? "HTML Page (.html)" : "HTML-страница (.html)"
+            return language == .en ? ".html (HTML Page)" : ".html (HTML-страница)"
         case .txt:
             return language == .en ? ".txt (Text File)" : ".txt (Текстовый файл)"
         case .conf:
