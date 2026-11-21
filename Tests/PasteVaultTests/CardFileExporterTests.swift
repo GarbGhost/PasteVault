@@ -273,8 +273,8 @@ final class CardFileExporterTests: XCTestCase {
         )
         XCTAssertEqual(
             UpdateService.shared.currentVersion,
-            "1.1.4",
-            "Текущая версия приложения в UpdateService должна быть 1.1.4"
+            "1.1.5",
+            "Текущая версия приложения в UpdateService должна быть 1.1.5"
         )
     }
 
@@ -538,8 +538,8 @@ final class CardFileExporterTests: XCTestCase {
     // MARK: - 17. HTML5 Zero-Network Export (.html)
     func testHTMLExportFormatMetadataAndEscaping() throws {
         XCTAssertEqual(CardExportFormat.html.extensionName, "html")
-        XCTAssertEqual(CardExportFormat.html.title(in: .ru), "HTML-страница (.html)")
-        XCTAssertEqual(CardExportFormat.html.title(in: .en), "HTML Page (.html)")
+        XCTAssertEqual(CardExportFormat.html.title(in: .ru), ".html (HTML-страница)")
+        XCTAssertEqual(CardExportFormat.html.title(in: .en), ".html (HTML Page)")
 
         let fileName = CardFileExporter.defaultFileName(for: "Заметка про интерфейс\nВторая строка", format: .html)
         XCTAssertEqual(fileName, "Заметка_про_интерфейс.html")

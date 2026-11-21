@@ -109,4 +109,42 @@ final class CleanLaunchTests: XCTestCase {
         AppDefaults.removeTestPreferences(forSuiteName: suiteName, preferencesDir: tempPrefsDir)
         XCTAssertFalse(FileManager.default.fileExists(atPath: livePlist.path), "removeTestPreferences must delete target test .plist")
     }
+
+    func testPopUpMenuLevelWindowIsNotClassifiedAsStatusBarWindow() {
+        let panelWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 150),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panelWindow.level = .popUpMenu
+        XCTAssertGreaterThanOrEqual(panelWindow.level.rawValue, NSWindow.Level.statusBar.rawValue)
+        XCTAssertFalse(
+            SystemFilePanelPresenter.isStatusBarWindow(panelWindow),
+            "A FloatingPanel-level (.popUpMenu = 101) window must NOT be classified as NSStatusBarWindow"
+        )
+    }
+
+    func testHostWindowTemporaryLevelLoweringAndRestoration() {
+        let hostWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 150),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        hostWindow.level = .popUpMenu
+        XCTAssertEqual(hostWindow.level, .popUpMenu)
+
+        let savedLevel = SystemFilePanelPresenter.temporarilyLowerHostLevel(hostWindow)
+        XCTAssertEqual(savedLevel, .popUpMenu)
+        XCTAssertEqual(hostWindow.level, .normal)
+        XCTAssertLessThan(
+            hostWindow.level.rawValue,
+            NSWindow.Level.modalPanel.rawValue,
+            "Host window must sit strictly below modalPanel (8) while system file panel is active"
+        )
+
+        SystemFilePanelPresenter.restoreHostLevel(hostWindow, to: savedLevel)
+        XCTAssertEqual(hostWindow.level, .popUpMenu, "Host window level must restore to .popUpMenu (101)")
+    }
 }
