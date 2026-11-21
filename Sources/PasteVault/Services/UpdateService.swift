@@ -70,11 +70,11 @@ public final class UpdateService: ObservableObject {
 
     public var currentVersion: String {
         if let bundleID = Bundle.main.bundleIdentifier, bundleID != "com.pastevault.app" {
-            return "1.1.4"
+            return "1.1.5"
         }
-        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.4"
+        let raw = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.5"
         if Bundle.main.bundlePath.contains("xctest") || raw.isEmpty {
-            return "1.1.4"
+            return "1.1.5"
         }
         return raw
     }
@@ -589,6 +589,7 @@ public final class UpdateService: ObservableObject {
                 isInstallingUpdate = false
                 installProgress = 0.0
                 if !silent {
+                    AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
                     NSWorkspace.shared.open(downloadURL)
                 }
                 return
@@ -696,6 +697,7 @@ public final class UpdateService: ObservableObject {
     }
 
     public func openDownloadOrReleasePage() {
+        AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
         switch state {
         case .updateAvailable(_, let downloadURL, _, _):
             NSWorkspace.shared.open(downloadURL)
@@ -707,6 +709,7 @@ public final class UpdateService: ObservableObject {
     }
 
     public func openReleasePage() {
+        AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
         switch state {
         case .updateAvailable(_, _, let releasePageURL, _):
             NSWorkspace.shared.open(releasePageURL)
@@ -718,6 +721,7 @@ public final class UpdateService: ObservableObject {
     }
 
     public func openProjectPage() {
+        AppDelegate.shared?.dismissFloatingPanel(restorePreviousApp: false)
         NSWorkspace.shared.open(Self.projectPageURL)
     }
 }

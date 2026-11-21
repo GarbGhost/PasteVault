@@ -204,7 +204,7 @@ public struct BackupSettingsPayload: Codable, Equatable, Sendable {
 public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
     public var version: Int = 1
     public var createdAt: Date = Date()
-    public var appVersion: String = "1.1.4"
+    public var appVersion: String = "1.1.5"
     public var clipboardItems: [BackupClipboardItem]?
     public var snippets: [QuickSnippetItem]?
     public var snippetCategories: [SnippetCategoryRecord]?
@@ -213,7 +213,7 @@ public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
     public init(
         version: Int = 1,
         createdAt: Date = Date(),
-        appVersion: String = "1.1.4",
+        appVersion: String = "1.1.5",
         clipboardItems: [BackupClipboardItem]? = nil,
         snippets: [QuickSnippetItem]? = nil,
         snippetCategories: [SnippetCategoryRecord]? = nil,
@@ -236,7 +236,7 @@ public struct PasteVaultBackupArchive: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
-        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.1.4"
+        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.1.5"
         self.clipboardItems = try container.decodeIfPresent([BackupClipboardItem].self, forKey: .clipboardItems)
         self.snippets = try container.decodeIfPresent([QuickSnippetItem].self, forKey: .snippets)
         self.snippetCategories = try container.decodeIfPresent([SnippetCategoryRecord].self, forKey: .snippetCategories)
@@ -419,7 +419,7 @@ public enum BackupManager {
         return PasteVaultBackupArchive(
             version: 2,
             createdAt: Date(),
-            appVersion: (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.4",
+            appVersion: (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.5",
             clipboardItems: archiveItems,
             snippets: archiveSnippets,
             snippetCategories: archiveCategories,
